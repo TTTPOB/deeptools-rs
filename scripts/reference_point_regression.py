@@ -11,17 +11,18 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import json
 import math
+import resource
 import shutil
 import subprocess
 import sys
 import time
 import urllib.request
-import resource
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Sequence, Tuple
+from typing import List, Sequence, Tuple
 
 
 @dataclass
@@ -114,6 +115,11 @@ def parse_args() -> argparse.Namespace:
         help="Keep existing outputs instead of regenerating them",
     )
     parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Skip cache and always run commands fresh",
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Print executed commands and comparison details",
@@ -133,6 +139,78 @@ class CommandTiming:
     user_seconds: float
     system_seconds: float
 
+    def to_dict(self) -> dict:
+        return {
+            "wall_seconds": self.wall_seconds,
+            "user_seconds": self.user_seconds,
+            "system_seconds": self.system_seconds,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "CommandTiming":
+        return cls(
+            wall_seconds=data["wall_seconds"],
+            user_seconds=data["user_seconds"],
+            system_seconds=data["system_seconds"],
+        )
+
+
+@dataclass
+class CachedResult:
+    command_hash: str
+    output_path: str
+    timing: CommandTiming
+    timestamp: float
+
+    def to_dict(self) -> dict:
+        return {
+            "command_hash": self.command_hash,
+            "output_path": self.output_path,
+            "timing": self.timing.to_dict(),
+            "timestamp": self.timestamp,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "CachedResult":
+        return cls(
+            command_hash=data["command_hash"],
+            output_path=data["output_path"],
+            timing=CommandTiming.from_dict(data["timing"]),
+            timestamp=data["timestamp"],
+        )
+
+
+def _calculate_resource_usage(
+    usage_before_self, usage_before_children, usage_after_self, usage_after_children
+) -> tuple[float, float]:
+    """Calculate user and system seconds from resource usage snapshots."""
+    user_seconds = (usage_after_children.ru_utime - usage_before_children.ru_utime) + (
+        usage_after_self.ru_utime - usage_before_self.ru_utime
+    )
+    system_seconds = (
+        usage_after_children.ru_stime - usage_before_children.ru_stime
+    ) + (usage_after_self.ru_stime - usage_before_self.ru_stime)
+    return user_seconds, system_seconds
+
+
+def _create_timing(
+    start: float,
+    end: float,
+    usage_before_self,
+    usage_before_children,
+    usage_after_self,
+    usage_after_children,
+) -> CommandTiming:
+    """Create a CommandTiming object from resource usage snapshots."""
+    user_seconds, system_seconds = _calculate_resource_usage(
+        usage_before_self, usage_before_children, usage_after_self, usage_after_children
+    )
+    return CommandTiming(
+        wall_seconds=end - start,
+        user_seconds=user_seconds,
+        system_seconds=system_seconds,
+    )
+
 
 def run_command(
     command: Sequence[str], *, cwd: Path | None = None, verbose: bool = False
@@ -145,6 +223,22 @@ def run_command(
     try:
         subprocess.run(command, cwd=cwd, check=True)
     except subprocess.CalledProcessError as exc:
+        end = time.perf_counter()
+        usage_after_self = resource.getrusage(resource.RUSAGE_SELF)
+        usage_after_children = resource.getrusage(resource.RUSAGE_CHILDREN)
+
+        timing = _create_timing(
+            start,
+            end,
+            usage_before_self,
+            usage_before_children,
+            usage_after_self,
+            usage_after_children,
+        )
+
+        # Print performance info even on failure
+        print(f"⏱️  Failed command timing: {format_timing('', timing)}", file=sys.stderr)
+
         raise CommandError(
             f"Command failed with exit code {exc.returncode}: {' '.join(command)}"
         ) from exc
@@ -152,26 +246,137 @@ def run_command(
     usage_after_self = resource.getrusage(resource.RUSAGE_SELF)
     usage_after_children = resource.getrusage(resource.RUSAGE_CHILDREN)
 
-    user_seconds = (usage_after_children.ru_utime - usage_before_children.ru_utime) + (
-        usage_after_self.ru_utime - usage_before_self.ru_utime
-    )
-    system_seconds = (
-        usage_after_children.ru_stime - usage_before_children.ru_stime
-    ) + (usage_after_self.ru_stime - usage_before_self.ru_stime)
-
-    return CommandTiming(
-        wall_seconds=end - start,
-        user_seconds=user_seconds,
-        system_seconds=system_seconds,
+    return _create_timing(
+        start,
+        end,
+        usage_before_self,
+        usage_before_children,
+        usage_after_self,
+        usage_after_children,
     )
 
 
-def format_timing(label: str, timing: CommandTiming) -> str:
+def compute_params_hash(command: Sequence[str]) -> str:
+    """
+    Compute a hash of command parameters excluding the output filename.
+
+    This filters out --outFileName and its argument to create a stable hash
+    based only on the computation parameters.
+    """
+    filtered_cmd = []
+    skip_next = False
+
+    for i, part in enumerate(command):
+        if skip_next:
+            skip_next = False
+            continue
+
+        if part == "--outFileName":
+            skip_next = True  # Skip the next argument (the filename)
+            continue
+
+        filtered_cmd.append(str(part))
+
+    cmd_str = " ".join(filtered_cmd)
+    return hashlib.sha256(cmd_str.encode()).hexdigest()[
+        :16
+    ]  # Use shorter hash for filenames
+
+
+def load_cache(cache_file: Path) -> CachedResult | None:
+    """Load a single cache entry from disk."""
+    if not cache_file.exists():
+        return None
+    try:
+        with open(cache_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return CachedResult.from_dict(data)
+    except (json.JSONDecodeError, KeyError, ValueError) as exc:
+        print(
+            f"Warning: Failed to load cache from {cache_file}: {exc}", file=sys.stderr
+        )
+        return None
+
+
+def save_cache(cached_result: CachedResult, cache_file: Path) -> None:
+    """Save a single cache entry to disk."""
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(cache_file, "w", encoding="utf-8") as f:
+        json.dump(cached_result.to_dict(), f, indent=2)
+
+
+def run_command_cached(
+    command: Sequence[str],
+    output_path: Path,
+    cache_dir: Path,
+    *,
+    cwd: Path | None = None,
+    verbose: bool = False,
+    skip_cache: bool = False,
+    enable_cache: bool = True,
+) -> tuple[CommandTiming, bool]:
+    """
+    Run a command with caching support.
+
+    Args:
+        enable_cache: If False, always run the command without checking or saving cache.
+                      Used to disable caching for Rust implementation.
+
+    Returns:
+        tuple of (CommandTiming, from_cache: bool)
+    """
+    cmd_hash = compute_params_hash(command)
+    cache_file = cache_dir / f"{cmd_hash}.json"
+    use_cache = enable_cache and not skip_cache
+
+    if use_cache:
+        cached = load_cache(cache_file)
+
+        if cached is not None:
+            # Check if output file still exists and is newer than cache entry
+            if Path(cached.output_path).exists():
+                print("🔄 Using cached result")
+                if verbose:
+                    print(f"   Cache file: {cache_file}")
+                    print(f"   Cached output: {cached.output_path}")
+                print("   " + format_timing("Cached timing", cached.timing))
+                return cached.timing, True
+            else:
+                print(f"⚠️  Cache hit but output file missing: {cached.output_path}")
+
+    # Run the command
+    if enable_cache:
+        print("🚀 Running command")
+        if verbose:
+            print(f"   Cache file: {cache_file}")
+    else:
+        print("🚀 Running command (cache disabled)")
+    timing = run_command(command, cwd=cwd, verbose=verbose)
+    print("   " + format_timing("Execution timing", timing))
+
+    # Save to cache only if caching is enabled
+    if use_cache:
+        cached_result = CachedResult(
+            command_hash=cmd_hash,
+            output_path=str(output_path.resolve()),
+            timing=timing,
+            timestamp=time.time(),
+        )
+        save_cache(cached_result, cache_file)
+        if verbose:
+            print(f"💾 Cached result to {cache_file}")
+
+    return timing, False
+
+
+def format_timing(label: str, timing: CommandTiming, from_cache: bool = False) -> str:
+    cache_marker = " [FROM CACHE]" if from_cache else ""
     return (
         f"{label}: "
         f"wall={timing.wall_seconds:.2f}s, "
         f"user={timing.user_seconds:.2f}s, "
         f"sys={timing.system_seconds:.2f}s"
+        f"{cache_marker}"
     )
 
 
@@ -352,6 +557,7 @@ def compare_matrices(
     success = not issues
     return success, max_abs_delta, issues
 
+
 # update: use larger dataset and more complex conditions
 # bw files:
 # encode:
@@ -462,6 +668,39 @@ def split_bed_file(
     return region_paths
 
 
+def _load_timing_if_kept(
+    output: Path,
+    params_hash: str,
+    cache_dir: Path,
+    keep: bool,
+    no_cache: bool,
+    verbose: bool,
+) -> tuple[CommandTiming | None, bool]:
+    """
+    Load cached timing if output exists and --keep is set.
+
+    Returns:
+        tuple of (CommandTiming or None, from_cache: bool)
+    """
+    if not keep or not output.exists():
+        return None, False
+
+    if verbose:
+        print(f"Output exists (--keep): {output}")
+
+    if no_cache:
+        return None, False
+
+    cache_file = cache_dir / f"{params_hash}.json"
+    cached = load_cache(cache_file)
+    if cached is not None:
+        if verbose:
+            print(f"  Loaded cached timing info from {cache_file}")
+        return cached.timing, True
+
+    return None, False
+
+
 def main() -> int:
     args = parse_args()
     ensure_commands_available(args)
@@ -471,6 +710,9 @@ def main() -> int:
         repo_root / "target" / "reference-point-regression"
     )
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    cache_dir = output_dir / ".cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
 
     dataset_root = output_dir / "datasets" / "encode_k562_atac"
     regions, signals = prepare_reference_point_dataset(
@@ -483,16 +725,6 @@ def main() -> int:
         raise FileNotFoundError(
             "No bigWig signal files available for regression harness"
         )
-
-    suffix = args.reference_point.lower()
-    reference_output = output_dir / f"reference_{suffix}.mat.gz"
-    candidate_output = output_dir / f"rust_{suffix}.mat.gz"
-
-    if not args.keep:
-        if reference_output.exists():
-            reference_output.unlink()
-        if candidate_output.exists():
-            candidate_output.unlink()
 
     command_common = [
         "--beforeRegionStartLength",
@@ -513,7 +745,8 @@ def main() -> int:
     signal_args: List[str] = ["-S"]
     signal_args.extend(str(signal) for signal in signals)
 
-    reference_cmd = (
+    # Build command without output filename to compute hash
+    base_reference_cmd = (
         [
             args.pixi,
             "run",
@@ -523,10 +756,9 @@ def main() -> int:
         + region_args
         + signal_args
         + command_common
-        + ["--outFileName", str(reference_output)]
     )
 
-    candidate_cmd = (
+    base_candidate_cmd = (
         [
             args.cargo,
             "run",
@@ -538,8 +770,24 @@ def main() -> int:
         + region_args
         + signal_args
         + command_common
-        + ["--outFileName", str(candidate_output)]
     )
+
+    # Compute hash from parameters (excluding output filename)
+    params_hash = compute_params_hash(base_reference_cmd)
+
+    # Use hash in output filenames
+    reference_output = output_dir / f"reference_{params_hash}.mat.gz"
+    candidate_output = output_dir / f"rust_{params_hash}.mat.gz"
+
+    if not args.keep:
+        if reference_output.exists():
+            reference_output.unlink()
+        if candidate_output.exists():
+            candidate_output.unlink()
+
+    # Build complete commands with output filenames
+    reference_cmd = base_reference_cmd + ["--outFileName", str(reference_output)]
+    candidate_cmd = base_candidate_cmd + ["--outFileName", str(candidate_output)]
 
     if args.verbose:
         print("Using regions:")
@@ -550,17 +798,51 @@ def main() -> int:
             print(f"  - {signal}")
         print(f"Writing outputs to: {output_dir}")
 
-    if not args.keep or not reference_output.exists():
-        reference_timing = run_command(reference_cmd, cwd=repo_root, verbose=args.verbose)
-    elif args.verbose:
-        print(f"Skipping reference generation, file already exists: {reference_output}")
-        reference_timing = None
+    reference_timing = None
+    reference_from_cache = False
+    if args.keep and reference_output.exists():
+        reference_timing, reference_from_cache = _load_timing_if_kept(
+            reference_output,
+            params_hash,
+            cache_dir,
+            args.keep,
+            args.no_cache,
+            args.verbose,
+        )
 
-    if not args.keep or not candidate_output.exists():
-        candidate_timing = run_command(candidate_cmd, cwd=repo_root, verbose=args.verbose)
-    elif args.verbose:
-        print(f"Skipping Rust run, file already exists: {candidate_output}")
-        candidate_timing = None
+    if reference_timing is None:
+        reference_timing, reference_from_cache = run_command_cached(
+            reference_cmd,
+            reference_output,
+            cache_dir,
+            cwd=repo_root,
+            verbose=args.verbose,
+            skip_cache=args.no_cache,
+            enable_cache=True,  # Enable caching for Python reference
+        )
+
+    candidate_timing = None
+    candidate_from_cache = False
+    if args.keep and candidate_output.exists():
+        candidate_timing, candidate_from_cache = _load_timing_if_kept(
+            candidate_output,
+            params_hash,
+            cache_dir,
+            args.keep,
+            args.no_cache,
+            args.verbose,
+        )
+
+    if candidate_timing is None:
+        candidate_timing, candidate_from_cache = run_command_cached(
+            candidate_cmd,
+            candidate_output,
+            cache_dir,
+            cwd=repo_root,
+            verbose=args.verbose,
+            skip_cache=args.no_cache,
+            enable_cache=False,  # Disable caching for Rust implementation
+        )
 
     reference_matrix = load_matrix(reference_output)
     candidate_matrix = load_matrix(candidate_output)
@@ -569,6 +851,24 @@ def main() -> int:
         reference_matrix, candidate_matrix, args.tolerance, args.verbose
     )
 
+    print("\n" + "=" * 60)
+    print("📊 PERFORMANCE SUMMARY")
+    print("=" * 60)
+    if reference_timing:
+        print(format_timing("Python (pixi)", reference_timing, reference_from_cache))
+    if candidate_timing:
+        print(format_timing("Rust (cargo)", candidate_timing, candidate_from_cache))
+
+    if (
+        reference_timing
+        and candidate_timing
+        and not reference_from_cache
+        and not candidate_from_cache
+    ):
+        speedup = reference_timing.wall_seconds / candidate_timing.wall_seconds
+        print(f"Speedup: {speedup:.2f}x (wall time)")
+    print("=" * 60)
+
     if ok:
         print("✅ Matrices match within tolerance")
         print(
@@ -576,10 +876,6 @@ def main() -> int:
         )
         print(f"   Rows compared: {len(reference_matrix.rows)}")
         print(f"   Max abs delta: {max_delta:.3e}")
-        if reference_timing:
-            print("   " + format_timing("Python (pixi)", reference_timing))
-        if candidate_timing:
-            print("   " + format_timing("Rust (cargo)", candidate_timing))
         return 0
 
     print("❌ Matrices differ")
