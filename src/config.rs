@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{fmt, path::PathBuf};
 
 use clap::ValueEnum;
 
@@ -157,5 +157,56 @@ impl Default for AverageTypeBins {
 impl Default for ReferencePoint {
     fn default() -> Self {
         ReferencePoint::Tss
+    }
+}
+
+impl fmt::Display for SortRegions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            SortRegions::Descend => "descend",
+            SortRegions::Ascend => "ascend",
+            SortRegions::No => "no",
+            SortRegions::Keep => "keep",
+        };
+        f.write_str(value)
+    }
+}
+
+impl fmt::Display for SortUsing {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            SortUsing::Mean => "mean",
+            SortUsing::Median => "median",
+            SortUsing::Max => "max",
+            SortUsing::Min => "min",
+            SortUsing::Sum => "sum",
+            SortUsing::RegionLength => "region_length",
+        };
+        f.write_str(value)
+    }
+}
+
+impl fmt::Display for AverageTypeBins {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            AverageTypeBins::Mean => "mean",
+            AverageTypeBins::Median => "median",
+            AverageTypeBins::Min => "min",
+            AverageTypeBins::Max => "max",
+            AverageTypeBins::Std => "std",
+            AverageTypeBins::Sum => "sum",
+        };
+        f.write_str(value)
+    }
+}
+
+impl fmt::Display for ReferencePoint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            ReferencePoint::Tss => "TSS",
+            ReferencePoint::Tes => "TES",
+            ReferencePoint::Center => "center",
+        };
+        f.write_str(value)
     }
 }

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::{anyhow, bail, Context};
+use anyhow::{Context, anyhow, bail};
 use clap::{ArgAction, Args, Parser, Subcommand};
 
 use crate::config::{
@@ -405,7 +405,9 @@ impl ReferencePointCli {
         let downstream = positive_distance(self.mode.downstream, "afterRegionStartLength")?;
 
         if upstream == 0 && downstream == 0 {
-            bail!("Upstream and downstream regions are both set to 0. Nothing to output. Maybe you want to use the scale-regions mode?");
+            bail!(
+                "Upstream and downstream regions are both set to 0. Nothing to output. Maybe you want to use the scale-regions mode?"
+            );
         }
 
         let mode = ModeConfig::ReferencePoint(ReferencePointOptions {
@@ -430,8 +432,13 @@ impl GeneralArgs {
             self.verbose = false;
         }
 
-        let processor_request = parse_processor_request(&self.number_of_processors)
-            .with_context(|| format!("Invalid value for --numberOfProcessors: {}", self.number_of_processors))?;
+        let processor_request =
+            parse_processor_request(&self.number_of_processors).with_context(|| {
+                format!(
+                    "Invalid value for --numberOfProcessors: {}",
+                    self.number_of_processors
+                )
+            })?;
 
         Ok(GeneralOptions {
             bin_size: self.bin_size,
@@ -489,8 +496,7 @@ fn positive_distance(value: i64, flag: &str) -> anyhow::Result<u32> {
     if value < 0 {
         let adjusted = value.saturating_abs();
         eprintln!("{flag} changed from {value} into {adjusted}");
-        u32::try_from(adjusted)
-            .map_err(|_| anyhow!("{flag} overflow when converting to unsigned"))
+        u32::try_from(adjusted).map_err(|_| anyhow!("{flag} overflow when converting to unsigned"))
     } else {
         u32::try_from(value).map_err(|_| anyhow!("{flag} overflow when converting to unsigned"))
     }
@@ -501,7 +507,9 @@ fn parse_processor_request(raw: &str) -> anyhow::Result<ProcessorRequest> {
         "max" | "MAX" => Ok(ProcessorRequest::Max),
         "max/2" | "MAX/2" => Ok(ProcessorRequest::MaxHalf),
         _ => {
-            let value: u32 = raw.parse().context("expected integer, \"max\" or \"max/2\"")?;
+            let value: u32 = raw
+                .parse()
+                .context("expected integer, \"max\" or \"max/2\"")?;
             Ok(ProcessorRequest::Fixed(value))
         }
     }
