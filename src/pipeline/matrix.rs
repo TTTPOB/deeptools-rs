@@ -75,6 +75,17 @@ impl MatrixRow {
     }
 }
 
+/// Summary information for each group to support diagnostics and future features
+/// like clustering or reporting.
+#[derive(Debug, Clone)]
+pub struct GroupStats {
+    pub label: String,
+    pub row_count: usize,
+    pub sample_count: usize,
+    pub start_row: usize,
+    pub end_row: usize,
+}
+
 /// In-memory representation of the computeMatrix result required to serialise
 /// the gzipped matrix as well as auxiliary artifacts such as the plain matrix
 /// table or sorted BED output.
@@ -177,6 +188,68 @@ impl MatrixData {
         self.rows = reordered;
         Ok(())
     }
+
+    /// Remove rows containing only zeros (ignoring NaNs) when skip-zero behaviour
+    /// is requested. Updates group boundaries to reflect the filtered matrix.
+    pub fn prune_zero_rows(&mut self) {
+        if !self.header.skip_zeros || self.rows.is_empty() {
+            return;
+        }
+
+        let mut filtered_rows = Vec::with_capacity(self.rows.len());
+        let mut group_counts = Vec::with_capacity(self.header.group_labels.len());
+
+        for window in self.header.group_boundaries.windows(2) {
+            let start = window[0];
+            let end = window[1];
+            if start >= end {
+                group_counts.push(0);
+                continue;
+            }
+
+            let mut retained = 0usize;
+            for row in &self.rows[start..end] {
+                if row_is_all_zero(row) {
+                    continue;
+                }
+                filtered_rows.push(row.clone());
+                retained += 1;
+            }
+            group_counts.push(retained);
+        }
+
+        self.rows = filtered_rows;
+        self.header.group_boundaries = MatrixData::group_boundaries_from_counts(&group_counts);
+    }
+
+    /// Provide high-level statistics per group for diagnostics or logging.
+    pub fn group_stats(&self) -> Vec<GroupStats> {
+        let mut stats = Vec::with_capacity(self.header.group_labels.len());
+        for (idx, window) in self.header.group_boundaries.windows(2).enumerate() {
+            let start = window[0];
+            let end = window[1];
+            let row_count = end.saturating_sub(start);
+            stats.push(GroupStats {
+                label: self
+                    .header
+                    .group_labels
+                    .get(idx)
+                    .cloned()
+                    .unwrap_or_else(|| format!("group {}", idx)),
+                row_count,
+                sample_count: self.sample_count,
+                start_row: start,
+                end_row: end,
+            });
+        }
+        stats
+    }
+
+    /// Placeholder for the future hmcluster implementation; keeps the API visible
+    /// for downstream wiring while signalling that the feature remains pending.
+    pub fn hmcluster_placeholder(&self, _k: usize) -> Result<()> {
+        bail!("hmcluster is not implemented yet for the Rust port");
+    }
 }
 
 fn compute_sort_metric(
@@ -261,4 +334,18 @@ fn compare_ascending(left: f32, right: f32) -> Ordering {
         (false, true) => Ordering::Less,
         (false, false) => left.partial_cmp(&right).unwrap_or_else(|| Ordering::Equal),
     }
+}
+
+fn row_is_all_zero(row: &MatrixRow) -> bool {
+    for sample_values in &row.values {
+        for value in sample_values {
+            if value.is_nan() {
+                continue;
+            }
+            if *value != 0.0 {
+                return false;
+            }
+        }
+    }
+    true
 }

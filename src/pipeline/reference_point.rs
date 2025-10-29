@@ -110,6 +110,8 @@ pub fn run(
         sort_sample_indices.as_deref(),
     )?;
 
+    matrix.prune_zero_rows();
+
     Ok(matrix)
 }
 
