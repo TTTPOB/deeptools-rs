@@ -1,6 +1,7 @@
 use crate::config::ReferencePoint;
 use crate::io::BedRecord;
 use crate::io::Strand;
+use crate::pipeline::core::{RegionPlan, SignalBin};
 
 /// Represents a single bin span within the reference-point window.
 #[derive(Debug, Clone, Copy)]
@@ -17,6 +18,36 @@ pub struct ReferencePointPlan {
     pub window_start: i64,
     pub window_end: i64,
     pub bins: Vec<ReferenceBin>,
+}
+
+impl SignalBin for ReferenceBin {
+    fn start(&self) -> i64 {
+        self.start
+    }
+
+    fn end(&self) -> i64 {
+        self.end
+    }
+
+    fn beyond_region(&self) -> bool {
+        self.beyond_region
+    }
+}
+
+impl RegionPlan for ReferencePointPlan {
+    type Bin = ReferenceBin;
+
+    fn window_start(&self) -> i64 {
+        self.window_start
+    }
+
+    fn window_end(&self) -> i64 {
+        self.window_end
+    }
+
+    fn bins(&self) -> &[Self::Bin] {
+        &self.bins
+    }
 }
 
 impl ReferencePointPlan {

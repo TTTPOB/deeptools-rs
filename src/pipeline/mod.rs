@@ -1,4 +1,5 @@
 pub use matrix::{MatrixData, MatrixHeader, MatrixRow};
+pub mod core;
 pub mod matrix;
 mod reference_point;
 pub mod zones;
