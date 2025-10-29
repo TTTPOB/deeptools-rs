@@ -261,7 +261,7 @@ fn parse_grouped_bed(
     let file = File::open(path)?;
     let reader = BufReader::new(file);
 
-    let default_label = label_from_path(path);
+    let default_label = bed_file_label(path);
     let mut groups = Vec::new();
     let mut current_records = Vec::new();
 
@@ -401,34 +401,30 @@ fn derive_sample_labels(paths: &[PathBuf], general: &GeneralOptions) -> Result<V
         return Ok(labels.clone());
     }
 
-    if general.smart_labels {
-        return Ok(paths.iter().map(|path| smart_label(path)).collect());
-    }
-
-    Ok(paths.iter().map(|path| default_label(path)).collect())
+    Ok(paths
+        .iter()
+        .map(|path| label_from_path(path, general.smart_labels))
+        .collect())
 }
 
-fn default_label(path: &Path) -> String {
+fn label_from_path(path: &Path, use_stem: bool) -> String {
+    if use_stem {
+        // Smart label: remove extension (e.g., "file.bigWig" -> "file")
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            return stem.to_string();
+        }
+    }
+
+    // Full filename: keep extension (e.g., "file.bigWig")
     path.file_name()
-        .and_then(|stem| stem.to_str())
-        .map(|value| value.to_string())
+        .and_then(|name| name.to_str())
+        .map(|s| s.to_string())
         .unwrap_or_else(|| path.display().to_string())
 }
 
-fn smart_label(path: &Path) -> String {
-    if let Some(stem) = path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .map(|value| value.to_string())
-    {
-        return stem;
-    }
-
-    default_label(path)
-}
-
-fn label_from_path(path: &Path) -> String {
-    default_label(path)
+fn bed_file_label(path: &Path) -> String {
+    // For BED files, always use the full filename
+    label_from_path(path, false)
 }
 
 fn compute_row(
