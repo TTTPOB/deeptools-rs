@@ -179,6 +179,33 @@ fn should_skip_row(values: &[Vec<f32>], general: &GeneralOptions) -> bool {
     false
 }
 
+pub fn normalize_sort_sample_indices(
+    raw: Option<&Vec<usize>>,
+    sample_count: usize,
+) -> Result<Option<Vec<usize>>> {
+    let Some(raw_indices) = raw else {
+        return Ok(None);
+    };
+
+    if raw_indices.is_empty() {
+        return Ok(None);
+    }
+
+    let mut normalized = Vec::with_capacity(raw_indices.len());
+    for &value in raw_indices {
+        if value == 0 || value > sample_count {
+            bail!(
+                "The value {} for --sortUsingSamples is not valid. Only values from 1 to {} are allowed.",
+                value,
+                sample_count
+            );
+        }
+        normalized.push(value - 1);
+    }
+
+    Ok(Some(normalized))
+}
+
 fn compute_sample_bins<P: RegionPlan>(
     sample: &mut Sample,
     record: &BedRecord,

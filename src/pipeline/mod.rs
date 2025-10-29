@@ -2,6 +2,7 @@ pub use matrix::{MatrixData, MatrixHeader, MatrixRow};
 pub mod core;
 pub mod matrix;
 mod reference_point;
+mod scale_regions;
 pub mod zones;
 
 use crate::config::{Config, ModeConfig};
@@ -26,8 +27,9 @@ pub fn execute(config: Config) -> anyhow::Result<()> {
     }
 
     match &config.mode {
-        ModeConfig::ScaleRegions(_options) => {
-            // TODO: implement scale-regions pipeline.
+        ModeConfig::ScaleRegions(options) => {
+            let matrix = scale_regions::run(general, io, options)?;
+            writers::write_outputs(&matrix, io)?;
         }
         ModeConfig::ReferencePoint(options) => {
             let matrix = reference_point::run(general, io, options)?;

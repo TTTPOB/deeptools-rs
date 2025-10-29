@@ -4,12 +4,11 @@ use anyhow::{Context, Result, bail};
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
 
-use crate::config::{GeneralOptions, IoOptions, ReferencePointOptions};
-use crate::io::BedRecord;
+use crate::config::{GeneralOptions, IoOptions, ScaleRegionsOptions};
+use crate::io::{BedRecord, Strand};
 use crate::pipeline::core::{self, WorkerSamples};
-use crate::pipeline::zones::ReferencePointPlan;
-
-use super::matrix::{MatrixData, MatrixHeader, MatrixRow};
+use crate::pipeline::matrix::{MatrixData, MatrixHeader, MatrixRow};
+use crate::pipeline::zones::ScaleRegionsPlan;
 
 struct RegionTask {
     index: usize,
@@ -26,20 +25,33 @@ struct RegionResult {
 pub fn run(
     general: &GeneralOptions,
     io: &IoOptions,
-    options: &ReferencePointOptions,
+    options: &ScaleRegionsOptions,
 ) -> Result<MatrixData> {
     let bin_size = general.bin_size;
     ensure_positive(bin_size, "binSize")?;
 
     ensure_multiple(bin_size, options.upstream, "beforeRegionStartLength")?;
     ensure_multiple(bin_size, options.downstream, "afterRegionStartLength")?;
+    ensure_multiple(bin_size, options.region_body_length, "regionBodyLength")?;
+    ensure_multiple(bin_size, options.unscaled_5_prime, "unscaled5prime")?;
+    ensure_multiple(bin_size, options.unscaled_3_prime, "unscaled3prime")?;
+
+    if options.region_body_length == 0 && (options.unscaled_5_prime + options.unscaled_3_prime) > 0
+    {
+        bail!(
+            "Unscaled 5- and 3-prime regions require a non-zero --regionBodyLength in scale-regions mode"
+        );
+    }
 
     let upstream_bins = (options.upstream / bin_size) as usize;
     let downstream_bins = (options.downstream / bin_size) as usize;
-    let total_bins = upstream_bins + downstream_bins;
+    let unscaled5_bins = (options.unscaled_5_prime / bin_size) as usize;
+    let unscaled3_bins = (options.unscaled_3_prime / bin_size) as usize;
+    let body_bins = (options.region_body_length / bin_size) as usize;
 
+    let total_bins = upstream_bins + downstream_bins + unscaled5_bins + unscaled3_bins + body_bins;
     if total_bins == 0 {
-        bail!("Reference-point mode requires at least one upstream or downstream bin");
+        bail!("Scale-regions mode requires at least one bin to be generated");
     }
 
     let sample_labels = core::derive_sample_labels(&io.scores, general)?;
@@ -68,7 +80,7 @@ pub fn run(
         let pool = ThreadPoolBuilder::new()
             .num_threads(thread_count)
             .build()
-            .context("Failed to initialise rayon thread pool for reference-point scheduling")?;
+            .context("Failed to initialise rayon thread pool for scale-regions scheduling")?;
 
         let sample_paths = Arc::new(io.scores.clone());
         let collected = pool.install(|| {
@@ -85,22 +97,25 @@ pub fn run(
 
                         let samples = state.samples()?;
 
-                        let plan = ReferencePointPlan::reference_point(
-                            &record,
-                            options.reference_point,
-                            bin_size,
-                            upstream_bins,
-                            downstream_bins,
-                        );
+                        let plan = ScaleRegionsPlan::scale_regions(&record, options, bin_size);
+                        let strand = record.strand;
 
                         let maybe_values = core::compute_row(
                             samples.as_mut_slice(),
                             &record,
                             &plan,
                             general,
-                            options.nan_after_end,
+                            false,
                         )?;
-                        let row = maybe_values.map(|values| MatrixRow { record, values });
+
+                        let row = maybe_values.map(|mut values| {
+                            if matches!(strand, Strand::Negative) {
+                                for sample_values in &mut values {
+                                    sample_values.reverse();
+                                }
+                            }
+                            MatrixRow { record, values }
+                        });
 
                         Ok(RegionResult {
                             index,
@@ -133,20 +148,20 @@ pub fn run(
         verbose: general.verbose,
         scale: general.scale_factor,
         skip_zeros: general.skip_zeros,
-        nan_after_end: options.nan_after_end,
+        nan_after_end: false,
         sort_using: general.sort_using.to_string(),
-        unscaled_5_prime: vec![0; sample_count],
-        body: vec![0; sample_count],
+        unscaled_5_prime: vec![options.unscaled_5_prime; sample_count],
+        body: vec![options.region_body_length; sample_count],
         sample_labels: sample_labels.clone(),
         downstream: vec![options.downstream; sample_count],
-        unscaled_3_prime: vec![0; sample_count],
+        unscaled_3_prime: vec![options.unscaled_3_prime; sample_count],
         group_labels,
         bin_size: vec![bin_size; sample_count],
         upstream: vec![options.upstream; sample_count],
         group_boundaries,
         sample_boundaries,
         missing_data_as_zero: general.missing_data_as_zero,
-        ref_point: vec![Some(options.reference_point.to_string()); sample_count],
+        ref_point: vec![None; sample_count],
         min_threshold: general.min_threshold,
         sort_regions: general.sort_regions.to_string(),
         proc_number,
@@ -182,10 +197,10 @@ fn ensure_positive(value: u32, flag: &str) -> Result<()> {
     Ok(())
 }
 
-fn ensure_multiple(bin_size: u32, distance: u32, flag: &str) -> Result<()> {
-    if distance % bin_size != 0 {
+fn ensure_multiple(bin_size: u32, value: u32, flag: &str) -> Result<()> {
+    if value % bin_size != 0 {
         bail!(
-            "{flag} ({distance}) must be a multiple of the bin size ({bin_size}) in reference-point mode"
+            "{flag} ({value}) must be a multiple of the bin size ({bin_size}) in scale-regions mode"
         );
     }
     Ok(())

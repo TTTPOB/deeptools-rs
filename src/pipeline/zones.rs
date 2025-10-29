@@ -1,4 +1,4 @@
-use crate::config::ReferencePoint;
+use crate::config::{ReferencePoint, ScaleRegionsOptions};
 use crate::io::BedRecord;
 use crate::io::Strand;
 use crate::pipeline::core::{RegionPlan, SignalBin};
@@ -66,6 +66,130 @@ impl ReferencePointPlan {
 
         Self {
             reference,
+            window_start,
+            window_end,
+            bins,
+        }
+    }
+}
+
+/// Represents a single bin span within the scale-regions window.
+#[derive(Debug, Clone, Copy)]
+pub struct ScaleBin {
+    pub start: i64,
+    pub end: i64,
+    pub beyond_region: bool,
+}
+
+/// Precomputed layout for scale-regions binning.
+#[derive(Debug, Clone)]
+pub struct ScaleRegionsPlan {
+    pub window_start: i64,
+    pub window_end: i64,
+    pub bins: Vec<ScaleBin>,
+}
+
+impl SignalBin for ScaleBin {
+    fn start(&self) -> i64 {
+        self.start
+    }
+
+    fn end(&self) -> i64 {
+        self.end
+    }
+
+    fn beyond_region(&self) -> bool {
+        self.beyond_region
+    }
+}
+
+impl RegionPlan for ScaleRegionsPlan {
+    type Bin = ScaleBin;
+
+    fn window_start(&self) -> i64 {
+        self.window_start
+    }
+
+    fn window_end(&self) -> i64 {
+        self.window_end
+    }
+
+    fn bins(&self) -> &[Self::Bin] {
+        &self.bins
+    }
+}
+
+impl ScaleRegionsPlan {
+    pub fn scale_regions(record: &BedRecord, options: &ScaleRegionsOptions, bin_size: u32) -> Self {
+        let start = record.start as i64;
+        let end = record.end as i64;
+        let region_len = (end - start).max(0);
+
+        let upstream_bins = (options.upstream / bin_size) as usize;
+        let downstream_bins = (options.downstream / bin_size) as usize;
+        let unscaled5_bins = (options.unscaled_5_prime / bin_size) as usize;
+        let unscaled3_bins = (options.unscaled_3_prime / bin_size) as usize;
+        let body_bins = (options.region_body_length / bin_size) as usize;
+
+        let mut bins = Vec::with_capacity(
+            upstream_bins + downstream_bins + unscaled5_bins + unscaled3_bins + body_bins,
+        );
+
+        let unscaled5_len = (options.unscaled_5_prime as i64).min(region_len);
+        let unscaled3_len =
+            (options.unscaled_3_prime as i64).min(region_len.saturating_sub(unscaled5_len));
+        let body_len = region_len.saturating_sub(unscaled5_len + unscaled3_len);
+
+        match record.strand {
+            Strand::Negative => {
+                let upstream_len = options.downstream as i64;
+                let downstream_len = options.upstream as i64;
+
+                append_bins(
+                    &mut bins,
+                    start - upstream_len,
+                    upstream_len,
+                    downstream_bins,
+                );
+                append_bins(&mut bins, start, unscaled3_len, unscaled3_bins);
+                append_bins(&mut bins, start + unscaled3_len, body_len, body_bins);
+                append_bins(
+                    &mut bins,
+                    end - unscaled5_len,
+                    unscaled5_len,
+                    unscaled5_bins,
+                );
+                append_bins(&mut bins, end, downstream_len, upstream_bins);
+            }
+            _ => {
+                let upstream_len = options.upstream as i64;
+                let downstream_len = options.downstream as i64;
+
+                append_bins(&mut bins, start - upstream_len, upstream_len, upstream_bins);
+                append_bins(&mut bins, start, unscaled5_len, unscaled5_bins);
+                append_bins(&mut bins, start + unscaled5_len, body_len, body_bins);
+                append_bins(
+                    &mut bins,
+                    end - unscaled3_len,
+                    unscaled3_len,
+                    unscaled3_bins,
+                );
+                append_bins(&mut bins, end, downstream_len, downstream_bins);
+            }
+        }
+
+        let window_start = bins
+            .iter()
+            .map(|bin| bin.start.min(bin.end))
+            .min()
+            .unwrap_or(start);
+        let window_end = bins
+            .iter()
+            .map(|bin| bin.start.max(bin.end))
+            .max()
+            .unwrap_or(end);
+
+        Self {
             window_start,
             window_end,
             bins,
@@ -154,6 +278,44 @@ fn bin_beyond_region(record: &BedRecord, bin_start: i64, bin_end: i64) -> bool {
     }
 }
 
+fn append_bins(target: &mut Vec<ScaleBin>, start: i64, length: i64, count: usize) {
+    if count == 0 {
+        return;
+    }
+
+    if length <= 0 {
+        for _ in 0..count {
+            target.push(ScaleBin {
+                start,
+                end: start,
+                beyond_region: false,
+            });
+        }
+        return;
+    }
+
+    let mut positions = Vec::with_capacity(count + 1);
+    for idx in 0..count {
+        let pos = (length * idx as i64) / count as i64;
+        positions.push(pos);
+    }
+    positions.push(length);
+
+    for idx in 0..count {
+        let rel_start = positions[idx];
+        let mut rel_end = positions[idx + 1];
+        if rel_end <= rel_start {
+            rel_end = rel_start + 1;
+        }
+
+        target.push(ScaleBin {
+            start: start + rel_start,
+            end: start + rel_end,
+            beyond_region: false,
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,6 +329,18 @@ mod tests {
             score: None,
             strand,
             extra_fields: Vec::new(),
+        }
+    }
+
+    fn scale_options() -> ScaleRegionsOptions {
+        ScaleRegionsOptions {
+            region_body_length: 100,
+            start_label: "TSS".to_string(),
+            end_label: "TES".to_string(),
+            upstream: 40,
+            downstream: 30,
+            unscaled_5_prime: 20,
+            unscaled_3_prime: 30,
         }
     }
 
@@ -191,5 +365,54 @@ mod tests {
         assert_eq!(plan.bins[0].end, 220);
         assert_eq!(plan.bins[2].start, 190);
         assert_eq!(plan.bins[2].end, 200);
+    }
+
+    #[test]
+    fn scale_plan_positive_strand() {
+        let record = build_record(Strand::Positive, 100, 200);
+        let options = scale_options();
+        let plan = ScaleRegionsPlan::scale_regions(&record, &options, 10);
+
+        assert_eq!(plan.bins.len(), 22);
+        assert_eq!(plan.window_start, 60);
+        assert_eq!(plan.window_end, 230);
+
+        // First four bins correspond to upstream region.
+        for (idx, bin) in plan.bins.iter().take(4).enumerate() {
+            assert_eq!(bin.start, 60 + (idx as i64 * 10));
+            assert_eq!(bin.end, 60 + ((idx as i64 + 1) * 10));
+        }
+
+        // Body bins start at 120 and end before the 3' unscaled block.
+        let body_start = 4 + 2; // upstream + unscaled 5 prime bins
+        let first_body_bin = &plan.bins[body_start];
+        assert_eq!(first_body_bin.start, 120);
+        let last_body_bin = &plan.bins[body_start + 9];
+        assert!(last_body_bin.end <= 170);
+    }
+
+    #[test]
+    fn scale_plan_negative_strand() {
+        let record = build_record(Strand::Negative, 100, 200);
+        let options = scale_options();
+        let plan = ScaleRegionsPlan::scale_regions(&record, &options, 10);
+
+        assert_eq!(plan.bins.len(), 22);
+        assert_eq!(plan.window_start, 70);
+        assert_eq!(plan.window_end, 240);
+
+        // Upstream bins (derived from downstream distance) occupy the lowest coordinates.
+        for (idx, bin) in plan.bins.iter().take(3).enumerate() {
+            assert_eq!(bin.start, 70 + (idx as i64 * 10));
+            assert_eq!(bin.end, 70 + ((idx as i64 + 1) * 10));
+        }
+
+        // The last downstream bins extend beyond the region end using the upstream distance.
+        let downstream_bins = (options.upstream / 10) as usize;
+        let tail = &plan.bins[plan.bins.len() - downstream_bins..];
+        for (idx, bin) in tail.iter().enumerate() {
+            assert_eq!(bin.start, 200 + (idx as i64 * 10));
+            assert_eq!(bin.end, 200 + ((idx as i64 + 1) * 10));
+        }
     }
 }

@@ -126,7 +126,7 @@
 - Establish regression harness via `pixi` to automate reference matrix generation for CI/local development.
 
 ## Priority
-- Focus on BED-based `reference-point` parity first; defer full GTF handling, clustering, and `scale-regions` specific features until after the regression suite passes on BED fixtures.
+- Wire up the pixi regression harness to validate both `reference-point` and the newly implemented BED-focused `scale-regions` flow before tackling GTF support, clustering, and further diagnostics.
 
 ## Implementation Order (Macro Level)
 - [x] `cli` + `config`: comprehensive CLI parsing with clap; full flag parity including aliases, defaults, and validation implemented.
@@ -137,7 +137,7 @@
 - [x] `io::writers`: gzip/tab/sorted-regions outputs implemented with `@` header prefix; header fields normalized to per-sample lists for backward compatibility.
 - [x] `pipeline::matrix`: sorting (ascend/descend/keep), skip-zero pruning, group boundaries, sample boundaries, and sort metrics (mean/median/max/min/sum/region_length) all implemented.
 - [ ] Regression harness (`scripts/` + integration tests): Python comparison script exists (`scripts/reference_point_regression.py`) but not wired into cargo test or CI; pixi environment ready (`pixi.toml` with deeptools 3.5.6).
-- [ ] `pipeline::scale_regions`: not implemented.
+- [x] `pipeline::scale_regions`: initial runner wired into the shared core with scale-aware zone planning and unit coverage; regression comparison still pending.
 - [ ] Advanced features (sorting, diagnostics polish) and performance tuning: pending.
 
 ## Refactor Plan: Decouple Reference-Point Core
