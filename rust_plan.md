@@ -4,7 +4,7 @@
 - Maintain CLI parity with DeepTools `computeMatrix` (`reference-point` and `scale-regions`) including flag spelling, defaults, aliases, mutually exclusive groups, and help semantics. Any unavoidable deviation must be documented alongside user-visible implications.
 - Reproduce DeepTools matrix outputs byte-for-byte (JSON header + BED-like rows) for supported options so that downstream tools (`plotHeatmap`, `plotProfile`, `computeMatrixOperations`) remain interoperable.
 - Mirror Python behaviour across edge cases: strand-aware windows, NaN vs zero padding, unscaled zones, reference-point handling, sorting/threshold logic, and headers for legacy compatibility.
-- Build an idiomatic Rust architecture that leverages existing crates (`bigtools` for bigWig IO, `rayon` for parallelism, `polars` when columnar reductions are needed) while keeping the codebase modular and testable.
+- Build an idiomatic Rust architecture that leverages existing crates (`bigtools` for bigWig IO, `rayon` for parallelism) while keeping the codebase modular and testable.
 
 ## Reference Python Implementation (Ground Truth)
 
@@ -85,7 +85,7 @@
 - For each region:
   - Build contiguous slices per zone, requesting coverage via `BigWigReader`.
   - Stitch slices into a single `Vec<f32>` (or `Vec<f64>` if precision issues appear) while inserting NaNs for missing bases and respecting padding instructions.
-  - Aggregate contiguous coverage into bins using the configured statistic. Implement `AverageType` enum to mirror Python’s options; use `polars` or manual numerics to match masked operations (NaNs ignored unless `missing_data_as_zero`).
+  - Aggregate contiguous coverage into bins using the configured statistic. Implement `AverageType` enum to mirror Python’s options, relying on manual numerics to match masked operations (NaNs ignored unless `missing_data_as_zero`).
   - Apply `min_threshold` / `max_threshold` tests across the full flattened row; skip rows with all zeros if `skip_zeros` is set. Record `no_score` counts to log warnings comparable to Python.
 - Return per-sample vectors (`Vec<Vec<f32>>`) so the matrix assembly can flatten later.
 
@@ -114,7 +114,7 @@
 - Add unit tests for zone splitting (`chop_regions`, `trim_zones`), coverage padding, threshold filtering, and matrix sorting to ensure deterministic behaviour.
 
 ## Performance & Future Work
-- After achieving functional parity, benchmark against Python on large datasets to validate throughput. Profiling targets include bigWig fetch batching, rayon scheduling overhead, and potential use of `polars`/Arrow for columnar accumulation.
+- After achieving functional parity, benchmark against Python on large datasets to validate throughput. Profiling targets include bigWig fetch batching, rayon scheduling overhead, and potential columnar accumulation strategies.
 - Future enhancements: implement clustering (`hmcluster`), silhouette scores, memory pooling for coverage buffers, and optional caching of bigWig blocks.
 
 ## Immediate Next Steps
@@ -147,3 +147,10 @@
 - [x] Matrix assembly: needs boundary computation, skip-zero pruning, and sort hooks beyond basic struct fill.
 - [ ] Output serialization: header prefix now matches DeepTools; still need legacy list normalisation and value formatting review.
 - [ ] Regression GLUE: script available, but cargo test/integration gating and automated diffing are outstanding.
+
+### Task Scheduler Plan (Rayon)
+- Partition the region list into deterministic chunks (target ~64 regions each) while preserving group boundaries so downstream sorting remains stable; expose chunk sizing via `Config.scheduler.chunk_size`.
+- Convert the sequential region iterator in `pipeline::reference_point::execute` into a `rayon::ThreadPool`-backed `par_bridge`, yielding `TaskPayload` structs that bundle zones, sample handles, and provenance metadata.
+- Provide a scoped resource manager that hands each worker thread a `Vec<BigWigCache>` built with `rayon::ThreadPool::install` to avoid `Send` conflicts and to reuse file handles across tasks.
+- Ensure worker results implement `Send`/`Sync` by moving owned buffers into a `TaskResult` struct; aggregate with `rayon::iter::ParallelIterator::reduce` so the hot path stays lock-free except for a bounded `crossbeam` channel used to stream progress updates.
+- Propagate errors via `Result<TaskResult>` and surface them with `rayon::join_context` so early exits cancel sibling jobs; wrap in a thin `scheduler::execute_parallel` helper to keep orchestration code testable with a single-threaded fallback.
