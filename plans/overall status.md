@@ -138,7 +138,7 @@
 - [x] `pipeline::matrix`: sorting (ascend/descend/keep), skip-zero pruning, group boundaries, sample boundaries, and sort metrics (mean/median/max/min/sum/region_length) all implemented.
 - [ ] Regression harness (`scripts/` + integration tests): Python comparison script exists (`scripts/reference_point_regression.py`) but not wired into cargo test or CI; pixi environment ready (`pixi.toml` with deeptools 3.5.6).
 - [ ] `pipeline::scale_regions`: not implemented.
-- [ ] Advanced features (clustering via `hmcluster`, diagnostics polish) and performance tuning: pending.
+- [ ] Advanced features (sorting, diagnostics polish) and performance tuning: pending.
 
 ## Refactor Plan: Decouple Reference-Point Core
 - Audit `pipeline::reference_point` to tag responsibilities that should be mode-agnostic (zone planning, coverage sampling, aggregation, matrix assembly) versus reference-point specifics (two-zone layout, ref-point metadata). Capture this as a checklist referencing concrete structs/functions (`load_groups`, `Sample`, `WorkerSamples`, `derive_sample_labels`, `compute_row`, `should_skip_row`, `compute_sample_bins`, `aggregate_slice`, `MatrixHeader` wiring).
