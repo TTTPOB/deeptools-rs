@@ -44,7 +44,7 @@ pub struct MatrixHeader {
     #[serde(rename = "sort regions")]
     pub sort_regions: String,
     #[serde(rename = "proc number")]
-    pub proc_number: String,
+    pub proc_number: u32,
     #[serde(rename = "bin avg type")]
     pub bin_avg_type: String,
     #[serde(rename = "max threshold")]

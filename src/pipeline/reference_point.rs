@@ -1,10 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
 use crate::config::{GeneralOptions, IoOptions, ReferencePoint, ReferencePointOptions};
-use crate::io::{BedReader, BedRecord, BigWigReader, BigWigValue, Strand};
+use crate::io::{BedReadError, BedRecord, BigWigReader, BigWigValue, Strand};
 
 use super::matrix::{MatrixData, MatrixHeader, MatrixRow};
 
@@ -64,6 +66,8 @@ pub fn run(
     let group_boundaries = compute_group_boundaries(&group_counts);
     let sample_boundaries = compute_sample_boundaries(sample_count, total_bins);
 
+    let proc_number = general.number_of_processors.resolve();
+
     let header = MatrixHeader {
         verbose: general.verbose,
         scale: general.scale_factor,
@@ -84,7 +88,7 @@ pub fn run(
         ref_point: vec![Some(options.reference_point.to_string()); sample_count],
         min_threshold: general.min_threshold,
         sort_regions: general.sort_regions.to_string(),
-        proc_number: general.number_of_processors.to_string(),
+        proc_number,
         bin_avg_type: general.average_type_bins.to_string(),
         max_threshold: general.max_threshold,
     };
@@ -148,17 +152,115 @@ fn ensure_multiple(bin_size: u32, distance: u32, flag: &str) -> Result<()> {
 
 fn load_groups(paths: &[PathBuf]) -> Result<Vec<Group>> {
     let mut groups = Vec::new();
+    let mut seen_labels = HashSet::new();
     for path in paths {
-        let reader = BedReader::from_path(path)
-            .with_context(|| format!("Failed to open regions file '{}'", path.display()))?;
-        let records = reader
-            .read_all()
+        let mut file_groups = parse_grouped_bed(path, &mut seen_labels)
             .map_err(anyhow::Error::new)
             .with_context(|| format!("Failed to parse regions file '{}'", path.display()))?;
-        let label = label_from_path(path);
-        groups.push(Group { label, records });
+        groups.append(&mut file_groups);
     }
+
     Ok(groups)
+}
+
+fn parse_grouped_bed(
+    path: &Path,
+    seen_labels: &mut HashSet<String>,
+) -> Result<Vec<Group>, BedReadError> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+
+    let default_label = label_from_path(path);
+    let mut groups = Vec::new();
+    let mut current_records = Vec::new();
+
+    for (line_number, line) in reader.lines().enumerate() {
+        let line = line?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with('#') {
+            finalize_group(
+                trimmed.strip_prefix('#').unwrap_or("").trim(),
+                &default_label,
+                &mut current_records,
+                &mut groups,
+                seen_labels,
+            );
+            continue;
+        }
+
+        match BedRecord::parse(trimmed) {
+            Ok(record) => current_records.push(record),
+            Err(message) => {
+                return Err(BedReadError::Parse {
+                    line_number: line_number + 1,
+                    message,
+                    line,
+                });
+            }
+        }
+    }
+
+    if !current_records.is_empty() {
+        finalize_group(
+            "",
+            &default_label,
+            &mut current_records,
+            &mut groups,
+            seen_labels,
+        );
+    } else if groups.is_empty() {
+        let label = next_unique_label("", &default_label, seen_labels);
+        groups.push(Group {
+            label,
+            records: Vec::new(),
+        });
+    }
+
+    Ok(groups)
+}
+
+fn finalize_group(
+    raw_label: &str,
+    default_label: &str,
+    current_records: &mut Vec<BedRecord>,
+    groups: &mut Vec<Group>,
+    seen_labels: &mut HashSet<String>,
+) {
+    if current_records.is_empty() {
+        return;
+    }
+
+    let label = next_unique_label(raw_label, default_label, seen_labels);
+    let records = std::mem::take(current_records);
+    groups.push(Group { label, records });
+}
+
+fn next_unique_label(
+    raw_label: &str,
+    default_label: &str,
+    seen_labels: &mut HashSet<String>,
+) -> String {
+    let candidate = if raw_label.trim().is_empty() {
+        default_label.to_string()
+    } else {
+        raw_label.trim().to_string()
+    };
+
+    if seen_labels.insert(candidate.clone()) {
+        return candidate;
+    }
+
+    let mut suffix = 1;
+    loop {
+        let proposal = format!("{}_{}", candidate, suffix);
+        if seen_labels.insert(proposal.clone()) {
+            return proposal;
+        }
+        suffix += 1;
+    }
 }
 
 fn open_samples(paths: &[PathBuf]) -> Result<Vec<Sample>> {

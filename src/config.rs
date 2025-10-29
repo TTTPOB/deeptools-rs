@@ -220,3 +220,22 @@ impl fmt::Display for ProcessorRequest {
         }
     }
 }
+
+impl ProcessorRequest {
+    pub fn resolve(&self) -> u32 {
+        match self {
+            ProcessorRequest::Max => available_cpus(),
+            ProcessorRequest::MaxHalf => {
+                let cpus = available_cpus();
+                std::cmp::max(1, cpus / 2)
+            }
+            ProcessorRequest::Fixed(value) => std::cmp::max(1, *value),
+        }
+    }
+}
+
+fn available_cpus() -> u32 {
+    let count = num_cpus::get();
+    let count = std::cmp::max(count, 1);
+    u32::try_from(count).unwrap_or(u32::MAX)
+}
