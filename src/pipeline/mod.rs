@@ -1,6 +1,7 @@
 pub use matrix::{MatrixData, MatrixHeader, MatrixRow};
 pub mod matrix;
 mod reference_point;
+pub mod zones;
 
 use crate::config::{Config, ModeConfig};
 use crate::io::writers;

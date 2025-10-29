@@ -30,7 +30,7 @@ fn write_matrix_gz(path: &Path, matrix: &MatrixData) -> Result<()> {
     let mut encoder = GzEncoder::new(file, Compression::default());
 
     let header = serde_json::to_string(&matrix.header)?;
-    writeln!(encoder, "{}", header)?;
+    writeln!(encoder, "@{}", header)?;
 
     for row in &matrix.rows {
         write_matrix_row(&mut encoder, row)?;

@@ -1,12 +1,14 @@
 use std::collections::{HashMap, HashSet};
+use std::convert::TryFrom;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use crate::config::{GeneralOptions, IoOptions, ReferencePoint, ReferencePointOptions};
-use crate::io::{BedReadError, BedRecord, BigWigReader, BigWigValue, Strand};
+use crate::config::{AverageTypeBins, GeneralOptions, IoOptions, ReferencePointOptions};
+use crate::io::{BedReadError, BedRecord, BigWigReader};
+use crate::pipeline::zones::ReferencePointPlan;
 
 use super::matrix::{MatrixData, MatrixHeader, MatrixRow};
 
@@ -39,15 +41,14 @@ pub fn run(
 
     for (group_index, group) in groups.iter().enumerate() {
         for record in &group.records {
-            match compute_row(
-                &mut samples,
+            let plan = ReferencePointPlan::reference_point(
                 record,
-                options,
-                general,
+                options.reference_point,
                 bin_size,
                 upstream_bins,
                 downstream_bins,
-            )? {
+            );
+            match compute_row(&mut samples, record, &plan, options, general)? {
                 Some(values) => {
                     group_counts[group_index] += 1;
                     rows.push(MatrixRow {
@@ -331,23 +332,13 @@ fn label_from_path(path: &Path) -> String {
 fn compute_row(
     samples: &mut [Sample],
     record: &BedRecord,
+    plan: &ReferencePointPlan,
     options: &ReferencePointOptions,
     general: &GeneralOptions,
-    bin_size: u32,
-    upstream_bins: usize,
-    downstream_bins: usize,
 ) -> Result<Option<Vec<Vec<f32>>>> {
     let mut per_sample = Vec::with_capacity(samples.len());
     for sample in samples.iter_mut() {
-        let values = compute_sample_bins(
-            sample,
-            record,
-            options,
-            general,
-            bin_size,
-            upstream_bins,
-            downstream_bins,
-        )?;
+        let values = compute_sample_bins(sample, record, plan, options, general)?;
         per_sample.push(values);
     }
 
@@ -403,16 +394,11 @@ fn should_skip_row(values: &[Vec<f32>], general: &GeneralOptions) -> bool {
 fn compute_sample_bins(
     sample: &mut Sample,
     record: &BedRecord,
+    plan: &ReferencePointPlan,
     options: &ReferencePointOptions,
     general: &GeneralOptions,
-    bin_size: u32,
-    upstream_bins: usize,
-    downstream_bins: usize,
 ) -> Result<Vec<f32>> {
-    let bin_count = upstream_bins + downstream_bins;
-    let reference = reference_coordinate(record, &options.reference_point);
-    let (window_start, window_end) = window_bounds(reference, record.strand, options);
-
+    let bin_count = plan.bins.len();
     let chrom_length = match sample.chrom_length(&record.chrom) {
         Some(length) => length,
         None => {
@@ -420,11 +406,25 @@ fn compute_sample_bins(
         }
     };
 
-    let fetch_start = clamp_coordinate(window_start, chrom_length);
-    let fetch_end = clamp_coordinate(window_end, chrom_length);
+    let window_span = plan.window_end - plan.window_start;
+    if window_span <= 0 {
+        return Ok(vec![f32::NAN; bin_count]);
+    }
 
-    let intervals = if fetch_start < fetch_end {
-        sample
+    let window_len =
+        usize::try_from(window_span).expect("reference-point window span exceeds usize");
+    let default_fill = if general.missing_data_as_zero {
+        0.0f32
+    } else {
+        f32::NAN
+    };
+
+    let mut coverage = vec![default_fill; window_len];
+    let fetch_start = clamp_coordinate(plan.window_start, chrom_length);
+    let fetch_end = clamp_coordinate(plan.window_end, chrom_length);
+
+    if fetch_start < fetch_end {
+        let intervals = sample
             .reader
             .values(&record.chrom, fetch_start, fetch_end)
             .map_err(anyhow::Error::new)
@@ -434,36 +434,39 @@ fn compute_sample_bins(
                     record.chrom,
                     sample.path.display()
                 )
-            })?
-    } else {
-        Vec::new()
-    };
+            })?;
+
+        let base_offset = plan.window_start;
+        for interval in intervals {
+            let overlap_start = interval.start.max(fetch_start);
+            let overlap_end = interval.end.min(fetch_end);
+            if overlap_start >= overlap_end {
+                continue;
+            }
+            let rel_start = (overlap_start as i64 - base_offset) as usize;
+            let rel_end = (overlap_end as i64 - base_offset) as usize;
+            coverage[rel_start..rel_end].fill(interval.value);
+        }
+    }
 
     let mut bins = Vec::with_capacity(bin_count);
-    for bin_index in 0..bin_count {
-        let (bin_start, bin_end) =
-            bin_boundaries(bin_index, upstream_bins, bin_size, reference, record.strand);
+    for bin in &plan.bins {
+        let start_idx = index_from_coordinate(bin.start, plan.window_start, window_len);
+        let end_idx = index_from_coordinate(bin.end, plan.window_start, window_len);
 
-        let clamped_start = clamp_coordinate(bin_start, chrom_length);
-        let clamped_end = clamp_coordinate(bin_end, chrom_length);
-
-        let (sum, covered) = if clamped_start < clamped_end {
-            summarise_bin(&intervals, clamped_start, clamped_end)
+        let mut value = if start_idx < end_idx {
+            aggregate_slice(&coverage[start_idx..end_idx], general.average_type_bins)
         } else {
-            (0.0, 0)
+            None
         };
 
-        let mut value = if covered == 0 {
-            if general.missing_data_as_zero {
-                0.0
-            } else {
-                f32::NAN
-            }
-        } else {
-            (sum / covered as f64) as f32
-        };
+        if value.is_none() && general.missing_data_as_zero {
+            value = Some(0.0);
+        }
 
-        if options.nan_after_end && bin_beyond_region(record, bin_start, bin_end) {
+        let mut value = value.unwrap_or(f32::NAN);
+
+        if options.nan_after_end && bin.beyond_region {
             value = f32::NAN;
         }
 
@@ -477,87 +480,63 @@ fn compute_sample_bins(
     Ok(bins)
 }
 
-fn reference_coordinate(record: &BedRecord, reference_point: &ReferencePoint) -> i64 {
-    let start = record.start as i64;
-    let end = record.end as i64;
-
-    match reference_point {
-        ReferencePoint::Tss => match record.strand {
-            Strand::Negative => end,
-            _ => start,
-        },
-        ReferencePoint::Tes => match record.strand {
-            Strand::Negative => start,
-            _ => end,
-        },
-        ReferencePoint::Center => (start + end) / 2,
+fn index_from_coordinate(value: i64, base: i64, window_len: usize) -> usize {
+    if value <= base {
+        return 0;
     }
+    let diff = value - base;
+    let idx = usize::try_from(diff).unwrap_or(window_len);
+    idx.min(window_len)
 }
 
-fn window_bounds(reference: i64, strand: Strand, options: &ReferencePointOptions) -> (i64, i64) {
-    let upstream = options.upstream as i64;
-    let downstream = options.downstream as i64;
-    match strand {
-        Strand::Negative => (reference - downstream, reference + upstream),
-        _ => (reference - upstream, reference + downstream),
+fn aggregate_slice(slice: &[f32], average_type: AverageTypeBins) -> Option<f32> {
+    let mut values: Vec<f64> = slice
+        .iter()
+        .copied()
+        .filter(|value| !value.is_nan())
+        .map(|value| value as f64)
+        .collect();
+
+    if values.is_empty() {
+        return None;
     }
-}
 
-fn bin_boundaries(
-    bin_index: usize,
-    upstream_bins: usize,
-    bin_size: u32,
-    reference: i64,
-    strand: Strand,
-) -> (i64, i64) {
-    let bin_size = bin_size as i64;
-    let offset_start = (bin_index as i64 - upstream_bins as i64) * bin_size;
-    let offset_end = offset_start + bin_size;
-
-    match strand {
-        Strand::Negative => {
-            let start = reference - offset_end;
-            let end = reference - offset_start;
-            (start.min(end), start.max(end))
+    match average_type {
+        AverageTypeBins::Mean => {
+            let mean = values.iter().sum::<f64>() / values.len() as f64;
+            Some(mean as f32)
         }
-        _ => {
-            let start = reference + offset_start;
-            let end = reference + offset_end;
-            (start.min(end), start.max(end))
+        AverageTypeBins::Median => {
+            values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let mid = values.len() / 2;
+            if values.len() % 2 == 0 {
+                Some(((values[mid - 1] + values[mid]) / 2.0) as f32)
+            } else {
+                Some(values[mid] as f32)
+            }
+        }
+        AverageTypeBins::Min => values
+            .into_iter()
+            .reduce(f64::min)
+            .map(|value| value as f32),
+        AverageTypeBins::Max => values
+            .into_iter()
+            .reduce(f64::max)
+            .map(|value| value as f32),
+        AverageTypeBins::Sum => Some(values.into_iter().sum::<f64>() as f32),
+        AverageTypeBins::Std => {
+            let mean = values.iter().sum::<f64>() / values.len() as f64;
+            let variance = values
+                .iter()
+                .map(|value| {
+                    let delta = value - mean;
+                    delta * delta
+                })
+                .sum::<f64>()
+                / values.len() as f64;
+            Some(variance.sqrt() as f32)
         }
     }
-}
-
-fn bin_beyond_region(record: &BedRecord, bin_start: i64, bin_end: i64) -> bool {
-    let region_start = record.start as i64;
-    let region_end = record.end as i64;
-
-    match record.strand {
-        Strand::Negative => bin_end <= region_start,
-        _ => bin_start >= region_end,
-    }
-}
-
-fn summarise_bin(intervals: &[BigWigValue], start: u32, end: u32) -> (f64, u32) {
-    let mut sum = 0.0f64;
-    let mut covered = 0u32;
-    for value in intervals {
-        if value.end <= start {
-            continue;
-        }
-        if value.start >= end {
-            break;
-        }
-        let overlap_start = value.start.max(start);
-        let overlap_end = value.end.min(end);
-        if overlap_start >= overlap_end {
-            continue;
-        }
-        let length = overlap_end - overlap_start;
-        sum += value.value as f64 * length as f64;
-        covered += length;
-    }
-    (sum, covered)
 }
 
 fn clamp_coordinate(value: i64, chrom_length: u32) -> u32 {
@@ -572,72 +551,26 @@ fn clamp_coordinate(value: i64, chrom_length: u32) -> u32 {
 mod tests {
     use super::*;
 
-    fn build_record(strand: Strand, start: u32, end: u32) -> BedRecord {
-        BedRecord {
-            chrom: "chr1".to_string(),
-            start,
-            end,
-            name: None,
-            score: None,
-            strand,
-            extra_fields: Vec::new(),
-        }
+    #[test]
+    fn index_from_coordinate_bounds_checks() {
+        let base = 100;
+        let window_len = 50;
+        assert_eq!(index_from_coordinate(90, base, window_len), 0);
+        assert_eq!(index_from_coordinate(100, base, window_len), 0);
+        assert_eq!(index_from_coordinate(125, base, window_len), 25);
+        assert_eq!(index_from_coordinate(200, base, window_len), window_len);
     }
 
     #[test]
-    fn reference_coordinate_respects_strand_for_tss() {
-        let positive = build_record(Strand::Positive, 100, 200);
-        let negative = build_record(Strand::Negative, 100, 200);
+    fn aggregate_slice_ignores_nans() {
+        let data = [1.0, f32::NAN, 3.0, 5.0];
+        let mean = aggregate_slice(&data, AverageTypeBins::Mean).unwrap();
+        assert!((mean - 3.0).abs() < 1e-6);
 
-        assert_eq!(reference_coordinate(&positive, &ReferencePoint::Tss), 100);
-        assert_eq!(reference_coordinate(&negative, &ReferencePoint::Tss), 200);
-    }
+        let max = aggregate_slice(&data, AverageTypeBins::Max).unwrap();
+        assert_eq!(max, 5.0);
 
-    #[test]
-    fn reference_coordinate_respects_strand_for_tes() {
-        let positive = build_record(Strand::Positive, 100, 200);
-        let negative = build_record(Strand::Negative, 100, 200);
-
-        assert_eq!(reference_coordinate(&positive, &ReferencePoint::Tes), 200);
-        assert_eq!(reference_coordinate(&negative, &ReferencePoint::Tes), 100);
-    }
-
-    #[test]
-    fn reference_coordinate_center_midpoint() {
-        let record = build_record(Strand::Positive, 5, 15);
-        assert_eq!(reference_coordinate(&record, &ReferencePoint::Center), 10);
-    }
-
-    #[test]
-    fn bin_boundaries_handle_positive_strand() {
-        let reference = 100;
-        let (start_upstream, end_upstream) = bin_boundaries(0, 2, 10, reference, Strand::Positive);
-        assert_eq!((start_upstream, end_upstream), (80, 90));
-
-        let (start_downstream, end_downstream) =
-            bin_boundaries(2, 2, 10, reference, Strand::Positive);
-        assert_eq!((start_downstream, end_downstream), (100, 110));
-    }
-
-    #[test]
-    fn bin_boundaries_handle_negative_strand() {
-        let reference = 200;
-        let (start_upstream, end_upstream) = bin_boundaries(0, 2, 10, reference, Strand::Negative);
-        assert_eq!((start_upstream, end_upstream), (210, 220));
-
-        let (start_downstream, end_downstream) =
-            bin_boundaries(2, 2, 10, reference, Strand::Negative);
-        assert_eq!((start_downstream, end_downstream), (190, 200));
-    }
-
-    #[test]
-    fn bin_beyond_region_detects_downstream_tail() {
-        let record = build_record(Strand::Positive, 100, 200);
-        assert!(bin_beyond_region(&record, 205, 215));
-        assert!(!bin_beyond_region(&record, 195, 205));
-
-        let record_neg = build_record(Strand::Negative, 100, 200);
-        assert!(bin_beyond_region(&record_neg, 80, 90));
-        assert!(!bin_beyond_region(&record_neg, 95, 105));
+        let median = aggregate_slice(&data, AverageTypeBins::Median).unwrap();
+        assert_eq!(median, 3.0);
     }
 }

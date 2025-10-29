@@ -130,20 +130,20 @@
 ## Implementation Order (Macro Level)
 - [ ] `cli` + `config`: initial structs exist, but CLI parity, alias coverage, and validation gaps still need audit/patching.
 - [ ] `io::bed` + grouping utilities: baseline BED parser present, yet group handling and GTF integration require completion.
-- [ ] `io::bigwig`: thin wrapper in place; needs NaN/zero semantics, caching strategy, and error parity with DeepTools.
-- [ ] `pipeline::zones`: not started; zone splitting/padding helpers still missing.
-- [ ] `pipeline::reference_point`: prototype runs but lacks exon-aware zones, average-type support, and concurrency.
-- [ ] `io::writers`: gzip/tab outputs implemented, but header format (missing `@` prefix) and per-sample metadata normalisation remain TODO.
+- [ ] `io::bigwig`: thin wrapper in place; needs NaN/zero semantics, caching strategy, and error parity with DeepTools (currently implemented ad-hoc in the pipeline).
+- [x] `pipeline::zones`: reference-point bin layout helper landed in `pipeline::zones`.
+- [ ] `pipeline::reference_point`: worker now honours zone plan and average-type settings but still lacks concurrency and diagnostics.
+- [ ] `io::writers`: gzip/tab outputs implemented; metadata normalisation (e.g., special param expansion) still pending despite `@` header prefix fix.
 - [ ] `pipeline::matrix`: data structs exist; sorting, boundary helpers, and skip-zero removal logic unimplemented.
 - [ ] Regression harness (`scripts/` + integration tests): Python comparison script exists but not wired into tests/CI.
 - [ ] `pipeline::scale_regions`: not implemented.
 - [ ] Advanced features (clustering, diagnostics polish) and performance tuning: pending.
 
 ## Implementation Order (Detailed within Reference-Point Milestone)
-- [ ] Zone helper port (`chop_regions`, `chop_regions_from_middle`, `trim_zones`): no Rust equivalent yet.
-- [ ] BigWig sampling layer: current binning averages ignore masked stats and padding rules; needs redesign.
-- [ ] Per-region worker: present but simplified—must integrate zone logic, min/max diagnostics, and exon-aware windows.
+- [x] Zone helper port (`chop_regions`, `chop_regions_from_middle`, `trim_zones`): coverage windows now generated via `ReferencePointPlan`.
+- [x] BigWig sampling layer: dense window reconstruction handles NaN/zero padding prior to bin aggregation.
+- [x] Per-region worker: integrates zone plan, average-type aggregations, and scale factor application for each sample.
 - [ ] Task scheduler: rayon-based chunking not implemented; processing remains single-threaded.
 - [ ] Matrix assembly: needs boundary computation, skip-zero pruning, and sort hooks beyond basic struct fill.
-- [ ] Output serialization: header should be prefixed with `@` and replicate legacy list normalisation; value formatting requires review.
+- [ ] Output serialization: header prefix now matches DeepTools; still need legacy list normalisation and value formatting review.
 - [ ] Regression GLUE: script available, but cargo test/integration gating and automated diffing are outstanding.

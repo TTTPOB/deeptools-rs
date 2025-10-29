@@ -79,7 +79,7 @@ pub enum ProcessorRequest {
     Fixed(u32),
 }
 
-#[derive(Debug, Clone, ValueEnum)]
+#[derive(Debug, Clone, Copy, ValueEnum)]
 #[clap(rename_all = "lower")]
 pub enum SortRegions {
     Descend,
@@ -89,7 +89,7 @@ pub enum SortRegions {
     Keep,
 }
 
-#[derive(Debug, Clone, ValueEnum)]
+#[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum SortUsing {
     Mean,
     Median,
@@ -100,7 +100,7 @@ pub enum SortUsing {
     RegionLength,
 }
 
-#[derive(Debug, Clone, ValueEnum)]
+#[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum AverageTypeBins {
     Mean,
     Median,
@@ -110,7 +110,7 @@ pub enum AverageTypeBins {
     Sum,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum ReferencePoint {
     Tss,
     Tes,
