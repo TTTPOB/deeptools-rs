@@ -409,7 +409,7 @@ fn derive_sample_labels(paths: &[PathBuf], general: &GeneralOptions) -> Result<V
 }
 
 fn default_label(path: &Path) -> String {
-    path.file_stem()
+    path.file_name()
         .and_then(|stem| stem.to_str())
         .map(|value| value.to_string())
         .unwrap_or_else(|| path.display().to_string())
