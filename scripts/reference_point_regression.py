@@ -470,13 +470,11 @@ def main() -> int:
         "1",
     ]
 
-    region_args: List[str] = []
-    for region in regions:
-        region_args.extend(["-R", str(region)])
+    region_args: List[str] = ["-R"]
+    region_args.extend(str(region) for region in regions)
 
-    signal_args: List[str] = []
-    for signal in signals:
-        signal_args.extend(["-S", str(signal)])
+    signal_args: List[str] = ["-S"]
+    signal_args.extend(str(signal) for signal in signals)
 
     reference_cmd = (
         [
