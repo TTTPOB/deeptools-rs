@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, anyhow, bail};
+use clap::builder::PathBufValueParser;
 use clap::{ArgAction, Args, Parser, Subcommand};
 
 use crate::config::{
@@ -64,6 +65,8 @@ struct RequiredArgs {
         long = "regionsFileName",
         value_name = "File",
         help = "File name or names, in BED or GTF format, containing the regions to plot. If multiple bed files are given, each one is considered a group that can be plotted separately. Also, adding a \"#\" symbol in the bed file causes all the regions until the previous \"#\" to be considered one group.",
+        value_parser = PathBufValueParser::new(),
+        action = ArgAction::Append,
         num_args = 1..,
         required = true
     )]
@@ -74,6 +77,8 @@ struct RequiredArgs {
         long = "scoreFileName",
         value_name = "File",
         help = "bigWig file(s) containing the scores to be plotted. Multiple files should be separated by spaces. BigWig files can be obtained by using the bamCoverage or bamCompare tools. More information about the bigWig file format can be found at http://genome.ucsc.edu/goldenPath/help/bigWig.html",
+        value_parser = PathBufValueParser::new(),
+        action = ArgAction::Append,
         num_args = 1..,
         required = true
     )]
