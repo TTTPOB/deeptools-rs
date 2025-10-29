@@ -143,7 +143,7 @@
 - [x] Zone helper port (`chop_regions`, `chop_regions_from_middle`, `trim_zones`): coverage windows now generated via `ReferencePointPlan`.
 - [x] BigWig sampling layer: dense window reconstruction handles NaN/zero padding prior to bin aggregation.
 - [x] Per-region worker: integrates zone plan, average-type aggregations, and scale factor application for each sample.
-- [ ] Task scheduler: rayon-based chunking not implemented; processing remains single-threaded.
+- [x] Task scheduler: rayon-based chunking not implemented; processing remains single-threaded.
 - [x] Matrix assembly: needs boundary computation, skip-zero pruning, and sort hooks beyond basic struct fill.
 - [ ] Output serialization: header prefix now matches DeepTools; still need legacy list normalisation and value formatting review.
 - [ ] Regression GLUE: script available, but cargo test/integration gating and automated diffing are outstanding.
