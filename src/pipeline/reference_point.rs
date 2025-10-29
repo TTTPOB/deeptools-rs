@@ -416,11 +416,15 @@ fn default_label(path: &Path) -> String {
 }
 
 fn smart_label(path: &Path) -> String {
-    let mut label = default_label(path);
-    if let Some(stripped) = label.strip_suffix(".bw") {
-        label = stripped.to_string();
+    if let Some(stem) = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(|value| value.to_string())
+    {
+        return stem;
     }
-    label
+
+    default_label(path)
 }
 
 fn label_from_path(path: &Path) -> String {
