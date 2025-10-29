@@ -16,7 +16,9 @@ import math
 import shutil
 import subprocess
 import sys
+import time
 import urllib.request
+import resource
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Sequence, Tuple
@@ -125,17 +127,52 @@ def ensure_commands_available(args: argparse.Namespace) -> None:
             raise CommandError(f"Required executable '{exe}' not found on PATH")
 
 
+@dataclass
+class CommandTiming:
+    wall_seconds: float
+    user_seconds: float
+    system_seconds: float
+
+
 def run_command(
     command: Sequence[str], *, cwd: Path | None = None, verbose: bool = False
-) -> None:
+) -> CommandTiming:
     if verbose:
         print("+", " ".join(str(part) for part in command))
+    start = time.perf_counter()
+    usage_before_self = resource.getrusage(resource.RUSAGE_SELF)
+    usage_before_children = resource.getrusage(resource.RUSAGE_CHILDREN)
     try:
         subprocess.run(command, cwd=cwd, check=True)
     except subprocess.CalledProcessError as exc:
         raise CommandError(
             f"Command failed with exit code {exc.returncode}: {' '.join(command)}"
         ) from exc
+    end = time.perf_counter()
+    usage_after_self = resource.getrusage(resource.RUSAGE_SELF)
+    usage_after_children = resource.getrusage(resource.RUSAGE_CHILDREN)
+
+    user_seconds = (usage_after_children.ru_utime - usage_before_children.ru_utime) + (
+        usage_after_self.ru_utime - usage_before_self.ru_utime
+    )
+    system_seconds = (
+        usage_after_children.ru_stime - usage_before_children.ru_stime
+    ) + (usage_after_self.ru_stime - usage_before_self.ru_stime)
+
+    return CommandTiming(
+        wall_seconds=end - start,
+        user_seconds=user_seconds,
+        system_seconds=system_seconds,
+    )
+
+
+def format_timing(label: str, timing: CommandTiming) -> str:
+    return (
+        f"{label}: "
+        f"wall={timing.wall_seconds:.2f}s, "
+        f"user={timing.user_seconds:.2f}s, "
+        f"sys={timing.system_seconds:.2f}s"
+    )
 
 
 def load_matrix(path: Path) -> Matrix:
@@ -467,7 +504,7 @@ def main() -> int:
         "--binSize",
         str(args.bin_size),
         "--numberOfProcessors",
-        "1",
+        "4",
     ]
 
     region_args: List[str] = ["-R"]
@@ -493,6 +530,7 @@ def main() -> int:
         [
             args.cargo,
             "run",
+            "--release",
             "--quiet",
             "--",
             "reference-point",
@@ -513,14 +551,16 @@ def main() -> int:
         print(f"Writing outputs to: {output_dir}")
 
     if not args.keep or not reference_output.exists():
-        run_command(reference_cmd, cwd=repo_root, verbose=args.verbose)
+        reference_timing = run_command(reference_cmd, cwd=repo_root, verbose=args.verbose)
     elif args.verbose:
         print(f"Skipping reference generation, file already exists: {reference_output}")
+        reference_timing = None
 
     if not args.keep or not candidate_output.exists():
-        run_command(candidate_cmd, cwd=repo_root, verbose=args.verbose)
+        candidate_timing = run_command(candidate_cmd, cwd=repo_root, verbose=args.verbose)
     elif args.verbose:
         print(f"Skipping Rust run, file already exists: {candidate_output}")
+        candidate_timing = None
 
     reference_matrix = load_matrix(reference_output)
     candidate_matrix = load_matrix(candidate_output)
@@ -536,6 +576,10 @@ def main() -> int:
         )
         print(f"   Rows compared: {len(reference_matrix.rows)}")
         print(f"   Max abs delta: {max_delta:.3e}")
+        if reference_timing:
+            print("   " + format_timing("Python (pixi)", reference_timing))
+        if candidate_timing:
+            print("   " + format_timing("Rust (cargo)", candidate_timing))
         return 0
 
     print("❌ Matrices differ")
