@@ -60,3 +60,7 @@
 - Flesh out CLI spec doc & config schema based on Python arg groups, ensuring flag names, aliases, defaults, and mutual exclusivity mirror the Python CLI.
 - Prototype bigWig reader module calling `bigtools` to load a narrow window and compare values against `pyBigWig` on fixture data.
 - Draft data structures for region representation and matrix buffering, ensuring we can round-trip through `save_matrix` serialization tests.
+
+
+## Priority
+- Things related to Gtf can be considered later. Focus on bed input first.
