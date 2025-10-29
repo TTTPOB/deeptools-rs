@@ -109,7 +109,7 @@
 - Honour `--quiet` by suppressing per-region messages while still emitting fatal errors.
 
 ## Validation Strategy
-- Use `pixi` to provision the DeepTools reference environment and fixtures (`deeptools/deeptools/test/test_data/`). Add reproducible scripts similar to `scripts/reference_point_regression.py` for both modes.
+- Use `pixi` to provision the DeepTools reference environment and fixtures (`deeptools/deeptools/test/test_data/`). Maintain the unified regression harness (`scripts/compute_matrix_regression.py`) to drive both modes while sharing datasets under `target/compute-matrix-datasets/`.
 - Generate regression artefacts via `pixi run computeMatrix ...` and compare against Rust output (gzip contents, JSON header equality, per-value diff within tolerance). Integrate into `cargo test` as ignored tests gated by an environment variable to avoid requiring Python on every CI run.
 - Add unit tests for zone splitting (`chop_regions`, `trim_zones`), coverage padding, threshold filtering, and matrix sorting to ensure deterministic behaviour.
 
@@ -122,7 +122,7 @@
 - Document full CLI flag mapping (confirmed defaults, alias coverage) and ensure `config` layer encodes them.
 - Finalise region ingestion abstractions (BED groups + upcoming GTF support) and map them to existing `BedRecord`.
 - Flesh out zone-building helpers in Rust and cover them with unit tests using fixtures derived from Python’s `chopRegions` behaviour.
-- Port the worker pipeline for `reference-point` mode end-to-end, validating against `scripts/reference_point_regression.py`.
+- Port the worker pipeline for `reference-point` mode end-to-end, validating against `scripts/compute_matrix_regression.py`.
 - Establish regression harness via `pixi` to automate reference matrix generation for CI/local development.
 
 ## Priority
@@ -136,7 +136,7 @@
 - [x] `pipeline::reference_point`: full worker pipeline with rayon-based parallelism, zone plan integration, average-type aggregations, scale factors, threshold filtering, and nan_after_end support.
 - [x] `io::writers`: gzip/tab/sorted-regions outputs implemented with `@` header prefix; header fields normalized to per-sample lists for backward compatibility.
 - [x] `pipeline::matrix`: sorting (ascend/descend/keep), skip-zero pruning, group boundaries, sample boundaries, and sort metrics (mean/median/max/min/sum/region_length) all implemented.
-- [ ] Regression harness (`scripts/` + integration tests): Python comparison script exists (`scripts/reference_point_regression.py`) but not wired into cargo test or CI; pixi environment ready (`pixi.toml` with deeptools 3.5.6).
+- [ ] Regression harness (`scripts/` + integration tests): unified Python comparison script exists (`scripts/compute_matrix_regression.py`) covering both modes but not yet wired into cargo test or CI; pixi environment ready (`pixi.toml` with deeptools 3.5.6).
 - [x] `pipeline::scale_regions`: initial runner wired into the shared core with scale-aware zone planning and unit coverage; regression comparison still pending.
 - [ ] Advanced features (sorting, diagnostics polish) and performance tuning: pending.
 

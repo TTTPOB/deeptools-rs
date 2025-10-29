@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Generate regression data for computeMatrix reference-point mode.
+"""Generate regression data for computeMatrix.
 
-This script uses the deepTools reference implementation (via pixi) to
-produce a gzipped matrix output for a fixed BED/bigWig pair. It then runs the
+This harness uses the deepTools reference implementation (via pixi) to
+produce gzipped matrix outputs for a fixed BED/bigWig corpus. It then runs the
 Rust reimplementation with the same arguments and compares the resulting
 matrices field-by-field, reporting the maximum absolute deviation observed.
+
+Both `reference-point` and `scale-regions` subcommands are supported.
 """
 
 from __future__ import annotations
@@ -61,6 +63,13 @@ class CommandError(RuntimeError):
     pass
 
 
+def _require_multiple(value: int, divisor: int, flag: str) -> None:
+    if value % divisor != 0:
+        raise CommandError(
+            f"{flag} ({value}) must be a multiple of the bin size ({divisor})"
+        )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -72,6 +81,12 @@ def parse_args() -> argparse.Namespace:
         "--cargo",
         default="cargo",
         help="Path to the cargo executable (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["reference-point", "scale-regions"],
+        default="reference-point",
+        help="computeMatrix subcommand to exercise (default: %(default)s)",
     )
     parser.add_argument(
         "--reference-point",
@@ -92,6 +107,24 @@ def parse_args() -> argparse.Namespace:
         help="Bases downstream of the reference point (default: %(default)s)",
     )
     parser.add_argument(
+        "--region-body-length",
+        type=int,
+        default=200,
+        help="Body length used for scale-regions mode (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--unscaled-5-prime",
+        type=int,
+        default=50,
+        help="Unscaled bases at the 5' end for scale-regions mode (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--unscaled-3-prime",
+        type=int,
+        default=50,
+        help="Unscaled bases at the 3' end for scale-regions mode (default: %(default)s)",
+    )
+    parser.add_argument(
         "--bin-size",
         type=int,
         default=10,
@@ -101,7 +134,7 @@ def parse_args() -> argparse.Namespace:
         "--output-dir",
         type=Path,
         default=None,
-        help="Directory to write artefacts (default: target/reference-point-regression)",
+        help="Directory to write artefacts (default: target/<mode>-regression)",
     )
     parser.add_argument(
         "--tolerance",
@@ -569,7 +602,7 @@ def compare_matrices(
 # use peak center for reference point, use whole peak with +- 2 reagion for scale-region
 # split the peak file into 2 files in half, to simulate two regions.
 
-REFERENCE_POINT_SIGNALS = [
+HARNESS_SIGNALS = [
     (
         "ENCFF093IIW.bigWig",
         "https://www.encodeproject.org/files/ENCFF093IIW/@@download/ENCFF093IIW.bigWig",
@@ -584,24 +617,22 @@ REFERENCE_POINT_SIGNALS = [
     ),
 ]
 
-REFERENCE_POINT_BED = (
+HARNESS_BED = (
     "ENCFF333TAT.bed",
     "https://www.encodeproject.org/files/ENCFF333TAT/@@download/ENCFF333TAT.bed.gz",
 )
 
 
-def prepare_reference_point_dataset(
-    dataset_root: Path, *, verbose: bool = False
-) -> Tuple[List[Path], List[Path]]:
+def prepare_dataset(dataset_root: Path, *, verbose: bool = False) -> Tuple[List[Path], List[Path]]:
     dataset_root.mkdir(parents=True, exist_ok=True)
 
     signals: List[Path] = []
-    for filename, url in REFERENCE_POINT_SIGNALS:
+    for filename, url in HARNESS_SIGNALS:
         destination = dataset_root / filename
         ensure_downloaded(url, destination, verbose=verbose)
         signals.append(destination)
 
-    bed_name, bed_url = REFERENCE_POINT_BED
+    bed_name, bed_url = HARNESS_BED
     bed_gz = dataset_root / f"{bed_name}.gz"
     bed_plain = dataset_root / bed_name
 
@@ -706,18 +737,14 @@ def main() -> int:
     ensure_commands_available(args)
 
     repo_root = Path(__file__).resolve().parents[1]
-    output_dir = args.output_dir or (
-        repo_root / "target" / "reference-point-regression"
-    )
+    output_dir = args.output_dir or (repo_root / "target" / f"{args.mode}-regression")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     cache_dir = output_dir / ".cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    dataset_root = output_dir / "datasets" / "encode_k562_atac"
-    regions, signals = prepare_reference_point_dataset(
-        dataset_root, verbose=args.verbose
-    )
+    dataset_root = repo_root / "target" / "compute-matrix-datasets" / "encode_k562_atac"
+    regions, signals = prepare_dataset(dataset_root, verbose=args.verbose)
 
     if not regions:
         raise FileNotFoundError("No region files available for regression harness")
@@ -726,18 +753,43 @@ def main() -> int:
             "No bigWig signal files available for regression harness"
         )
 
-    command_common = [
-        "--beforeRegionStartLength",
-        str(args.upstream),
-        "--afterRegionStartLength",
-        str(args.downstream),
-        "--referencePoint",
-        args.reference_point,
-        "--binSize",
-        str(args.bin_size),
-        "--numberOfProcessors",
-        "4",
-    ]
+    _require_multiple(args.upstream, args.bin_size, "--beforeRegionStartLength")
+    _require_multiple(args.downstream, args.bin_size, "--afterRegionStartLength")
+    if args.mode == "scale-regions":
+        _require_multiple(args.region_body_length, args.bin_size, "--regionBodyLength")
+        _require_multiple(args.unscaled_5_prime, args.bin_size, "--unscaled5prime")
+        _require_multiple(args.unscaled_3_prime, args.bin_size, "--unscaled3prime")
+
+    if args.mode == "reference-point":
+        command_common = [
+            "--beforeRegionStartLength",
+            str(args.upstream),
+            "--afterRegionStartLength",
+            str(args.downstream),
+            "--referencePoint",
+            args.reference_point,
+            "--binSize",
+            str(args.bin_size),
+            "--numberOfProcessors",
+            "4",
+        ]
+    else:
+        command_common = [
+            "--regionBodyLength",
+            str(args.region_body_length),
+            "--beforeRegionStartLength",
+            str(args.upstream),
+            "--afterRegionStartLength",
+            str(args.downstream),
+            "--unscaled5prime",
+            str(args.unscaled_5_prime),
+            "--unscaled3prime",
+            str(args.unscaled_3_prime),
+            "--binSize",
+            str(args.bin_size),
+            "--numberOfProcessors",
+            "4",
+        ]
 
     region_args: List[str] = ["-R"]
     region_args.extend(str(region) for region in regions)
@@ -751,7 +803,7 @@ def main() -> int:
             args.pixi,
             "run",
             "computeMatrix",
-            "reference-point",
+            args.mode,
         ]
         + region_args
         + signal_args
@@ -765,7 +817,7 @@ def main() -> int:
             "--release",
             "--quiet",
             "--",
-            "reference-point",
+            args.mode,
         ]
         + region_args
         + signal_args
@@ -776,8 +828,8 @@ def main() -> int:
     params_hash = compute_params_hash(base_reference_cmd)
 
     # Use hash in output filenames
-    reference_output = output_dir / f"reference_{params_hash}.mat.gz"
-    candidate_output = output_dir / f"rust_{params_hash}.mat.gz"
+    reference_output = output_dir / f"{args.mode}_reference_{params_hash}.mat.gz"
+    candidate_output = output_dir / f"{args.mode}_rust_{params_hash}.mat.gz"
 
     if not args.keep:
         if reference_output.exists():
