@@ -139,18 +139,9 @@
 - [ ] `pipeline::scale_regions`: not implemented.
 - [ ] Advanced features (clustering via `hmcluster`, diagnostics polish) and performance tuning: pending.
 
-## Implementation Order (Detailed within Reference-Point Milestone)
-- [x] Zone helper port (`chop_regions`, `chop_regions_from_middle`, `trim_zones`): coverage windows now generated via `ReferencePointPlan`.
-- [x] BigWig sampling layer: dense window reconstruction handles NaN/zero padding prior to bin aggregation.
-- [x] Per-region worker: integrates zone plan, average-type aggregations, and scale factor application for each sample.
-- [x] Task scheduler: rayon-based chunking not implemented; processing remains single-threaded.
-- [x] Matrix assembly: needs boundary computation, skip-zero pruning, and sort hooks beyond basic struct fill.
-- [x] Output serialization: header prefix now matches DeepTools; still need legacy list normalisation and value formatting review.
-- [ ] Regression GLUE: script available, but cargo test/integration gating and automated diffing are outstanding.
-
-### Task Scheduler Plan (Rayon)
-- Partition the region list into deterministic chunks (target ~64 regions each) while preserving group boundaries so downstream sorting remains stable; expose chunk sizing via `Config.scheduler.chunk_size`.
-- Convert the sequential region iterator in `pipeline::reference_point::execute` into a `rayon::ThreadPool`-backed `par_bridge`, yielding `TaskPayload` structs that bundle zones, sample handles, and provenance metadata.
-- Provide a scoped resource manager that hands each worker thread a `Vec<BigWigCache>` built with `rayon::ThreadPool::install` to avoid `Send` conflicts and to reuse file handles across tasks.
-- Ensure worker results implement `Send`/`Sync` by moving owned buffers into a `TaskResult` struct; aggregate with `rayon::iter::ParallelIterator::reduce` so the hot path stays lock-free except for a bounded `crossbeam` channel used to stream progress updates.
-- Propagate errors via `Result<TaskResult>` and surface them with `rayon::join_context` so early exits cancel sibling jobs; wrap in a thin `scheduler::execute_parallel` helper to keep orchestration code testable with a single-threaded fallback.
+## Refactor Plan: Decouple Reference-Point Core
+- Audit `pipeline::reference_point` to tag responsibilities that should be mode-agnostic (zone planning, coverage sampling, aggregation, matrix assembly) versus reference-point specifics (two-zone layout, ref-point metadata). Capture this as a checklist referencing concrete structs/functions.
+- Extract shared mechanics into a new `pipeline::core` (or similar) module exposing: `RegionPlan` trait (bin layout contract), `SignalSampler` abstraction (bigWig + value transforms), and a `MatrixBuilder` orchestrator that only depends on these interfaces.
+- Port the existing reference-point flow onto the new abstractions first: thin mode adapter supplies the two-zone `RegionPlan`, keeps the current metadata headers, and delegates worker execution to the shared core to ensure no behaviour change.
+- Update tests/regressions: adjust unit coverage around zone planning/aggregation to target the new module, add a focused regression using the pixi-powered harness to confirm byte-for-byte parity before touching scale-regions.
+- Document follow-up hooks for scale-regions: outline expected `RegionPlan` implementation (five-zone with variable body bins), shared config wiring, and any additional metadata requirements so the subsequent milestone has a clear runway.
