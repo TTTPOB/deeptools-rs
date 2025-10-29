@@ -59,10 +59,6 @@ fn write_matrix_row<W: Write>(writer: &mut W, row: &MatrixRow) -> Result<()> {
         row.record.strand.as_char()
     )?;
 
-    for field in &row.record.extra_fields {
-        write!(writer, "\t{}", field)?;
-    }
-
     for sample_values in &row.values {
         for value in sample_values {
             write!(writer, "\t{}", format_matrix_value(*value))?;
