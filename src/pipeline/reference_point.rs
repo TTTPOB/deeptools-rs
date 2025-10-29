@@ -3,14 +3,29 @@ use std::convert::TryFrom;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
+use rayon::ThreadPoolBuilder;
+use rayon::prelude::*;
 
 use crate::config::{AverageTypeBins, GeneralOptions, IoOptions, ReferencePointOptions};
 use crate::io::{BedReadError, BedRecord, BigWigReader};
 use crate::pipeline::zones::ReferencePointPlan;
 
 use super::matrix::{MatrixData, MatrixHeader, MatrixRow};
+
+struct RegionTask {
+    index: usize,
+    group_index: usize,
+    record: BedRecord,
+}
+
+struct RegionResult {
+    index: usize,
+    group_index: usize,
+    row: Option<MatrixRow>,
+}
 
 pub fn run(
     general: &GeneralOptions,
@@ -32,33 +47,77 @@ pub fn run(
     }
 
     let sample_labels = derive_sample_labels(&io.scores, general)?;
-    let mut samples = open_samples(&io.scores)?;
-    let sample_count = samples.len();
+    let sample_count = io.scores.len();
 
     let groups = load_groups(&io.regions)?;
-    let mut rows = Vec::new();
     let mut group_counts = vec![0usize; groups.len()];
 
+    let mut tasks = Vec::new();
     for (group_index, group) in groups.iter().enumerate() {
         for record in &group.records {
-            let plan = ReferencePointPlan::reference_point(
-                record,
-                options.reference_point,
-                bin_size,
-                upstream_bins,
-                downstream_bins,
-            );
-            match compute_row(&mut samples, record, &plan, options, general)? {
-                Some(values) => {
-                    group_counts[group_index] += 1;
-                    rows.push(MatrixRow {
-                        record: record.clone(),
-                        values,
-                    });
-                }
-                None => {
-                    // Region skipped due to thresholds or zero masking.
-                }
+            let index = tasks.len();
+            tasks.push(RegionTask {
+                index,
+                group_index,
+                record: record.clone(),
+            });
+        }
+    }
+
+    let task_count = tasks.len();
+    let thread_count = std::cmp::max(1, general.number_of_processors.resolve() as usize);
+    let mut rows = Vec::with_capacity(task_count);
+
+    if task_count > 0 {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(thread_count)
+            .build()
+            .context("Failed to initialise rayon thread pool for reference-point scheduling")?;
+
+        let sample_paths = Arc::new(io.scores.clone());
+        let collected = pool.install(|| {
+            tasks
+                .into_par_iter()
+                .map_init(
+                    || WorkerSamples::new(sample_paths.clone()),
+                    |state, task| {
+                        let RegionTask {
+                            index,
+                            group_index,
+                            record,
+                        } = task;
+
+                        let samples = state.samples()?;
+
+                        let plan = ReferencePointPlan::reference_point(
+                            &record,
+                            options.reference_point,
+                            bin_size,
+                            upstream_bins,
+                            downstream_bins,
+                        );
+
+                        let maybe_values =
+                            compute_row(samples.as_mut_slice(), &record, &plan, options, general)?;
+                        let row = maybe_values.map(|values| MatrixRow { record, values });
+
+                        Ok(RegionResult {
+                            index,
+                            group_index,
+                            row,
+                        })
+                    },
+                )
+                .collect::<Vec<_>>()
+        });
+
+        let mut collected = collected.into_iter().collect::<Result<Vec<_>>>()?;
+        collected.sort_by_key(|entry| entry.index);
+
+        for entry in collected {
+            if let Some(row) = entry.row {
+                group_counts[entry.group_index] += 1;
+                rows.push(row);
             }
         }
     }
@@ -67,7 +126,7 @@ pub fn run(
     let group_boundaries = MatrixData::group_boundaries_from_counts(&group_counts);
     let sample_boundaries = MatrixData::sample_boundaries_uniform(sample_count, total_bins);
 
-    let proc_number = general.number_of_processors.resolve();
+    let proc_number = thread_count as u32;
 
     let header = MatrixHeader {
         verbose: general.verbose,
@@ -145,6 +204,24 @@ impl Sample {
 
     fn chrom_length(&self, chrom: &str) -> Option<u32> {
         self.chrom_lengths.get(chrom).copied()
+    }
+}
+
+struct WorkerSamples {
+    samples: Result<Vec<Sample>, String>,
+}
+
+impl WorkerSamples {
+    fn new(paths: Arc<Vec<PathBuf>>) -> Self {
+        let samples = open_samples(paths.as_ref()).map_err(|err| err.to_string());
+        Self { samples }
+    }
+
+    fn samples(&mut self) -> Result<&mut Vec<Sample>> {
+        match &mut self.samples {
+            Ok(samples) => Ok(samples),
+            Err(message) => Err(anyhow!(message.clone())),
+        }
     }
 }
 
