@@ -126,3 +126,24 @@
 
 ## Priority
 - Focus on BED-based `reference-point` parity first; defer full GTF handling, clustering, and `scale-regions` specific features until after the regression suite passes on BED fixtures.
+
+## Implementation Order (Macro Level)
+1. `cli` + `config`: finalise argument mapping, default propagation, and validation so downstream modules consume typed settings without parsing concerns.
+2. `io::bed` + grouping utilities: ensure BED ingestion and group labelling are stable before wiring more complex pipelines.
+3. `io::bigwig`: wrap `bigtools` with deterministic coverage retrieval and chromosome metadata caching.
+4. `pipeline::zones`: implement region chopping/padding helpers shared by both modes, complete with unit tests.
+5. `pipeline::reference_point`: build the end-to-end worker path (zone planning → coverage sampling → bin aggregation) and return `MatrixData`.
+6. `io::writers`: emit gzipped matrix, optional matrix tables, and BED outputs to enable regression comparisons.
+7. `pipeline::matrix`: add sorting, skip-zero filtering, and metadata boundary helpers once rows can be generated.
+8. Regression harness (`scripts/` + integration tests): lock in fixture-driven parity before expanding feature surface.
+9. `pipeline::scale_regions`: layer on the additional zone logic, reusing earlier components.
+10. Advanced features (clustering, diagnostics polish) and performance tuning once both modes pass regressions.
+
+## Implementation Order (Detailed within Reference-Point Milestone)
+1. Zone helper port (`chop_regions`, `chop_regions_from_middle`, `trim_zones`) with fixture-backed unit tests.
+2. BigWig sampling layer: implement contiguous slice retrieval, NaN/zero padding, and statistic selection (`AverageType`).
+3. Per-region worker: combine zones + coverage + thresholds into `Vec<Vec<f32>>`, capturing no-score diagnostics.
+4. Task scheduler: batch regions by chromosome, execute with rayon respecting processor limits.
+5. Matrix assembly: construct `MatrixData`, compute boundaries, apply skip-zero and sorting hooks.
+6. Output serialization: ensure header JSON and row formatting are byte-compatible with DeepTools.
+7. Regression GLUE: wire `scripts/reference_point_regression.py` to invoke both pipelines and diff results.
