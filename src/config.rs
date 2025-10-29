@@ -210,3 +210,13 @@ impl fmt::Display for ReferencePoint {
         f.write_str(value)
     }
 }
+
+impl fmt::Display for ProcessorRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ProcessorRequest::Max => f.write_str("max"),
+            ProcessorRequest::MaxHalf => f.write_str("max/2"),
+            ProcessorRequest::Fixed(value) => write!(f, "{}", value),
+        }
+    }
+}

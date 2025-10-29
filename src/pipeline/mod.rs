@@ -1,26 +1,35 @@
+pub use matrix::{MatrixData, MatrixHeader, MatrixRow};
+pub mod matrix;
+mod reference_point;
+
 use crate::config::{Config, ModeConfig};
+use crate::io::writers;
 
 pub fn execute(config: Config) -> anyhow::Result<()> {
-    if !config.general.quiet {
+    let general = &config.general;
+    let io = &config.io;
+
+    if !general.quiet {
         eprintln!(
             "Running computeMatrix (Rust) in {} mode.",
             describe_mode(&config.mode)
         );
-        if config.general.verbose {
+        if general.verbose {
             eprintln!(
                 "Processing {} region file(s) against {} score file(s).",
-                config.io.regions.len(),
-                config.io.scores.len()
+                io.regions.len(),
+                io.scores.len()
             );
         }
     }
 
-    match config.mode {
-        ModeConfig::ScaleRegions(_) => {
+    match &config.mode {
+        ModeConfig::ScaleRegions(_options) => {
             // TODO: implement scale-regions pipeline.
         }
-        ModeConfig::ReferencePoint(_) => {
-            // TODO: implement reference-point pipeline.
+        ModeConfig::ReferencePoint(options) => {
+            let matrix = reference_point::run(general, io, options)?;
+            writers::write_outputs(&matrix, io)?;
         }
     }
 
