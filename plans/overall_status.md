@@ -136,7 +136,7 @@
 - [x] `pipeline::reference_point`: full worker pipeline with rayon-based parallelism, zone plan integration, average-type aggregations, scale factors, threshold filtering, and nan_after_end support.
 - [x] `io::writers`: gzip/tab/sorted-regions outputs implemented with `@` header prefix; header fields normalized to per-sample lists for backward compatibility.
 - [x] `pipeline::matrix`: sorting (ascend/descend/keep), skip-zero pruning, group boundaries, sample boundaries, and sort metrics (mean/median/max/min/sum/region_length) all implemented.
-- [ ] Regression harness (`scripts/` + integration tests): unified Python comparison script exists (`scripts/compute_matrix_regression.py`) covering both modes but not yet wired into cargo test or CI; pixi environment ready (`pixi.toml` with deeptools 3.5.6).
+- [ ] Regression harness (`scripts/` + integration tests): unified Python comparison script exists (`scripts/compute_matrix_regression.py`) covering both modes but not yet wired into cargo test or CI; pixi environment ready (`pixi.toml` with deeptools 3.5.6). Added split `--keep-ref/--keep-rust` flags with Rust timing caching on 2025-10-29; aligned Rust cache hashes with artefact names and persisted command arrays on 2025-10-29.
 - [x] `pipeline::scale_regions`: initial runner wired into the shared core with scale-aware zone planning and unit coverage; regression comparison still pending.
 - [ ] Advanced features (sorting, diagnostics polish) and performance tuning: pending.
 

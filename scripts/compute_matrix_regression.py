@@ -22,7 +22,7 @@ import subprocess
 import sys
 import time
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Sequence, Tuple
 
@@ -143,19 +143,28 @@ def parse_args() -> argparse.Namespace:
         help="Acceptable absolute tolerance when comparing matrix values (default: %(default)s)",
     )
     parser.add_argument(
-        "--keep",
-        action="store_true",
-        help="Keep existing outputs instead of regenerating them",
+        "--keep-ref",
+        dest="keep_ref",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Reuse existing reference outputs and cached timing (use --no-keep-ref to regenerate)",
     )
     parser.add_argument(
-        "--no-cache",
-        action="store_true",
-        help="Skip cache and always run commands fresh",
+        "--keep-rust",
+        dest="keep_rust",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Reuse existing Rust outputs and cached timing (use --no-keep-rust to regenerate)",
     )
     parser.add_argument(
         "--verbose",
         action="store_true",
         help="Print executed commands and comparison details",
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Skip cache and always run commands fresh",
     )
     return parser.parse_args()
 
@@ -194,6 +203,7 @@ class CachedResult:
     output_path: str
     timing: CommandTiming
     timestamp: float
+    command: List[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -201,15 +211,22 @@ class CachedResult:
             "output_path": self.output_path,
             "timing": self.timing.to_dict(),
             "timestamp": self.timestamp,
+            "command": self.command,
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "CachedResult":
+        raw_cmd = data.get("command", [])
+        if isinstance(raw_cmd, str):
+            command = [raw_cmd]
+        else:
+            command = [str(part) for part in raw_cmd]
         return cls(
             command_hash=data["command_hash"],
             output_path=data["output_path"],
             timing=CommandTiming.from_dict(data["timing"]),
             timestamp=data["timestamp"],
+            command=command,
         )
 
 
@@ -347,18 +364,19 @@ def run_command_cached(
     verbose: bool = False,
     skip_cache: bool = False,
     enable_cache: bool = True,
+    cache_key: str | None = None,
 ) -> tuple[CommandTiming, bool]:
     """
     Run a command with caching support.
 
     Args:
         enable_cache: If False, always run the command without checking or saving cache.
-                      Used to disable caching for Rust implementation.
+        cache_key: Optional override for the cache filename and stored command hash.
 
     Returns:
         tuple of (CommandTiming, from_cache: bool)
     """
-    cmd_hash = compute_params_hash(command)
+    cmd_hash = cache_key or compute_params_hash(command)
     cache_file = cache_dir / f"{cmd_hash}.json"
     use_cache = enable_cache and not skip_cache
 
@@ -394,6 +412,7 @@ def run_command_cached(
             output_path=str(output_path.resolve()),
             timing=timing,
             timestamp=time.time(),
+            command=[str(part) for part in command],
         )
         save_cache(cached_result, cache_file)
         if verbose:
@@ -701,14 +720,14 @@ def split_bed_file(
 
 def _load_timing_if_kept(
     output: Path,
-    params_hash: str,
+    cache_key: str,
     cache_dir: Path,
     keep: bool,
     no_cache: bool,
     verbose: bool,
 ) -> tuple[CommandTiming | None, bool]:
     """
-    Load cached timing if output exists and --keep is set.
+    Load cached timing if output exists and keeping is enabled.
 
     Returns:
         tuple of (CommandTiming or None, from_cache: bool)
@@ -717,12 +736,12 @@ def _load_timing_if_kept(
         return None, False
 
     if verbose:
-        print(f"Output exists (--keep): {output}")
+        print(f"Output exists (keeping): {output}")
 
     if no_cache:
         return None, False
 
-    cache_file = cache_dir / f"{params_hash}.json"
+    cache_file = cache_dir / f"{cache_key}.json"
     cached = load_cache(cache_file)
     if cached is not None:
         if verbose:
@@ -740,8 +759,12 @@ def main() -> int:
     output_dir = args.output_dir or (repo_root / "target" / f"{args.mode}-regression")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    cache_dir = output_dir / ".cache"
-    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_root = output_dir / ".cache"
+    cache_root.mkdir(parents=True, exist_ok=True)
+    reference_cache_dir = cache_root / "reference"
+    reference_cache_dir.mkdir(parents=True, exist_ok=True)
+    rust_cache_dir = cache_root / "rust"
+    rust_cache_dir.mkdir(parents=True, exist_ok=True)
 
     dataset_root = repo_root / "target" / "compute-matrix-datasets" / "encode_k562_atac"
     regions, signals = prepare_dataset(dataset_root, verbose=args.verbose)
@@ -825,17 +848,16 @@ def main() -> int:
     )
 
     # Compute hash from parameters (excluding output filename)
-    params_hash = compute_params_hash(base_reference_cmd)
+    reference_hash = compute_params_hash(base_reference_cmd)
 
-    # Use hash in output filenames
-    reference_output = output_dir / f"{args.mode}_reference_{params_hash}.mat.gz"
-    candidate_output = output_dir / f"{args.mode}_rust_{params_hash}.mat.gz"
+    # Use reference hash in output filenames (shared across implementations)
+    reference_output = output_dir / f"{args.mode}_reference_{reference_hash}.mat.gz"
+    candidate_output = output_dir / f"{args.mode}_rust_{reference_hash}.mat.gz"
 
-    if not args.keep:
-        if reference_output.exists():
-            reference_output.unlink()
-        if candidate_output.exists():
-            candidate_output.unlink()
+    if not args.keep_ref and reference_output.exists():
+        reference_output.unlink()
+    if not args.keep_rust and candidate_output.exists():
+        candidate_output.unlink()
 
     # Build complete commands with output filenames
     reference_cmd = base_reference_cmd + ["--outFileName", str(reference_output)]
@@ -852,12 +874,12 @@ def main() -> int:
 
     reference_timing = None
     reference_from_cache = False
-    if args.keep and reference_output.exists():
+    if args.keep_ref and reference_output.exists():
         reference_timing, reference_from_cache = _load_timing_if_kept(
             reference_output,
-            params_hash,
-            cache_dir,
-            args.keep,
+            reference_hash,
+            reference_cache_dir,
+            args.keep_ref,
             args.no_cache,
             args.verbose,
         )
@@ -866,21 +888,22 @@ def main() -> int:
         reference_timing, reference_from_cache = run_command_cached(
             reference_cmd,
             reference_output,
-            cache_dir,
+            reference_cache_dir,
             cwd=repo_root,
             verbose=args.verbose,
             skip_cache=args.no_cache,
             enable_cache=True,  # Enable caching for Python reference
+            cache_key=reference_hash,
         )
 
     candidate_timing = None
     candidate_from_cache = False
-    if args.keep and candidate_output.exists():
+    if args.keep_rust and candidate_output.exists():
         candidate_timing, candidate_from_cache = _load_timing_if_kept(
             candidate_output,
-            params_hash,
-            cache_dir,
-            args.keep,
+            reference_hash,
+            rust_cache_dir,
+            args.keep_rust,
             args.no_cache,
             args.verbose,
         )
@@ -889,11 +912,12 @@ def main() -> int:
         candidate_timing, candidate_from_cache = run_command_cached(
             candidate_cmd,
             candidate_output,
-            cache_dir,
+            rust_cache_dir,
             cwd=repo_root,
             verbose=args.verbose,
             skip_cache=args.no_cache,
-            enable_cache=False,  # Disable caching for Rust implementation
+            enable_cache=True,  # Persist Rust timings for future runs
+            cache_key=reference_hash,
         )
 
     reference_matrix = load_matrix(reference_output)
