@@ -1,0 +1,161 @@
+use std::path::PathBuf;
+
+use clap::ValueEnum;
+
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub mode: ModeConfig,
+    pub io: IoOptions,
+    pub general: GeneralOptions,
+    pub gtf: GtfOptions,
+}
+
+#[derive(Debug, Clone)]
+pub struct IoOptions {
+    pub regions: Vec<PathBuf>,
+    pub scores: Vec<PathBuf>,
+    pub matrix_output: PathBuf,
+    pub matrix_values_output: Option<PathBuf>,
+    pub sorted_regions_output: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GeneralOptions {
+    pub bin_size: u32,
+    pub sort_regions: SortRegions,
+    pub sort_using: SortUsing,
+    pub sort_using_samples: Option<Vec<usize>>,
+    pub average_type_bins: AverageTypeBins,
+    pub missing_data_as_zero: bool,
+    pub skip_zeros: bool,
+    pub min_threshold: Option<f64>,
+    pub max_threshold: Option<f64>,
+    pub blacklist: Option<PathBuf>,
+    pub samples_label: Option<Vec<String>>,
+    pub smart_labels: bool,
+    pub quiet: bool,
+    pub verbose: bool,
+    pub scale_factor: f64,
+    pub number_of_processors: ProcessorRequest,
+}
+
+#[derive(Debug, Clone)]
+pub struct GtfOptions {
+    pub keep_exons: bool,
+    pub transcript_id: String,
+    pub exon_id: String,
+    pub transcript_id_designator: String,
+}
+
+#[derive(Debug, Clone)]
+pub enum ModeConfig {
+    ScaleRegions(ScaleRegionsOptions),
+    ReferencePoint(ReferencePointOptions),
+}
+
+#[derive(Debug, Clone)]
+pub struct ScaleRegionsOptions {
+    pub region_body_length: u32,
+    pub start_label: String,
+    pub end_label: String,
+    pub upstream: u32,
+    pub downstream: u32,
+    pub unscaled_5_prime: u32,
+    pub unscaled_3_prime: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReferencePointOptions {
+    pub reference_point: ReferencePoint,
+    pub upstream: u32,
+    pub downstream: u32,
+    pub nan_after_end: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum ProcessorRequest {
+    Max,
+    MaxHalf,
+    Fixed(u32),
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+#[clap(rename_all = "lower")]
+pub enum SortRegions {
+    Descend,
+    Ascend,
+    #[clap(name = "no")]
+    No,
+    Keep,
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+pub enum SortUsing {
+    Mean,
+    Median,
+    Max,
+    Min,
+    Sum,
+    #[clap(name = "region_length")]
+    RegionLength,
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+pub enum AverageTypeBins {
+    Mean,
+    Median,
+    Min,
+    Max,
+    Std,
+    Sum,
+}
+
+#[derive(Debug, Clone)]
+pub enum ReferencePoint {
+    Tss,
+    Tes,
+    Center,
+}
+
+impl ValueEnum for ReferencePoint {
+    fn value_variants<'a>() -> &'a [Self] {
+        static VARIANTS: [ReferencePoint; 3] = [
+            ReferencePoint::Tss,
+            ReferencePoint::Tes,
+            ReferencePoint::Center,
+        ];
+        &VARIANTS
+    }
+
+    fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
+        match self {
+            ReferencePoint::Tss => Some(clap::builder::PossibleValue::new("TSS")),
+            ReferencePoint::Tes => Some(clap::builder::PossibleValue::new("TES")),
+            ReferencePoint::Center => Some(clap::builder::PossibleValue::new("center")),
+        }
+    }
+}
+
+impl Default for SortRegions {
+    fn default() -> Self {
+        SortRegions::Keep
+    }
+}
+
+impl Default for SortUsing {
+    fn default() -> Self {
+        SortUsing::Mean
+    }
+}
+
+impl Default for AverageTypeBins {
+    fn default() -> Self {
+        AverageTypeBins::Mean
+    }
+}
+
+impl Default for ReferencePoint {
+    fn default() -> Self {
+        ReferencePoint::Tss
+    }
+}
