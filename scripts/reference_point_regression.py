@@ -16,6 +16,7 @@ import math
 import shutil
 import subprocess
 import sys
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Sequence, Tuple
@@ -314,25 +315,137 @@ def compare_matrices(
     success = not issues
     return success, max_abs_delta, issues
 
+# update: use larger dataset and more complex conditions
+# bw files:
+# encode:
+# k562_1: https://www.encodeproject.org/files/ENCFF093IIW/@@download/ENCFF093IIW.bigWig
+# k562_2: https://www.encodeproject.org/files/ENCFF019IPA/@@download/ENCFF019IPA.bigWig
+# k562_3: https://www.encodeproject.org/files/ENCFF656ZKM/@@download/ENCFF656ZKM.bigWig
+# bed file:
+# k562: https://www.encodeproject.org/files/ENCFF333TAT/@@download/ENCFF333TAT.bed.gz
+# use peak center for reference point, use whole peak with +- 2 reagion for scale-region
+# split the peak file into 2 files in half, to simulate two regions.
+
+REFERENCE_POINT_SIGNALS = [
+    (
+        "ENCFF093IIW.bigWig",
+        "https://www.encodeproject.org/files/ENCFF093IIW/@@download/ENCFF093IIW.bigWig",
+    ),
+    (
+        "ENCFF019IPA.bigWig",
+        "https://www.encodeproject.org/files/ENCFF019IPA/@@download/ENCFF019IPA.bigWig",
+    ),
+    (
+        "ENCFF656ZKM.bigWig",
+        "https://www.encodeproject.org/files/ENCFF656ZKM/@@download/ENCFF656ZKM.bigWig",
+    ),
+]
+
+REFERENCE_POINT_BED = (
+    "ENCFF333TAT.bed",
+    "https://www.encodeproject.org/files/ENCFF333TAT/@@download/ENCFF333TAT.bed.gz",
+)
+
+
+def prepare_reference_point_dataset(
+    dataset_root: Path, *, verbose: bool = False
+) -> Tuple[List[Path], List[Path]]:
+    dataset_root.mkdir(parents=True, exist_ok=True)
+
+    signals: List[Path] = []
+    for filename, url in REFERENCE_POINT_SIGNALS:
+        destination = dataset_root / filename
+        ensure_downloaded(url, destination, verbose=verbose)
+        signals.append(destination)
+
+    bed_name, bed_url = REFERENCE_POINT_BED
+    bed_gz = dataset_root / f"{bed_name}.gz"
+    bed_plain = dataset_root / bed_name
+
+    ensure_downloaded(bed_url, bed_gz, verbose=verbose)
+    if not bed_plain.exists() or bed_plain.stat().st_mtime < bed_gz.stat().st_mtime:
+        if verbose:
+            print(f"Decompressing {bed_gz.name} -> {bed_plain.name}")
+        with gzip.open(bed_gz, "rb") as src, open(bed_plain, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+
+    region_dir = dataset_root / "regions"
+    region_dir.mkdir(exist_ok=True)
+    region_paths = split_bed_file(bed_plain, region_dir, verbose=verbose)
+
+    return region_paths, signals
+
+
+def ensure_downloaded(url: str, destination: Path, *, verbose: bool = False) -> None:
+    if destination.exists():
+        return
+    tmp_path = destination.with_suffix(destination.suffix + ".tmp")
+    if verbose:
+        print(f"Downloading {url} -> {destination}")
+    try:
+        with urllib.request.urlopen(url) as response, open(tmp_path, "wb") as out_file:
+            shutil.copyfileobj(response, out_file)
+    except Exception as exc:  # pragma: no cover - network failure path
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise CommandError(f"Failed to download {url}: {exc}") from exc
+    tmp_path.rename(destination)
+
+
+def split_bed_file(
+    source: Path, target_dir: Path, *, verbose: bool = False
+) -> List[Path]:
+    with open(source, "r", encoding="utf-8") as handle:
+        lines = handle.readlines()
+
+    comments = [line for line in lines if line.startswith("#")]
+    records = [line for line in lines if line.strip() and not line.startswith("#")]
+
+    if not records:
+        raise CommandError(f"BED file '{source}' does not contain any records")
+
+    midpoint = (len(records) + 1) // 2
+    parts = [
+        ("part1", records[:midpoint]),
+        ("part2", records[midpoint:]),
+    ]
+
+    region_paths: List[Path] = []
+    for suffix, subset in parts:
+        if not subset:
+            continue
+        region_path = target_dir / f"{source.stem}_{suffix}.bed"
+        if verbose:
+            print(f"Writing {region_path} with {len(subset)} records")
+        with open(region_path, "w", encoding="utf-8") as handle:
+            handle.writelines(comments)
+            handle.writelines(subset)
+        region_paths.append(region_path)
+
+    return region_paths
+
 
 def main() -> int:
     args = parse_args()
     ensure_commands_available(args)
 
     repo_root = Path(__file__).resolve().parents[1]
-    data_root = repo_root / "deeptools" / "deeptools" / "test" / "test_heatmapper"
-    regions = data_root / "test2.bed"
-    signal = data_root / "test.bw"
-
-    if not regions.exists():
-        raise FileNotFoundError(f"Regions file not found: {regions}")
-    if not signal.exists():
-        raise FileNotFoundError(f"BigWig file not found: {signal}")
-
     output_dir = args.output_dir or (
         repo_root / "target" / "reference-point-regression"
     )
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    dataset_root = output_dir / "datasets" / "encode_k562_atac"
+    regions, signals = prepare_reference_point_dataset(
+        dataset_root, verbose=args.verbose
+    )
+
+    if not regions:
+        raise FileNotFoundError("No region files available for regression harness")
+    if not signals:
+        raise FileNotFoundError(
+            "No bigWig signal files available for regression harness"
+        )
 
     suffix = args.reference_point.lower()
     reference_output = output_dir / f"reference_{suffix}.mat.gz"
@@ -357,17 +470,23 @@ def main() -> int:
         "1",
     ]
 
+    region_args: List[str] = []
+    for region in regions:
+        region_args.extend(["-R", str(region)])
+
+    signal_args: List[str] = []
+    for signal in signals:
+        signal_args.extend(["-S", str(signal)])
+
     reference_cmd = (
         [
             args.pixi,
             "run",
             "computeMatrix",
             "reference-point",
-            "-R",
-            str(regions),
-            "-S",
-            str(signal),
         ]
+        + region_args
+        + signal_args
         + command_common
         + ["--outFileName", str(reference_output)]
     )
@@ -379,18 +498,20 @@ def main() -> int:
             "--quiet",
             "--",
             "reference-point",
-            "-R",
-            str(regions),
-            "-S",
-            str(signal),
         ]
+        + region_args
+        + signal_args
         + command_common
         + ["--outFileName", str(candidate_output)]
     )
 
     if args.verbose:
-        print(f"Using regions: {regions}")
-        print(f"Using signal: {signal}")
+        print("Using regions:")
+        for region in regions:
+            print(f"  - {region}")
+        print("Using signals:")
+        for signal in signals:
+            print(f"  - {signal}")
         print(f"Writing outputs to: {output_dir}")
 
     if not args.keep or not reference_output.exists():
