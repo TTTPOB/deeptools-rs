@@ -1,3 +1,8 @@
+use std::cmp::Ordering;
+
+use anyhow::{Result, bail};
+
+use crate::config::{SortRegions, SortUsing};
 use crate::io::BedRecord;
 use serde::Serialize;
 
@@ -79,4 +84,181 @@ pub struct MatrixData {
     pub rows: Vec<MatrixRow>,
     pub bin_count: usize,
     pub sample_count: usize,
+}
+
+impl MatrixData {
+    /// Compute cumulative group boundaries from per-group row counts.
+    pub fn group_boundaries_from_counts(counts: &[usize]) -> Vec<usize> {
+        let mut boundaries = Vec::with_capacity(counts.len() + 1);
+        let mut running = 0usize;
+        boundaries.push(0);
+        for count in counts {
+            running += *count;
+            boundaries.push(running);
+        }
+        boundaries
+    }
+
+    /// Compute cumulative sample boundaries for a uniform number of bins per sample.
+    pub fn sample_boundaries_uniform(sample_count: usize, bins_per_sample: usize) -> Vec<usize> {
+        let mut boundaries = Vec::with_capacity(sample_count + 1);
+        for index in 0..=sample_count {
+            boundaries.push(index * bins_per_sample);
+        }
+        boundaries
+    }
+
+    /// Compute cumulative sample boundaries from per-sample bin counts.
+    pub fn sample_boundaries_from_counts(bin_counts: &[usize]) -> Vec<usize> {
+        let mut boundaries = Vec::with_capacity(bin_counts.len() + 1);
+        let mut running = 0usize;
+        boundaries.push(0);
+        for count in bin_counts {
+            running += *count;
+            boundaries.push(running);
+        }
+        boundaries
+    }
+
+    /// Sort rows within each group according to the configured method, mirroring
+    /// the behaviour of DeepTools' `_matrix.sort_groups`.
+    pub fn sort_groups(
+        &mut self,
+        sort_method: SortRegions,
+        sort_using: SortUsing,
+        sample_list: Option<&[usize]>,
+    ) -> Result<()> {
+        if matches!(sort_method, SortRegions::No | SortRegions::Keep) {
+            return Ok(());
+        }
+
+        if self.rows.is_empty() {
+            return Ok(());
+        }
+
+        let sample_list = sample_list.filter(|indices| !indices.is_empty());
+        if let Some(indices) = sample_list {
+            for &index in indices {
+                if index >= self.sample_count {
+                    bail!(
+                        "The value {} for --sortUsingSamples is not valid. Only values from 1 to {} are allowed.",
+                        index + 1,
+                        self.sample_count
+                    );
+                }
+            }
+        }
+
+        let metrics: Vec<f32> = self
+            .rows
+            .iter()
+            .map(|row| compute_sort_metric(row, sort_using, sample_list))
+            .collect();
+
+        let mut reordered = self.rows.clone();
+        for window in self.header.group_boundaries.windows(2) {
+            let start = window[0];
+            let end = window[1];
+            if start >= end {
+                continue;
+            }
+
+            let mut indices: Vec<usize> = (start..end).collect();
+            indices.sort_by(|&left, &right| compare_ascending(metrics[left], metrics[right]));
+            if matches!(sort_method, SortRegions::Descend) {
+                indices.reverse();
+            }
+
+            for (offset, row_index) in indices.into_iter().enumerate() {
+                reordered[start + offset] = self.rows[row_index].clone();
+            }
+        }
+
+        self.rows = reordered;
+        Ok(())
+    }
+}
+
+fn compute_sort_metric(
+    row: &MatrixRow,
+    sort_using: SortUsing,
+    sample_list: Option<&[usize]>,
+) -> f32 {
+    match sort_using {
+        SortUsing::RegionLength => row.record.length() as f32,
+        SortUsing::Sum => {
+            let values = collect_values(row, sample_list);
+            values.into_iter().fold(0.0f32, |acc, value| acc + value)
+        }
+        SortUsing::Mean => {
+            let values = collect_values(row, sample_list);
+            if values.is_empty() {
+                f32::NAN
+            } else {
+                values.iter().copied().sum::<f32>() / values.len() as f32
+            }
+        }
+        SortUsing::Median => {
+            let mut values = collect_values(row, sample_list);
+            if values.is_empty() {
+                f32::NAN
+            } else {
+                values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+                let mid = values.len() / 2;
+                if values.len() % 2 == 1 {
+                    values[mid]
+                } else {
+                    (values[mid - 1] + values[mid]) / 2.0
+                }
+            }
+        }
+        SortUsing::Max => {
+            let values = collect_values(row, sample_list);
+            if values.is_empty() {
+                f32::NAN
+            } else {
+                values
+                    .into_iter()
+                    .fold(f32::NEG_INFINITY, |acc, value| acc.max(value))
+            }
+        }
+        SortUsing::Min => {
+            let values = collect_values(row, sample_list);
+            if values.is_empty() {
+                f32::NAN
+            } else {
+                values
+                    .into_iter()
+                    .fold(f32::INFINITY, |acc, value| acc.min(value))
+            }
+        }
+    }
+}
+
+fn collect_values(row: &MatrixRow, sample_list: Option<&[usize]>) -> Vec<f32> {
+    let mut values = Vec::new();
+    match sample_list {
+        Some(indices) => {
+            for &sample_index in indices {
+                if let Some(sample_values) = row.values.get(sample_index) {
+                    values.extend(sample_values.iter().copied().filter(|v| !v.is_nan()));
+                }
+            }
+        }
+        None => {
+            for sample_values in &row.values {
+                values.extend(sample_values.iter().copied().filter(|v| !v.is_nan()));
+            }
+        }
+    }
+    values
+}
+
+fn compare_ascending(left: f32, right: f32) -> Ordering {
+    match (left.is_nan(), right.is_nan()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Greater,
+        (false, true) => Ordering::Less,
+        (false, false) => left.partial_cmp(&right).unwrap_or_else(|| Ordering::Equal),
+    }
 }

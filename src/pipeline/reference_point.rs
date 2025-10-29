@@ -64,8 +64,8 @@ pub fn run(
     }
 
     let group_labels: Vec<String> = groups.iter().map(|group| group.label.clone()).collect();
-    let group_boundaries = compute_group_boundaries(&group_counts);
-    let sample_boundaries = compute_sample_boundaries(sample_count, total_bins);
+    let group_boundaries = MatrixData::group_boundaries_from_counts(&group_counts);
+    let sample_boundaries = MatrixData::sample_boundaries_uniform(sample_count, total_bins);
 
     let proc_number = general.number_of_processors.resolve();
 
@@ -94,12 +94,23 @@ pub fn run(
         max_threshold: general.max_threshold,
     };
 
-    Ok(MatrixData {
+    let sort_sample_indices =
+        normalize_sort_sample_indices(general.sort_using_samples.as_ref(), sample_count)?;
+
+    let mut matrix = MatrixData {
         header,
         rows,
         bin_count: total_bins,
         sample_count,
-    })
+    };
+
+    matrix.sort_groups(
+        general.sort_regions,
+        general.sort_using,
+        sort_sample_indices.as_deref(),
+    )?;
+
+    Ok(matrix)
 }
 
 struct Group {
@@ -272,23 +283,31 @@ fn open_samples(paths: &[PathBuf]) -> Result<Vec<Sample>> {
     Ok(samples)
 }
 
-fn compute_group_boundaries(counts: &[usize]) -> Vec<usize> {
-    let mut boundaries = Vec::with_capacity(counts.len() + 1);
-    let mut running = 0usize;
-    boundaries.push(0);
-    for count in counts {
-        running += *count;
-        boundaries.push(running);
-    }
-    boundaries
-}
+fn normalize_sort_sample_indices(
+    raw: Option<&Vec<usize>>,
+    sample_count: usize,
+) -> Result<Option<Vec<usize>>> {
+    let Some(raw_indices) = raw else {
+        return Ok(None);
+    };
 
-fn compute_sample_boundaries(sample_count: usize, bins_per_sample: usize) -> Vec<usize> {
-    let mut boundaries = Vec::with_capacity(sample_count + 1);
-    for index in 0..=sample_count {
-        boundaries.push(index * bins_per_sample);
+    if raw_indices.is_empty() {
+        return Ok(None);
     }
-    boundaries
+
+    let mut normalized = Vec::with_capacity(raw_indices.len());
+    for &value in raw_indices {
+        if value == 0 || value > sample_count {
+            bail!(
+                "The value {} for --sortUsingSamples is not valid. Only values from 1 to {} are allowed.",
+                value,
+                sample_count
+            );
+        }
+        normalized.push(value - 1);
+    }
+
+    Ok(Some(normalized))
 }
 
 fn derive_sample_labels(paths: &[PathBuf], general: &GeneralOptions) -> Result<Vec<String>> {
