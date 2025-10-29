@@ -1,0 +1,10 @@
+[workspace]
+name = "compute-matrix-rs"
+version = "0.1.0"
+description = "Support tooling for regression testing computeMatrix against the deepTools reference implementation"
+channels = ["conda-forge", "bioconda"]
+platforms = ["linux-64", "osx-64", "osx-arm64"]
+
+[dependencies]
+python = "3.11.*"
+deeptools = "==3.5.6"
