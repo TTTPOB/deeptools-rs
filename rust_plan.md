@@ -128,16 +128,16 @@
 - Focus on BED-based `reference-point` parity first; defer full GTF handling, clustering, and `scale-regions` specific features until after the regression suite passes on BED fixtures.
 
 ## Implementation Order (Macro Level)
-- [ ] `cli` + `config`: initial structs exist, but CLI parity, alias coverage, and validation gaps still need audit/patching.
-- [ ] `io::bed` + grouping utilities: baseline BED parser present, yet group handling and GTF integration require completion.
-- [ ] `io::bigwig`: thin wrapper in place; needs NaN/zero semantics, caching strategy, and error parity with DeepTools (currently implemented ad-hoc in the pipeline).
+- [x] `cli` + `config`: comprehensive CLI parsing with clap; full flag parity including aliases, defaults, and validation implemented.
+- [x] `io::bed` + grouping utilities: BED parser complete with group delimiter support (`#`), strand handling, and iterator interface; GTF support deferred.
+- [x] `io::bigwig`: BigWigReader wraps bigtools with NaN/zero padding semantics; per-thread caching implemented via rayon's `map_init`.
 - [x] `pipeline::zones`: reference-point bin layout helper landed in `pipeline::zones`.
-- [ ] `pipeline::reference_point`: worker now honours zone plan and average-type settings but still lacks concurrency and diagnostics.
-- [ ] `io::writers`: gzip/tab outputs implemented; metadata normalisation (e.g., special param expansion) still pending despite `@` header prefix fix.
-- [ ] `pipeline::matrix`: data structs exist; sorting, boundary helpers, and skip-zero removal logic unimplemented.
-- [ ] Regression harness (`scripts/` + integration tests): Python comparison script exists but not wired into tests/CI.
+- [x] `pipeline::reference_point`: full worker pipeline with rayon-based parallelism, zone plan integration, average-type aggregations, scale factors, threshold filtering, and nan_after_end support.
+- [x] `io::writers`: gzip/tab/sorted-regions outputs implemented with `@` header prefix; header fields normalized to per-sample lists for backward compatibility.
+- [x] `pipeline::matrix`: sorting (ascend/descend/keep), skip-zero pruning, group boundaries, sample boundaries, and sort metrics (mean/median/max/min/sum/region_length) all implemented.
+- [ ] Regression harness (`scripts/` + integration tests): Python comparison script exists (`scripts/reference_point_regression.py`) but not wired into cargo test or CI; pixi environment ready (`pixi.toml` with deeptools 3.5.6).
 - [ ] `pipeline::scale_regions`: not implemented.
-- [ ] Advanced features (clustering, diagnostics polish) and performance tuning: pending.
+- [ ] Advanced features (clustering via `hmcluster`, diagnostics polish) and performance tuning: pending.
 
 ## Implementation Order (Detailed within Reference-Point Milestone)
 - [x] Zone helper port (`chop_regions`, `chop_regions_from_middle`, `trim_zones`): coverage windows now generated via `ReferencePointPlan`.
