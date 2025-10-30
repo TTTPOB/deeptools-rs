@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -14,6 +15,10 @@ use crate::pipeline::matrix::{MatrixData, MatrixHeader, MatrixRow};
 const STREAMING_CELL_THRESHOLD: usize = 100_000;
 const RESERVED_HEADER_COMPRESSED: usize = 8192;
 const RESERVED_HEADER_PAYLOAD: usize = RESERVED_HEADER_COMPRESSED - 23;
+
+thread_local! {
+    static ROW_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(8192));
+}
 
 /// Persist all requested outputs derived from the matrix computation.
 pub fn write_outputs(mut matrix: MatrixData, io: &IoOptions) -> Result<()> {
@@ -278,33 +283,46 @@ fn spool_rows(rows: Vec<MatrixRow>) -> Result<TempPath> {
 }
 
 fn write_matrix_row<W: Write>(writer: &mut W, row: &MatrixRow) -> Result<()> {
-    let name = row.record.name.as_deref().unwrap_or(".");
-    let score = row
-        .record
-        .score
-        .map(|score| format!("{score:.6}"))
-        .unwrap_or_else(|| ".".to_string());
+    ROW_BUFFER.with(|cell| -> Result<()> {
+        let mut buffer = cell.borrow_mut();
+        buffer.clear();
 
-    write!(
-        writer,
-        "{}\t{}\t{}\t{}\t{}\t{}",
-        row.record.chrom,
-        row.record.start,
-        row.record.end,
-        name,
-        score,
-        row.record.strand.as_char()
-    )?;
+        buffer.extend_from_slice(row.record.chrom.as_bytes());
+        buffer.push(b'\t');
 
-    for sample_values in &row.values {
-        for value in sample_values {
-            writer.write_all(b"\t")?;
-            write_matrix_value(writer, *value)?;
+        let mut int_buffer = Buffer::new();
+        buffer.extend_from_slice(int_buffer.format(row.record.start).as_bytes());
+        buffer.push(b'\t');
+        buffer.extend_from_slice(int_buffer.format(row.record.end).as_bytes());
+        buffer.push(b'\t');
+
+        let name = row.record.name.as_deref().unwrap_or(".");
+        buffer.extend_from_slice(name.as_bytes());
+        buffer.push(b'\t');
+
+        if let Some(score) = row.record.score {
+            write_matrix_value(&mut *buffer, score)?;
+        } else {
+            buffer.push(b'.');
         }
-    }
+        buffer.push(b'\t');
 
-    writer.write_all(b"\n")?;
-    Ok(())
+        buffer.push(row.record.strand.as_char() as u8);
+
+        for sample_values in &row.values {
+            for value in sample_values {
+                buffer.push(b'\t');
+                write_matrix_value(&mut *buffer, *value)?;
+            }
+        }
+
+        buffer.push(b'\n');
+
+        writer
+            .write_all(&buffer)
+            .context("Failed to write matrix row")?;
+        Ok(())
+    })
 }
 
 fn write_matrix_values(path: &Path, matrix: &MatrixData) -> Result<()> {
