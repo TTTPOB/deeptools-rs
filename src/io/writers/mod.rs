@@ -8,7 +8,7 @@ use flate2::{Compression, GzBuilder};
 use tempfile::{NamedTempFile, TempPath};
 
 use crate::config::IoOptions;
-use crate::pipeline::matrix::{MatrixData, MatrixRow};
+use crate::pipeline::matrix::{MatrixData, MatrixHeader, MatrixRow};
 
 const STREAMING_CELL_THRESHOLD: usize = 100_000;
 const RESERVED_HEADER_COMPRESSED: usize = 8192;
@@ -35,22 +35,37 @@ pub fn write_outputs(mut matrix: MatrixData, io: &IoOptions) -> Result<()> {
 }
 
 fn should_use_streaming(matrix: &MatrixData, io: &IoOptions) -> bool {
+    should_use_streaming_for_plan(
+        matrix.rows.len(),
+        matrix.sample_count,
+        matrix.bin_count,
+        matrix.header.sort_regions == "keep",
+        io,
+    )
+}
+
+pub fn should_use_streaming_for_plan(
+    row_count: usize,
+    sample_count: usize,
+    bin_count: usize,
+    sort_is_keep: bool,
+    io: &IoOptions,
+) -> bool {
     if io.matrix_values_output.is_some() || io.sorted_regions_output.is_some() {
         return false;
     }
 
-    if matrix.header.sort_regions != "keep" {
+    if !sort_is_keep {
         return false;
     }
 
-    let row_count = matrix.rows.len();
     if row_count == 0 {
         return false;
     }
 
     let cell_count = row_count
-        .saturating_mul(matrix.sample_count)
-        .saturating_mul(matrix.bin_count);
+        .saturating_mul(sample_count)
+        .saturating_mul(bin_count);
 
     cell_count >= STREAMING_CELL_THRESHOLD
 }
@@ -60,7 +75,7 @@ fn write_matrix_gz(path: &Path, matrix: &MatrixData) -> Result<()> {
         .with_context(|| format!("Failed to create matrix file '{}'", path.display()))?;
     let mut encoder = GzEncoder::new(file, Compression::default());
 
-    write_header_line(&mut encoder, matrix)?;
+    write_header_line(&mut encoder, &matrix.header)?;
 
     for row in &matrix.rows {
         write_matrix_row(&mut encoder, row)?;
@@ -71,8 +86,7 @@ fn write_matrix_gz(path: &Path, matrix: &MatrixData) -> Result<()> {
 }
 
 fn write_matrix_gz_streaming(path: &Path, matrix: &mut MatrixData) -> Result<()> {
-    let header_line = build_header_line(matrix)?;
-    let final_header_payload = match pad_header_payload(header_line) {
+    let final_header_payload = match build_padded_header_payload(&matrix.header) {
         Ok(payload) => payload,
         Err(_) => {
             return write_matrix_gz(path, matrix);
@@ -120,8 +134,8 @@ fn write_matrix_gz_streaming(path: &Path, matrix: &mut MatrixData) -> Result<()>
     Ok(())
 }
 
-fn build_header_line(matrix: &MatrixData) -> Result<Vec<u8>> {
-    let header = serde_json::to_string(&matrix.header)?;
+fn build_header_line_from_header(header: &MatrixHeader) -> Result<Vec<u8>> {
+    let header = serde_json::to_string(header)?;
     let mut line = Vec::with_capacity(header.len() + 2);
     line.push(b'@');
     line.extend_from_slice(header.as_bytes());
@@ -159,6 +173,16 @@ fn placeholder_header_payload() -> Result<Vec<u8>> {
     pad_header_payload(b"@{}\n".to_vec())
 }
 
+pub fn build_padded_header_payload(header: &MatrixHeader) -> Result<Vec<u8>> {
+    let line = build_header_line_from_header(header)?;
+    pad_header_payload(line)
+}
+
+pub fn ensure_streaming_header_capacity(header: &MatrixHeader) -> Result<()> {
+    let _ = build_padded_header_payload(header)?;
+    Ok(())
+}
+
 fn write_header_member(file: File, payload: &[u8]) -> Result<File> {
     let builder = GzBuilder::new().mtime(0);
     let mut encoder = builder.write(file, Compression::none());
@@ -189,12 +213,50 @@ fn rewrite_header_member(mut file: File, payload: &[u8]) -> Result<File> {
     Ok(file)
 }
 
-fn write_header_line<W: Write>(writer: &mut W, matrix: &MatrixData) -> Result<()> {
-    let line = build_header_line(matrix)?;
+fn write_header_line<W: Write>(writer: &mut W, header: &MatrixHeader) -> Result<()> {
+    let line = build_header_line_from_header(header)?;
     writer
         .write_all(&line)
         .context("Failed to write matrix header line")?;
     Ok(())
+}
+
+pub struct StreamingMatrixWriter {
+    encoder: GzEncoder<File>,
+}
+
+impl StreamingMatrixWriter {
+    pub fn start(path: &Path) -> Result<Self> {
+        let placeholder_payload = placeholder_header_payload()
+            .expect("placeholder header payload should fit reserved size");
+
+        let mut file = File::create(path)
+            .with_context(|| format!("Failed to create matrix file '{}'", path.display()))?;
+
+        file.seek(SeekFrom::Current(0))
+            .context("Streaming output requires a seekable destination")?;
+
+        file = write_header_member(file, &placeholder_payload)?;
+
+        let builder = GzBuilder::new().mtime(0);
+        let encoder = builder.write(file, Compression::default());
+
+        Ok(Self { encoder })
+    }
+
+    pub fn write_row(&mut self, row: &MatrixRow) -> Result<()> {
+        write_matrix_row(&mut self.encoder, row)
+    }
+
+    pub fn finish(self, header: &MatrixHeader) -> Result<()> {
+        let final_payload = build_padded_header_payload(header)?;
+        let file = self
+            .encoder
+            .finish()
+            .context("Failed to finalise streamed matrix member")?;
+        let _ = rewrite_header_member(file, &final_payload)?;
+        Ok(())
+    }
 }
 
 fn spool_rows(rows: Vec<MatrixRow>) -> Result<TempPath> {

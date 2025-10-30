@@ -8,6 +8,11 @@ pub mod zones;
 use crate::config::{Config, IoOptions, ModeConfig};
 use crate::io::writers;
 
+pub enum RunOutcome {
+    Matrix(MatrixData),
+    Streamed,
+}
+
 pub fn execute(config: Config) -> anyhow::Result<()> {
     let general = &config.general;
     let io = &config.io;
@@ -27,14 +32,14 @@ pub fn execute(config: Config) -> anyhow::Result<()> {
     }
 
     match &config.mode {
-        ModeConfig::ScaleRegions(options) => {
-            let matrix = scale_regions::run(general, io, options)?;
-            spawn_writer_thread(matrix, io)?;
-        }
-        ModeConfig::ReferencePoint(options) => {
-            let matrix = reference_point::run(general, io, options)?;
-            spawn_writer_thread(matrix, io)?;
-        }
+        ModeConfig::ScaleRegions(options) => match scale_regions::run(general, io, options)? {
+            RunOutcome::Matrix(matrix) => spawn_writer_thread(matrix, io)?,
+            RunOutcome::Streamed => {}
+        },
+        ModeConfig::ReferencePoint(options) => match reference_point::run(general, io, options)? {
+            RunOutcome::Matrix(matrix) => spawn_writer_thread(matrix, io)?,
+            RunOutcome::Streamed => {}
+        },
     }
 
     Ok(())
