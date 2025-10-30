@@ -6,6 +6,9 @@
 - Streaming output feeds a `flate2::write::GzEncoder<File>` constructed with `Compression::default()` (libz level 6). The profile shows a wide band under `flate2::deflate::compress_inner`, indicating the compressor competes with formatting work for total runtime.
 - When the streaming fast-path is exercised, the gzip encoder is not wrapped in a buffered writer, so we rely solely on the flate2 internal buffer. Small formatted writes from the per-value `write!` calls can therefore churn the encoder’s deflate state and amplify compression cost.
 
+## Progress
+- 2025-10-30: `write_matrix_row` now emits matrix values via a stack-buffered formatter (manual fixed-point conversion + `itoa`) to remove the per-cell `String` allocation path.
+
 ## Priorities
 1. **Eliminate per-value `String` allocations** by switching to stack-based formatters (e.g. `ryu::Buffer` for floats, `itoa` for integers) and writing the resulting byte slice directly. This tackles the `core::fmt` hotspot and should reduce allocator pressure significantly.
 2. **Batch row serialization** so an entire line is assembled in a reusable `Vec<u8>` (or `SmallVec`) before a single `write_all`. This reduces `write!` overhead, improves cache locality, and feeds larger chunks to gzip.
