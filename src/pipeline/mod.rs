@@ -29,11 +29,11 @@ pub fn execute(config: Config) -> anyhow::Result<()> {
     match &config.mode {
         ModeConfig::ScaleRegions(options) => {
             let matrix = scale_regions::run(general, io, options)?;
-            writers::write_outputs(&matrix, io)?;
+            writers::write_outputs(matrix, io)?;
         }
         ModeConfig::ReferencePoint(options) => {
             let matrix = reference_point::run(general, io, options)?;
-            writers::write_outputs(&matrix, io)?;
+            writers::write_outputs(matrix, io)?;
         }
     }
 
