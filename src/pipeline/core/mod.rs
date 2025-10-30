@@ -12,7 +12,7 @@ use rayon::prelude::*;
 use crate::config::{AverageTypeBins, GeneralOptions};
 use crate::io::writers::StreamingMatrixWriter;
 use crate::io::{BedReadError, BedRecord, BigWigReader};
-use crate::pipeline::matrix::{MatrixHeader, MatrixRow};
+use crate::pipeline::matrix::{MatrixData, MatrixHeader, MatrixRow};
 
 pub trait SignalBin {
     fn start(&self) -> i64;
@@ -533,101 +533,95 @@ pub struct RegionResult {
     pub row: Option<MatrixRow>,
 }
 
-pub struct AggregatedResult<T> {
-    pub header: MatrixHeader,
-    pub output: T,
-}
-
-pub trait RowSink: Send {
+pub trait RowCollector: Send {
     type Output: Send;
 
     fn on_row(&mut self, row: MatrixRow) -> Result<()>;
-    fn finalize(&mut self, header: &MatrixHeader) -> Result<Self::Output>;
+    fn finalize(self, header: MatrixHeader) -> Result<Self::Output>;
 }
 
-pub struct InMemorySink {
+pub struct InMemoryCollector {
     rows: Vec<MatrixRow>,
+    sample_count: usize,
+    bin_count: usize,
 }
 
-impl InMemorySink {
-    pub fn with_capacity(capacity: usize) -> Self {
+impl InMemoryCollector {
+    pub fn with_capacity(capacity: usize, sample_count: usize, bin_count: usize) -> Self {
         Self {
             rows: Vec::with_capacity(capacity),
+            sample_count,
+            bin_count,
         }
     }
 }
 
-impl RowSink for InMemorySink {
-    type Output = Vec<MatrixRow>;
+impl RowCollector for InMemoryCollector {
+    type Output = MatrixData;
 
     fn on_row(&mut self, row: MatrixRow) -> Result<()> {
         self.rows.push(row);
         Ok(())
     }
 
-    fn finalize(&mut self, _header: &MatrixHeader) -> Result<Self::Output> {
-        Ok(std::mem::take(&mut self.rows))
+    fn finalize(self, header: MatrixHeader) -> Result<Self::Output> {
+        Ok(MatrixData {
+            header,
+            rows: self.rows,
+            bin_count: self.bin_count,
+            sample_count: self.sample_count,
+        })
     }
 }
 
-pub struct StreamingSink {
-    writer: Option<StreamingMatrixWriter>,
+pub struct FileCollector {
+    writer: StreamingMatrixWriter,
 }
 
-impl StreamingSink {
+impl FileCollector {
     pub fn new(writer: StreamingMatrixWriter) -> Self {
-        Self {
-            writer: Some(writer),
-        }
+        Self { writer }
     }
 }
 
-impl RowSink for StreamingSink {
+impl RowCollector for FileCollector {
     type Output = ();
 
     fn on_row(&mut self, row: MatrixRow) -> Result<()> {
-        let writer = self
-            .writer
-            .as_mut()
-            .expect("streaming sink writer already finalized");
-        writer.write_row(&row)
+        self.writer.write_row(&row)
     }
 
-    fn finalize(&mut self, header: &MatrixHeader) -> Result<Self::Output> {
-        let writer = self
-            .writer
-            .take()
-            .expect("streaming sink writer already finalized");
-        writer.finish(header)
+    fn finalize(self, header: MatrixHeader) -> Result<Self::Output> {
+        self.writer.finish(&header)
     }
 }
 
-pub fn spawn_row_aggregator<S, F>(
+pub fn spawn_row_aggregator<C, F>(
     rx: mpsc::Receiver<RegionResult>,
-    sink: S,
+    collector: C,
     group_count: usize,
     task_count: usize,
     header_builder: F,
-) -> Result<thread::JoinHandle<Result<AggregatedResult<S::Output>>>>
+) -> Result<thread::JoinHandle<Result<C::Output>>>
 where
-    S: RowSink + 'static,
+    C: RowCollector + 'static,
     F: FnOnce(Vec<usize>) -> Result<MatrixHeader> + Send + 'static,
 {
     thread::Builder::new()
         .name("matrix-aggregator".into())
-        .spawn(move || consume_row_results(rx, sink, group_count, task_count, header_builder))
+        .spawn(move || consume_row_results(rx, collector, group_count, task_count, header_builder))
         .map_err(|err| anyhow!("Failed to spawn matrix streaming thread: {err}"))
 }
 
-fn consume_row_results<S, F>(
+fn consume_row_results<C, F>(
     rx: mpsc::Receiver<RegionResult>,
-    mut sink: S,
+    mut collector: C,
     group_count: usize,
     task_count: usize,
     header_builder: F,
-) -> Result<AggregatedResult<S::Output>>
+) -> Result<C::Output>
 where
-    S: RowSink,
+    C: RowCollector,
     F: FnOnce(Vec<usize>) -> Result<MatrixHeader>,
 {
     let mut group_counts = vec![0usize; group_count];
@@ -636,10 +630,20 @@ where
 
     while let Ok(result) = rx.recv() {
         buffer.insert(result.index, result);
-        flush_ready_entries(&mut buffer, &mut sink, &mut group_counts, &mut next_index)?;
+        flush_ready_entries(
+            &mut buffer,
+            &mut collector,
+            &mut group_counts,
+            &mut next_index,
+        )?;
     }
 
-    flush_ready_entries(&mut buffer, &mut sink, &mut group_counts, &mut next_index)?;
+    flush_ready_entries(
+        &mut buffer,
+        &mut collector,
+        &mut group_counts,
+        &mut next_index,
+    )?;
 
     if next_index != task_count {
         return Err(anyhow!(
@@ -650,14 +654,12 @@ where
     }
 
     let header = header_builder(group_counts)?;
-    let output = sink.finalize(&header)?;
-
-    Ok(AggregatedResult { header, output })
+    collector.finalize(header)
 }
 
-fn flush_ready_entries<S: RowSink>(
+fn flush_ready_entries<C: RowCollector>(
     buffer: &mut BTreeMap<usize, RegionResult>,
-    sink: &mut S,
+    collector: &mut C,
     group_counts: &mut [usize],
     next_index: &mut usize,
 ) -> Result<()> {
@@ -668,7 +670,7 @@ fn flush_ready_entries<S: RowSink>(
         };
 
         if let Some(row) = entry.row {
-            sink.on_row(row)?;
+            collector.on_row(row)?;
             if let Some(count) = group_counts.get_mut(entry.group_index) {
                 *count += 1;
             }
@@ -680,26 +682,26 @@ fn flush_ready_entries<S: RowSink>(
     Ok(())
 }
 
-pub fn execute_mode<M, S, F>(
+pub fn execute_mode<M, C, F>(
     tasks: Vec<RegionTask>,
     general: &GeneralOptions,
     sample_paths: Arc<Vec<PathBuf>>,
-    sink: S,
+    collector: C,
     thread_count: usize,
     mode: &M,
     metadata: Arc<M::Metadata>,
     header_builder: F,
     group_count: usize,
-) -> Result<AggregatedResult<S::Output>>
+) -> Result<C::Output>
 where
     M: PipelineMode,
-    S: RowSink + Send + 'static,
+    C: RowCollector + Send + 'static,
     F: FnOnce(Vec<usize>) -> Result<MatrixHeader> + Send + 'static,
 {
     let task_count = tasks.len();
     let (tx, rx) = mpsc::channel();
     let aggregator_handle =
-        spawn_row_aggregator(rx, sink, group_count, task_count, header_builder)?;
+        spawn_row_aggregator(rx, collector, group_count, task_count, header_builder)?;
 
     if task_count == 0 {
         drop(tx);

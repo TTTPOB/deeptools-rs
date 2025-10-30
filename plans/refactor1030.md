@@ -34,9 +34,9 @@
 - For strand-sensitive transforms, define a lightweight `RowPostProcessor` enum (e.g. `None`, `ReverseBins`, `MaskBeyondRegion`) so the generic runner can apply them uniformly.
 
 ## Stepwise Refactor Plan
-1. **Extract shared task driver** – ✅ 2025-10-30: introduced a mode-agnostic row aggregator (`RowSink` + `spawn_row_aggregator`) so both pipelines share the same Rayon loop while swapping only the sink implementation.
+1. **Extract shared task driver** – ✅ 2025-10-30: introduced a mode-agnostic row aggregator (`spawn_row_aggregator`) so both pipelines share the same Rayon loop while swapping only the row collection strategy.
 2. **Introduce `PipelineMode` trait** – ✅ 2025-10-30: added a shared trait (`pipeline::core::PipelineMode`) plus generic `execute_mode` runner; both reference-point and scale-regions now implement the trait and delegate scheduling/header wiring through it.
-3. **Unify row aggregation targets** – Introduce a `RowCollector` trait (e.g. `FileSink`, `InMemory`) so the shared runner always hands rows to the same abstraction. The streaming variant writes rows directly to the gzip encoder as they arrive; the buffered variant simply stores them until post-processing (sorting, pruning). This keeps the execution loop identical while letting `MatrixData` reuse collected rows when sorting is required.
+3. **Unify row aggregation targets** – ✅ 2025-10-30: replaced the stop-gap row sink with a dedicated `RowCollector` trait (implemented by `FileCollector` and `InMemoryCollector`) so `execute_mode` now streams rows directly to gzip or yields a ready-to-sort `MatrixData` without extra conversion.
 4. **Consolidate header construction** – Implement `MatrixHeaderBuilder`, migrate both modes, and delete duplicated builder functions once parity is confirmed via regression harness.
 5. **Generalize validation utilities** – Relocate `ensure_positive`/`ensure_multiple` and expand them with mode-aware error prefixes to aid CLI diagnostics.
 6. **Regression + performance guard rails** – Re-run pixi-backed comparisons for both modes, and measure streaming/non-streaming throughput to ensure refactor does not regress hotspots documented in `plans/write_performance.md`.

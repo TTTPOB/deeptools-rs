@@ -5,7 +5,7 @@ use anyhow::{Result, bail};
 use crate::config::{GeneralOptions, IoOptions, ReferencePointOptions, SortRegions};
 use crate::io::BedRecord;
 use crate::io::writers;
-use crate::pipeline::core::{self, InMemorySink, PipelineMode, RegionTask, StreamingSink};
+use crate::pipeline::core::{self, FileCollector, InMemoryCollector, PipelineMode, RegionTask};
 use crate::pipeline::zones::ReferencePointPlan;
 
 use super::RunOutcome;
@@ -168,7 +168,7 @@ pub fn run(
         writers::ensure_streaming_header_capacity(&header_estimate)?;
 
         let writer = writers::StreamingMatrixWriter::start(&io.matrix_output)?;
-        let sink = StreamingSink::new(writer);
+        let collector = FileCollector::new(writer);
         let header_builder = {
             let general = general.clone();
             let sample_labels = sample_labels.clone();
@@ -192,7 +192,7 @@ pub fn run(
             tasks,
             general,
             Arc::clone(&sample_paths),
-            sink,
+            collector,
             thread_count,
             &mode,
             Arc::clone(&metadata),
@@ -202,7 +202,7 @@ pub fn run(
         return Ok(RunOutcome::Streamed);
     }
 
-    let sink = InMemorySink::with_capacity(row_count);
+    let collector = InMemoryCollector::with_capacity(row_count, sample_count, total_bins);
     let header_builder = {
         let general = general.clone();
         let sample_labels = sample_labels.clone();
@@ -222,11 +222,11 @@ pub fn run(
         }
     };
 
-    let aggregation = core::execute_mode(
+    let mut matrix = core::execute_mode(
         tasks,
         general,
         sample_paths,
-        sink,
+        collector,
         thread_count,
         &mode,
         metadata,
@@ -236,13 +236,6 @@ pub fn run(
 
     let sort_sample_indices =
         core::normalize_sort_sample_indices(general.sort_using_samples.as_ref(), sample_count)?;
-
-    let mut matrix = MatrixData {
-        header: aggregation.header,
-        rows: aggregation.output,
-        bin_count: total_bins,
-        sample_count,
-    };
 
     matrix.sort_groups(
         general.sort_regions,
