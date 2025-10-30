@@ -79,7 +79,7 @@ pub fn should_use_streaming_for_plan(
 fn write_matrix_gz(path: &Path, matrix: &MatrixData) -> Result<()> {
     let file = File::create(path)
         .with_context(|| format!("Failed to create matrix file '{}'", path.display()))?;
-    let mut encoder = GzEncoder::new(file, Compression::default());
+    let mut encoder = GzEncoder::new(BufWriter::new(file), Compression::default());
 
     write_header_line(&mut encoder, &matrix.header)?;
 
@@ -87,7 +87,13 @@ fn write_matrix_gz(path: &Path, matrix: &MatrixData) -> Result<()> {
         write_matrix_row(&mut encoder, row)?;
     }
 
-    encoder.finish()?;
+    let writer = encoder
+        .finish()
+        .context("Failed to finalise matrix gzip stream")?;
+    writer
+        .into_inner()
+        .map_err(|err| err.into_error())
+        .context("Failed to flush buffered matrix gzip stream")?;
     Ok(())
 }
 
@@ -125,12 +131,16 @@ fn write_matrix_gz_streaming(path: &Path, matrix: &mut MatrixData) -> Result<()>
             .context("Failed to reopen temporary matrix stream")?;
         let mut reader = BufReader::new(spool_file);
         let builder = GzBuilder::new().mtime(0);
-        let mut encoder = builder.write(file, Compression::default());
+        let mut encoder = builder.write(BufWriter::new(file), Compression::default());
         io::copy(&mut reader, &mut encoder)
             .context("Failed to stream matrix rows into gzip writer")?;
-        file = encoder
+        let writer = encoder
             .finish()
             .context("Failed to finalise streamed matrix member")?;
+        file = writer
+            .into_inner()
+            .map_err(|err| err.into_error())
+            .context("Failed to flush buffered streamed matrix member")?;
     }
 
     let _ = rewrite_header_member(file, &final_header_payload)?;
@@ -228,7 +238,7 @@ fn write_header_line<W: Write>(writer: &mut W, header: &MatrixHeader) -> Result<
 }
 
 pub struct StreamingMatrixWriter {
-    encoder: GzEncoder<File>,
+    encoder: GzEncoder<BufWriter<File>>,
 }
 
 impl StreamingMatrixWriter {
@@ -245,7 +255,7 @@ impl StreamingMatrixWriter {
         file = write_header_member(file, &placeholder_payload)?;
 
         let builder = GzBuilder::new().mtime(0);
-        let encoder = builder.write(file, Compression::default());
+        let encoder = builder.write(BufWriter::new(file), Compression::default());
 
         Ok(Self { encoder })
     }
@@ -256,10 +266,14 @@ impl StreamingMatrixWriter {
 
     pub fn finish(self, header: &MatrixHeader) -> Result<()> {
         let final_payload = build_padded_header_payload(header)?;
-        let file = self
+        let writer = self
             .encoder
             .finish()
             .context("Failed to finalise streamed matrix member")?;
+        let file = writer
+            .into_inner()
+            .map_err(|err| err.into_error())
+            .context("Failed to flush buffered streamed matrix member")?;
         let _ = rewrite_header_member(file, &final_payload)?;
         Ok(())
     }

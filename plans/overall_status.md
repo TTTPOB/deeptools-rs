@@ -144,6 +144,7 @@
     - 2025-10-30: captured write-path hotspots (float formatting + gzip compression) and mitigation priorities in `plans/write_performance.md` to guide near-term tuning.
     - 2025-10-30: optimized matrix row serialization to use stack-based fixed-point formatting for per-cell values, eliminating per-value `String` allocations.
     - 2025-10-30: batched matrix row serialization via thread-local buffers to emit each line with a single `write_all`, reducing gzip churn and syscall volume.
+    - 2025-10-30: wrapped gzip encoders with `BufWriter` to batch filesystem writes for both standard and streaming matrix outputs, reducing syscall pressure ahead of further compressor tuning.
 
 ## Refactor Plan: Decouple Reference-Point Core
 - Audit `pipeline::reference_point` to tag responsibilities that should be mode-agnostic (zone planning, coverage sampling, aggregation, matrix assembly) versus reference-point specifics (two-zone layout, ref-point metadata). Capture this as a checklist referencing concrete structs/functions (`load_groups`, `Sample`, `WorkerSamples`, `derive_sample_labels`, `compute_row`, `should_skip_row`, `compute_sample_bins`, `aggregate_slice`, `MatrixHeader` wiring).
