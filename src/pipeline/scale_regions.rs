@@ -1,15 +1,15 @@
-use std::collections::BTreeMap;
 use std::sync::{Arc, mpsc};
-use std::thread;
 
 use anyhow::{Context, Result, anyhow, bail};
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
 
 use crate::config::{GeneralOptions, IoOptions, ScaleRegionsOptions, SortRegions};
-use crate::io::writers::{self, StreamingMatrixWriter};
+use crate::io::writers;
 use crate::io::{BedRecord, Strand};
-use crate::pipeline::core::{self, WorkerSamples};
+use crate::pipeline::core::{
+    self, AggregatedResult, InMemorySink, RegionResult, StreamingSink, WorkerSamples,
+};
 use crate::pipeline::matrix::{MatrixData, MatrixHeader, MatrixRow};
 use crate::pipeline::zones::ScaleRegionsPlan;
 
@@ -19,12 +19,6 @@ struct RegionTask {
     index: usize,
     group_index: usize,
     record: BedRecord,
-}
-
-struct RegionResult {
-    index: usize,
-    group_index: usize,
-    row: Option<MatrixRow>,
 }
 
 pub fn run(
@@ -89,6 +83,27 @@ pub fn run(
         io,
     );
 
+    let sample_paths = Arc::new(io.scores.clone());
+    let make_header_builder = |sample_labels: &[String], group_labels: &[String]| {
+        let general = general.clone();
+        let options = options.clone();
+        let sample_labels = sample_labels.to_vec();
+        let group_labels = group_labels.to_vec();
+        move |group_counts: Vec<usize>| -> Result<MatrixHeader> {
+            Ok(build_scale_regions_header(
+                &general,
+                &options,
+                &sample_labels,
+                &group_labels,
+                &group_counts,
+                bin_size,
+                total_bins,
+                sample_count,
+                thread_count,
+            ))
+        }
+    };
+
     if should_stream {
         let header_estimate = build_scale_regions_header(
             general,
@@ -103,102 +118,41 @@ pub fn run(
         );
         writers::ensure_streaming_header_capacity(&header_estimate)?;
 
-        return run_streaming_scale_regions(
-            general.clone(),
-            options.clone(),
-            io,
-            sample_labels,
-            group_labels,
+        let writer = writers::StreamingMatrixWriter::start(&io.matrix_output)?;
+        let sink = StreamingSink::new(writer);
+        execute_scale_regions(
             tasks,
+            general,
+            options,
+            sample_paths,
+            sink,
             thread_count,
             bin_size,
-            total_bins,
-        );
+            make_header_builder(&sample_labels, &group_labels),
+            group_labels.len(),
+        )?;
+        return Ok(RunOutcome::Streamed);
     }
 
-    let mut group_counts = vec![0usize; group_labels.len()];
-    let mut rows = Vec::with_capacity(row_count);
-
-    if row_count > 0 {
-        let pool = ThreadPoolBuilder::new()
-            .num_threads(thread_count)
-            .build()
-            .context("Failed to initialise rayon thread pool for scale-regions scheduling")?;
-
-        let sample_paths = Arc::new(io.scores.clone());
-        let collected = pool.install(|| {
-            tasks
-                .into_par_iter()
-                .map_init(
-                    || WorkerSamples::new(sample_paths.clone()),
-                    |state, task| {
-                        let RegionTask {
-                            index,
-                            group_index,
-                            record,
-                        } = task;
-
-                        let samples = state.samples()?;
-
-                        let plan = ScaleRegionsPlan::scale_regions(&record, options, bin_size);
-                        let strand = record.strand;
-
-                        let maybe_values = core::compute_row(
-                            samples.as_mut_slice(),
-                            &record,
-                            &plan,
-                            general,
-                            false,
-                        )?;
-
-                        let row = maybe_values.map(|mut values| {
-                            if matches!(strand, Strand::Negative) {
-                                for sample_values in &mut values {
-                                    sample_values.reverse();
-                                }
-                            }
-                            MatrixRow { record, values }
-                        });
-
-                        Ok(RegionResult {
-                            index,
-                            group_index,
-                            row,
-                        })
-                    },
-                )
-                .collect::<Vec<_>>()
-        });
-
-        let mut collected = collected.into_iter().collect::<Result<Vec<_>>>()?;
-        collected.sort_by_key(|entry| entry.index);
-
-        for entry in collected {
-            if let Some(row) = entry.row {
-                group_counts[entry.group_index] += 1;
-                rows.push(row);
-            }
-        }
-    }
-
-    let header = build_scale_regions_header(
+    let sink = InMemorySink::with_capacity(row_count);
+    let aggregation = execute_scale_regions(
+        tasks,
         general,
         options,
-        &sample_labels,
-        &group_labels,
-        &group_counts,
-        bin_size,
-        total_bins,
-        sample_count,
+        sample_paths,
+        sink,
         thread_count,
-    );
+        bin_size,
+        make_header_builder(&sample_labels, &group_labels),
+        group_labels.len(),
+    )?;
 
     let sort_sample_indices =
         core::normalize_sort_sample_indices(general.sort_using_samples.as_ref(), sample_count)?;
 
     let mut matrix = MatrixData {
-        header,
-        rows,
+        header: aggregation.header,
+        rows: aggregation.output,
         bin_count: total_bins,
         sample_count,
     };
@@ -214,88 +168,51 @@ pub fn run(
     Ok(RunOutcome::Matrix(matrix))
 }
 
-fn run_streaming_scale_regions(
-    general: GeneralOptions,
-    options: ScaleRegionsOptions,
-    io: &IoOptions,
-    sample_labels: Vec<String>,
-    group_labels: Vec<String>,
+fn execute_scale_regions<S, F>(
     tasks: Vec<RegionTask>,
+    general: &GeneralOptions,
+    options: &ScaleRegionsOptions,
+    sample_paths: Arc<Vec<std::path::PathBuf>>,
+    sink: S,
     thread_count: usize,
     bin_size: u32,
-    total_bins: usize,
-) -> Result<RunOutcome> {
-    let sample_count = io.scores.len();
+    header_builder: F,
+    group_count: usize,
+) -> Result<AggregatedResult<S::Output>>
+where
+    S: core::RowSink + Send + 'static,
+    F: FnOnce(Vec<usize>) -> Result<MatrixHeader> + Send + 'static,
+{
     let task_count = tasks.len();
-
-    if task_count == 0 {
-        let writer = StreamingMatrixWriter::start(&io.matrix_output)?;
-        let empty_counts = vec![0usize; group_labels.len()];
-        let header = build_scale_regions_header(
-            &general,
-            &options,
-            &sample_labels,
-            &group_labels,
-            &empty_counts,
-            bin_size,
-            total_bins,
-            sample_count,
-            thread_count,
-        );
-        writer.finish(&header)?;
-        return Ok(RunOutcome::Streamed);
-    }
-
-    let writer = StreamingMatrixWriter::start(&io.matrix_output)?;
     let (tx, rx) = mpsc::channel();
 
-    let aggregator_general = general.clone();
-    let aggregator_options = options.clone();
-    let aggregator_sample_labels = sample_labels;
-    let aggregator_group_labels = group_labels;
-    let aggregator_handle = thread::Builder::new()
-        .name("matrix-streamer".into())
-        .spawn(move || {
-            stream_scale_regions_rows(
-                rx,
-                writer,
-                aggregator_general,
-                aggregator_options,
-                aggregator_sample_labels,
-                aggregator_group_labels,
-                bin_size,
-                total_bins,
-                sample_count,
-                thread_count,
-                task_count,
-            )
-        })
-        .map_err(|err| anyhow!("Failed to spawn matrix streaming thread: {err}"))?;
+    let aggregator_handle =
+        core::spawn_row_aggregator(rx, sink, group_count, task_count, header_builder)?;
 
     let pool = ThreadPoolBuilder::new()
         .num_threads(thread_count)
         .build()
-        .context("Failed to initialise rayon thread pool for scale-regions streaming")?;
+        .context("Failed to initialise rayon thread pool for scale-regions scheduling")?;
 
-    let sample_paths = Arc::new(io.scores.clone());
     let compute_result = pool.install(|| {
         tasks
             .into_par_iter()
             .map_init(
-                || WorkerSamples::new(sample_paths.clone()),
+                || (WorkerSamples::new(sample_paths.clone()), tx.clone()),
                 |state, task| {
+                    let (worker_samples, sender) = state;
                     let RegionTask {
                         index,
                         group_index,
                         record,
                     } = task;
 
-                    let samples = state.samples()?;
-                    let plan = ScaleRegionsPlan::scale_regions(&record, &options, bin_size);
+                    let samples = worker_samples.samples()?;
+                    let plan = ScaleRegionsPlan::scale_regions(&record, options, bin_size);
                     let strand = record.strand;
 
                     let maybe_values =
-                        core::compute_row(samples.as_mut_slice(), &record, &plan, &general, false)?;
+                        core::compute_row(samples.as_mut_slice(), &record, &plan, general, false)?;
 
                     let row = maybe_values.map(|mut values| {
                         if matches!(strand, Strand::Negative) {
@@ -306,12 +223,13 @@ fn run_streaming_scale_regions(
                         MatrixRow { record, values }
                     });
 
-                    tx.send(RegionResult {
-                        index,
-                        group_index,
-                        row,
-                    })
-                    .map_err(|err| anyhow!("Failed to stream computed row: {err}"))?;
+                    sender
+                        .send(RegionResult {
+                            index,
+                            group_index,
+                            row,
+                        })
+                        .map_err(|err| anyhow!("Failed to stream computed row: {err}"))?;
 
                     Ok::<(), anyhow::Error>(())
                 },
@@ -321,73 +239,13 @@ fn run_streaming_scale_regions(
 
     drop(tx);
 
-    let writer_result = aggregator_handle
-        .join()
-        .map_err(|_| anyhow!("Matrix streaming thread panicked"))?;
-
     compute_result?;
-    writer_result?;
 
-    Ok(RunOutcome::Streamed)
-}
+    let aggregation = aggregator_handle
+        .join()
+        .map_err(|_| anyhow!("Matrix aggregation thread panicked"))??;
 
-fn stream_scale_regions_rows(
-    rx: mpsc::Receiver<RegionResult>,
-    mut writer: StreamingMatrixWriter,
-    general: GeneralOptions,
-    options: ScaleRegionsOptions,
-    sample_labels: Vec<String>,
-    group_labels: Vec<String>,
-    bin_size: u32,
-    total_bins: usize,
-    sample_count: usize,
-    thread_count: usize,
-    task_count: usize,
-) -> Result<()> {
-    let mut group_counts = vec![0usize; group_labels.len()];
-    let mut buffer = BTreeMap::new();
-    let mut next_index = 0usize;
-
-    while let Ok(result) = rx.recv() {
-        buffer.insert(result.index, result);
-        while let Some(entry) = buffer.remove(&next_index) {
-            if let Some(row) = entry.row {
-                writer.write_row(&row)?;
-                group_counts[entry.group_index] += 1;
-            }
-            next_index += 1;
-        }
-    }
-
-    while let Some(entry) = buffer.remove(&next_index) {
-        if let Some(row) = entry.row {
-            writer.write_row(&row)?;
-            group_counts[entry.group_index] += 1;
-        }
-        next_index += 1;
-    }
-
-    if next_index != task_count {
-        return Err(anyhow!(
-            "Streamed matrix received {} of {} expected rows",
-            next_index,
-            task_count
-        ));
-    }
-
-    let header = build_scale_regions_header(
-        &general,
-        &options,
-        &sample_labels,
-        &group_labels,
-        &group_counts,
-        bin_size,
-        total_bins,
-        sample_count,
-        thread_count,
-    );
-    writer.finish(&header)?;
-    Ok(())
+    Ok(aggregation)
 }
 
 fn build_scale_regions_header(

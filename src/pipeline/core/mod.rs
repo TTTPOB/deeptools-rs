@@ -1,13 +1,16 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
+use std::thread;
 
 use anyhow::{Context, Result, anyhow, bail};
 
 use crate::config::{AverageTypeBins, GeneralOptions};
+use crate::io::writers::StreamingMatrixWriter;
 use crate::io::{BedReadError, BedRecord, BigWigReader};
+use crate::pipeline::matrix::{MatrixHeader, MatrixRow};
 
 pub trait SignalBin {
     fn start(&self) -> i64;
@@ -486,6 +489,160 @@ fn label_from_path(path: &Path, use_stem: bool) -> String {
 
 fn bed_file_label(path: &Path) -> String {
     label_from_path(path, false)
+}
+
+#[derive(Debug)]
+pub struct RegionResult {
+    pub index: usize,
+    pub group_index: usize,
+    pub row: Option<MatrixRow>,
+}
+
+pub struct AggregatedResult<T> {
+    pub header: MatrixHeader,
+    pub output: T,
+}
+
+pub trait RowSink: Send {
+    type Output: Send;
+
+    fn on_row(&mut self, row: MatrixRow) -> Result<()>;
+    fn finalize(&mut self, header: &MatrixHeader) -> Result<Self::Output>;
+}
+
+pub struct InMemorySink {
+    rows: Vec<MatrixRow>,
+}
+
+impl InMemorySink {
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            rows: Vec::with_capacity(capacity),
+        }
+    }
+}
+
+impl RowSink for InMemorySink {
+    type Output = Vec<MatrixRow>;
+
+    fn on_row(&mut self, row: MatrixRow) -> Result<()> {
+        self.rows.push(row);
+        Ok(())
+    }
+
+    fn finalize(&mut self, _header: &MatrixHeader) -> Result<Self::Output> {
+        Ok(std::mem::take(&mut self.rows))
+    }
+}
+
+pub struct StreamingSink {
+    writer: Option<StreamingMatrixWriter>,
+}
+
+impl StreamingSink {
+    pub fn new(writer: StreamingMatrixWriter) -> Self {
+        Self {
+            writer: Some(writer),
+        }
+    }
+}
+
+impl RowSink for StreamingSink {
+    type Output = ();
+
+    fn on_row(&mut self, row: MatrixRow) -> Result<()> {
+        let writer = self
+            .writer
+            .as_mut()
+            .expect("streaming sink writer already finalized");
+        writer.write_row(&row)
+    }
+
+    fn finalize(&mut self, header: &MatrixHeader) -> Result<Self::Output> {
+        let writer = self
+            .writer
+            .take()
+            .expect("streaming sink writer already finalized");
+        writer.finish(header)
+    }
+}
+
+pub fn spawn_row_aggregator<S, F>(
+    rx: mpsc::Receiver<RegionResult>,
+    sink: S,
+    group_count: usize,
+    task_count: usize,
+    header_builder: F,
+) -> Result<thread::JoinHandle<Result<AggregatedResult<S::Output>>>>
+where
+    S: RowSink + 'static,
+    F: FnOnce(Vec<usize>) -> Result<MatrixHeader> + Send + 'static,
+{
+    thread::Builder::new()
+        .name("matrix-aggregator".into())
+        .spawn(move || consume_row_results(rx, sink, group_count, task_count, header_builder))
+        .map_err(|err| anyhow!("Failed to spawn matrix streaming thread: {err}"))
+}
+
+fn consume_row_results<S, F>(
+    rx: mpsc::Receiver<RegionResult>,
+    mut sink: S,
+    group_count: usize,
+    task_count: usize,
+    header_builder: F,
+) -> Result<AggregatedResult<S::Output>>
+where
+    S: RowSink,
+    F: FnOnce(Vec<usize>) -> Result<MatrixHeader>,
+{
+    let mut group_counts = vec![0usize; group_count];
+    let mut buffer = BTreeMap::new();
+    let mut next_index = 0usize;
+
+    while let Ok(result) = rx.recv() {
+        buffer.insert(result.index, result);
+        flush_ready_entries(&mut buffer, &mut sink, &mut group_counts, &mut next_index)?;
+    }
+
+    flush_ready_entries(&mut buffer, &mut sink, &mut group_counts, &mut next_index)?;
+
+    if next_index != task_count {
+        return Err(anyhow!(
+            "Streamed matrix received {} of {} expected rows",
+            next_index,
+            task_count
+        ));
+    }
+
+    let header = header_builder(group_counts)?;
+    let output = sink.finalize(&header)?;
+
+    Ok(AggregatedResult { header, output })
+}
+
+fn flush_ready_entries<S: RowSink>(
+    buffer: &mut BTreeMap<usize, RegionResult>,
+    sink: &mut S,
+    group_counts: &mut [usize],
+    next_index: &mut usize,
+) -> Result<()> {
+    loop {
+        let key = *next_index;
+        let Some(entry) = buffer.remove(&key) else {
+            break;
+        };
+
+        if let Some(row) = entry.row {
+            sink.on_row(row)?;
+            if let Some(count) = group_counts.get_mut(entry.group_index) {
+                *count += 1;
+            }
+        }
+
+        *next_index += 1;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
