@@ -5,7 +5,9 @@ use anyhow::{Result, bail};
 use crate::config::{GeneralOptions, IoOptions, ScaleRegionsOptions, SortRegions};
 use crate::io::writers;
 use crate::io::{BedRecord, Strand};
-use crate::pipeline::core::{self, FileCollector, InMemoryCollector, PipelineMode, RegionTask};
+use crate::pipeline::core::{
+    self, FileCollector, InMemoryCollector, ModeTag, PipelineMode, RegionTask,
+};
 use crate::pipeline::matrix::{LayoutVectors, MatrixHeader, MatrixHeaderBuilder, MatrixRow};
 use crate::pipeline::zones::ScaleRegionsPlan;
 
@@ -33,32 +35,38 @@ impl PipelineMode for ScaleRegionsMode {
     type Metadata = ScaleRegionsMetadata;
 
     fn validate(&self, general: &GeneralOptions) -> Result<Self::Metadata> {
-        ensure_positive(general.bin_size, "binSize")?;
+        let mode = ModeTag::ScaleRegions;
+        core::ensure_positive(general.bin_size, "binSize", mode)?;
 
-        ensure_multiple(
+        core::ensure_multiple(
             general.bin_size,
             self.options.upstream,
             "beforeRegionStartLength",
+            mode,
         )?;
-        ensure_multiple(
+        core::ensure_multiple(
             general.bin_size,
             self.options.downstream,
             "afterRegionStartLength",
+            mode,
         )?;
-        ensure_multiple(
+        core::ensure_multiple(
             general.bin_size,
             self.options.region_body_length,
             "regionBodyLength",
+            mode,
         )?;
-        ensure_multiple(
+        core::ensure_multiple(
             general.bin_size,
             self.options.unscaled_5_prime,
             "unscaled5prime",
+            mode,
         )?;
-        ensure_multiple(
+        core::ensure_multiple(
             general.bin_size,
             self.options.unscaled_3_prime,
             "unscaled3prime",
+            mode,
         )?;
 
         if self.options.region_body_length == 0
@@ -282,20 +290,4 @@ pub fn run(
     matrix.prune_zero_rows();
 
     Ok(RunOutcome::Matrix(matrix))
-}
-
-fn ensure_positive(value: u32, flag: &str) -> Result<()> {
-    if value == 0 {
-        bail!("{flag} must be a positive integer");
-    }
-    Ok(())
-}
-
-fn ensure_multiple(bin_size: u32, value: u32, flag: &str) -> Result<()> {
-    if value % bin_size != 0 {
-        bail!(
-            "{flag} ({value}) must be a multiple of the bin size ({bin_size}) in scale-regions mode"
-        );
-    }
-    Ok(())
 }

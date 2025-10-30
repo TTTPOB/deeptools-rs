@@ -5,7 +5,9 @@ use anyhow::{Result, bail};
 use crate::config::{GeneralOptions, IoOptions, ReferencePointOptions, SortRegions};
 use crate::io::BedRecord;
 use crate::io::writers;
-use crate::pipeline::core::{self, FileCollector, InMemoryCollector, PipelineMode, RegionTask};
+use crate::pipeline::core::{
+    self, FileCollector, InMemoryCollector, ModeTag, PipelineMode, RegionTask,
+};
 use crate::pipeline::matrix::{LayoutVectors, MatrixHeader, MatrixHeaderBuilder, MatrixRow};
 use crate::pipeline::zones::ReferencePointPlan;
 
@@ -35,16 +37,19 @@ impl PipelineMode for ReferencePointMode {
     type Metadata = ReferencePointMetadata;
 
     fn validate(&self, general: &GeneralOptions) -> Result<Self::Metadata> {
-        ensure_positive(general.bin_size, "binSize")?;
-        ensure_multiple(
+        let mode = ModeTag::ReferencePoint;
+        core::ensure_positive(general.bin_size, "binSize", mode)?;
+        core::ensure_multiple(
             general.bin_size,
             self.options.upstream,
             "beforeRegionStartLength",
+            mode,
         )?;
-        ensure_multiple(
+        core::ensure_multiple(
             general.bin_size,
             self.options.downstream,
             "afterRegionStartLength",
+            mode,
         )?;
 
         let upstream_bins = (self.options.upstream / general.bin_size) as usize;
@@ -258,20 +263,4 @@ pub fn run(
     matrix.prune_zero_rows();
 
     Ok(RunOutcome::Matrix(matrix))
-}
-
-fn ensure_positive(value: u32, flag: &str) -> Result<()> {
-    if value == 0 {
-        bail!("{flag} must be a positive integer");
-    }
-    Ok(())
-}
-
-fn ensure_multiple(bin_size: u32, distance: u32, flag: &str) -> Result<()> {
-    if distance % bin_size != 0 {
-        bail!(
-            "{flag} ({distance}) must be a multiple of the bin size ({bin_size}) in reference-point mode"
-        );
-    }
-    Ok(())
 }

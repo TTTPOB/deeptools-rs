@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -18,6 +19,36 @@ pub trait SignalBin {
     fn start(&self) -> i64;
     fn end(&self) -> i64;
     fn beyond_region(&self) -> bool;
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ModeTag {
+    ReferencePoint,
+    ScaleRegions,
+}
+
+impl fmt::Display for ModeTag {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            ModeTag::ReferencePoint => "reference-point",
+            ModeTag::ScaleRegions => "scale-regions",
+        };
+        f.write_str(label)
+    }
+}
+
+pub fn ensure_positive(value: u32, flag: &str, mode: ModeTag) -> Result<()> {
+    if value == 0 {
+        bail!("[{mode}] {flag} must be a positive integer");
+    }
+    Ok(())
+}
+
+pub fn ensure_multiple(bin_size: u32, distance: u32, flag: &str, mode: ModeTag) -> Result<()> {
+    if distance % bin_size != 0 {
+        bail!("[{mode}] {flag} ({distance}) must be a multiple of the bin size ({bin_size})");
+    }
+    Ok(())
 }
 
 pub trait RegionPlan {

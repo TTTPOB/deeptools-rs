@@ -158,3 +158,4 @@
 - 2025-10-30: Introduced a formal `PipelineMode` trait with metadata-aware validation, plan construction, header emission, and row post-processing; both mode drivers now call the generic `execute_mode` runner instead of maintaining bespoke Rayon/map-reduce loops.
 - 2025-10-30: Replaced the interim row streaming helper with the final `RowCollector` trait (backed by `FileCollector` and `InMemoryCollector`), letting `execute_mode` stream rows directly to gzip or yield a ready-to-sort `MatrixData` without extra cloning.
 - 2025-10-30: Added a shared `MatrixHeaderBuilder` + `LayoutVectors` helper so both pipelines populate identical metadata vectors while keeping per-mode knobs (`nan_after_end`, ref-point labels, unscaled zones) in one place.
+- 2025-10-30: Centralized validation helpers in `pipeline::core` (`ensure_positive`/`ensure_multiple`) with `[mode]`-prefixed error text so CLI diagnostics reference the failing mode consistently.
