@@ -5,6 +5,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use flate2::write::GzEncoder;
 use flate2::{Compression, GzBuilder};
+use itoa::Buffer;
 use tempfile::{NamedTempFile, TempPath};
 
 use crate::config::IoOptions;
@@ -297,7 +298,8 @@ fn write_matrix_row<W: Write>(writer: &mut W, row: &MatrixRow) -> Result<()> {
 
     for sample_values in &row.values {
         for value in sample_values {
-            write!(writer, "\t{}", format_matrix_value(*value))?;
+            writer.write_all(b"\t")?;
+            write_matrix_value(writer, *value)?;
         }
     }
 
@@ -419,12 +421,55 @@ fn diff(values: &[usize]) -> Vec<usize> {
     values.windows(2).map(|pair| pair[1] - pair[0]).collect()
 }
 
-fn format_matrix_value(value: f32) -> String {
+fn write_matrix_value<W: Write>(writer: &mut W, value: f32) -> io::Result<()> {
     if value.is_nan() {
-        "nan".to_string()
-    } else {
-        format!("{value:.6}")
+        return writer.write_all(b"nan");
     }
+
+    if value.is_infinite() {
+        return if value.is_sign_negative() {
+            writer.write_all(b"-inf")
+        } else {
+            writer.write_all(b"inf")
+        };
+    }
+
+    let sign_negative = value.is_sign_negative();
+    let scaled = (value as f64 * 1_000_000.0).round_ties_even();
+
+    if !scaled.is_finite() || scaled.abs() > i128::MAX as f64 {
+        let fallback = format!("{value:.6}");
+        return writer.write_all(fallback.as_bytes());
+    }
+
+    let mut scaled_int = scaled as i128;
+
+    if scaled_int == 0 {
+        if sign_negative {
+            writer.write_all(b"-")?;
+        }
+    } else if scaled_int < 0 {
+        writer.write_all(b"-")?;
+        scaled_int = -scaled_int;
+    }
+
+    let integer_part = (scaled_int / 1_000_000) as u128;
+    let fractional_part = (scaled_int % 1_000_000) as u32;
+
+    let mut int_buffer = Buffer::new();
+    let int_bytes = int_buffer.format(integer_part);
+    writer.write_all(int_bytes.as_bytes())?;
+    writer.write_all(b".")?;
+
+    let mut frac_digits = [b'0'; 6];
+    let mut remainder = fractional_part;
+    for slot in frac_digits.iter_mut().rev() {
+        *slot = b'0' + (remainder % 10) as u8;
+        remainder /= 10;
+    }
+
+    writer.write_all(&frac_digits)?;
+    Ok(())
 }
 
 fn format_plain_value(value: f32) -> String {

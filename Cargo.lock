@@ -218,6 +218,7 @@ dependencies = [
  "bigtools",
  "clap",
  "flate2",
+ "itoa",
  "num_cpus",
  "rayon",
  "serde",
