@@ -5,7 +5,7 @@ mod reference_point;
 mod scale_regions;
 pub mod zones;
 
-use crate::config::{Config, ModeConfig};
+use crate::config::{Config, IoOptions, ModeConfig};
 use crate::io::writers;
 
 pub fn execute(config: Config) -> anyhow::Result<()> {
@@ -29,15 +29,28 @@ pub fn execute(config: Config) -> anyhow::Result<()> {
     match &config.mode {
         ModeConfig::ScaleRegions(options) => {
             let matrix = scale_regions::run(general, io, options)?;
-            writers::write_outputs(matrix, io)?;
+            spawn_writer_thread(matrix, io)?;
         }
         ModeConfig::ReferencePoint(options) => {
             let matrix = reference_point::run(general, io, options)?;
-            writers::write_outputs(matrix, io)?;
+            spawn_writer_thread(matrix, io)?;
         }
     }
 
     Ok(())
+}
+
+fn spawn_writer_thread(matrix: MatrixData, io: &IoOptions) -> anyhow::Result<()> {
+    let io_clone = io.clone();
+    let handle = std::thread::Builder::new()
+        .name("matrix-writer".into())
+        .spawn(move || writers::write_outputs(matrix, &io_clone))
+        .map_err(|err| anyhow::anyhow!("Failed to spawn matrix writer thread: {err}"))?;
+
+    match handle.join() {
+        Ok(result) => result,
+        Err(err) => std::panic::resume_unwind(err),
+    }
 }
 
 fn describe_mode(mode: &ModeConfig) -> &'static str {
