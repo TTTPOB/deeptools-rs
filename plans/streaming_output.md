@@ -30,6 +30,7 @@ This workflow stays fully standards-compliant—no fake padding members—while 
 - A quick `seek(SeekFrom::Current(0))` probe guards against pipes/FIFOs; if the check fails we keep the legacy path.
 - The temporary matrix stays as a simple newline-delimited text file so auxiliary writers can reuse it later if we add streaming support for `matrixValues`/`sortedRegions`.
 - `mtime(0)` and no filename/comment yield deterministic gzip members for reproducibility.
+- The I/O work executes on a dedicated `matrix-writer` thread so the main pipeline thread can finish orchestration and bubble up errors while keeping panic behaviour unchanged.
 
 ## Compatibility Notes
 - Consumers that only understand single-member gzips continue to work—the stored header is just a regular gzip member containing ASCII text.

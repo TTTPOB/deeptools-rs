@@ -140,7 +140,7 @@
 - [x] `pipeline::scale_regions`: initial runner wired into the shared core with scale-aware zone planning and unit coverage; regression comparison still pending.
 - [ ] Advanced features (sorting, diagnostics polish) and performance tuning: pending.
     - 2025-10-30: documented header-reserve streaming option (provisional header sizing, encoder-produced filler block, seek probe fallback, small-run cutoff, overflow handled via Rust IO concat) for unsorted runs in `plans/streaming_output.md`.
-    - 2025-10-30: streaming writer now spools rows to disk and emits a fixed-width stored gzip member for the header (rewritten in place once the final JSON is known); falls back to in-memory when the header would exceed the 8 KiB reserve or auxiliary sinks are requested.
+    - 2025-10-30: streaming writer now spools rows to disk, emits a fixed-width stored gzip header member (rewritten in place once the final JSON is known), and runs on a dedicated `matrix-writer` thread; falls back to in-memory when the header would exceed the 4 KiB reserve or auxiliary sinks are requested.
 
 ## Refactor Plan: Decouple Reference-Point Core
 - Audit `pipeline::reference_point` to tag responsibilities that should be mode-agnostic (zone planning, coverage sampling, aggregation, matrix assembly) versus reference-point specifics (two-zone layout, ref-point metadata). Capture this as a checklist referencing concrete structs/functions (`load_groups`, `Sample`, `WorkerSamples`, `derive_sample_labels`, `compute_row`, `should_skip_row`, `compute_sample_bins`, `aggregate_slice`, `MatrixHeader` wiring).
