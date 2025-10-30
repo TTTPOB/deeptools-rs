@@ -6,7 +6,7 @@ use crate::config::{GeneralOptions, IoOptions, ScaleRegionsOptions, SortRegions}
 use crate::io::writers;
 use crate::io::{BedRecord, Strand};
 use crate::pipeline::core::{self, FileCollector, InMemoryCollector, PipelineMode, RegionTask};
-use crate::pipeline::matrix::{MatrixData, MatrixHeader, MatrixRow};
+use crate::pipeline::matrix::{LayoutVectors, MatrixHeader, MatrixHeaderBuilder, MatrixRow};
 use crate::pipeline::zones::ScaleRegionsPlan;
 
 use super::RunOutcome;
@@ -124,17 +124,29 @@ impl PipelineMode for ScaleRegionsMode {
         thread_count: usize,
         sample_count: usize,
     ) -> MatrixHeader {
-        build_scale_regions_header(
+        let layout = LayoutVectors::uniform(
+            sample_count,
+            metadata.bin_size,
+            self.options.upstream,
+            self.options.downstream,
+            self.options.region_body_length,
+            self.options.unscaled_5_prime,
+            self.options.unscaled_3_prime,
+            None,
+        );
+
+        MatrixHeaderBuilder::new(
             general,
-            &self.options,
             sample_labels,
             group_labels,
             group_counts,
-            metadata.bin_size,
-            metadata.total_bins,
-            sample_count,
             thread_count,
+            sample_count,
+            false,
         )
+        .with_layout(layout)
+        .with_uniform_sample_boundaries(metadata.total_bins)
+        .build()
     }
 }
 
@@ -270,45 +282,6 @@ pub fn run(
     matrix.prune_zero_rows();
 
     Ok(RunOutcome::Matrix(matrix))
-}
-
-fn build_scale_regions_header(
-    general: &GeneralOptions,
-    options: &ScaleRegionsOptions,
-    sample_labels: &[String],
-    group_labels: &[String],
-    group_counts: &[usize],
-    bin_size: u32,
-    total_bins: usize,
-    sample_count: usize,
-    thread_count: usize,
-) -> MatrixHeader {
-    let group_boundaries = MatrixData::group_boundaries_from_counts(group_counts);
-    let sample_boundaries = MatrixData::sample_boundaries_uniform(sample_count, total_bins);
-    MatrixHeader {
-        verbose: general.verbose,
-        scale: general.scale_factor,
-        skip_zeros: general.skip_zeros,
-        nan_after_end: false,
-        sort_using: general.sort_using.to_string(),
-        unscaled_5_prime: vec![options.unscaled_5_prime; sample_count],
-        body: vec![options.region_body_length; sample_count],
-        sample_labels: sample_labels.to_vec(),
-        downstream: vec![options.downstream; sample_count],
-        unscaled_3_prime: vec![options.unscaled_3_prime; sample_count],
-        group_labels: group_labels.to_vec(),
-        bin_size: vec![bin_size; sample_count],
-        upstream: vec![options.upstream; sample_count],
-        group_boundaries,
-        sample_boundaries,
-        missing_data_as_zero: general.missing_data_as_zero,
-        ref_point: vec![None; sample_count],
-        min_threshold: general.min_threshold,
-        sort_regions: general.sort_regions.to_string(),
-        proc_number: thread_count as u32,
-        bin_avg_type: general.average_type_bins.to_string(),
-        max_threshold: general.max_threshold,
-    }
 }
 
 fn ensure_positive(value: u32, flag: &str) -> Result<()> {

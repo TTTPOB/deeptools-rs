@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 use anyhow::{Result, bail};
 
-use crate::config::{SortRegions, SortUsing};
+use crate::config::{GeneralOptions, SortRegions, SortUsing};
 use crate::io::BedRecord;
 use serde::Serialize;
 
@@ -54,6 +54,143 @@ pub struct MatrixHeader {
     pub bin_avg_type: String,
     #[serde(rename = "max threshold")]
     pub max_threshold: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LayoutVectors {
+    pub upstream: Vec<u32>,
+    pub downstream: Vec<u32>,
+    pub body: Vec<u32>,
+    pub unscaled_5_prime: Vec<u32>,
+    pub unscaled_3_prime: Vec<u32>,
+    pub bin_size: Vec<u32>,
+    pub ref_point: Vec<Option<String>>,
+}
+
+impl LayoutVectors {
+    pub fn uniform(
+        sample_count: usize,
+        bin_size: u32,
+        upstream: u32,
+        downstream: u32,
+        body: u32,
+        unscaled_5_prime: u32,
+        unscaled_3_prime: u32,
+        ref_point: Option<String>,
+    ) -> Self {
+        let mut ref_points = Vec::with_capacity(sample_count);
+        for _ in 0..sample_count {
+            ref_points.push(ref_point.as_ref().cloned());
+        }
+
+        Self {
+            upstream: vec![upstream; sample_count],
+            downstream: vec![downstream; sample_count],
+            body: vec![body; sample_count],
+            unscaled_5_prime: vec![unscaled_5_prime; sample_count],
+            unscaled_3_prime: vec![unscaled_3_prime; sample_count],
+            bin_size: vec![bin_size; sample_count],
+            ref_point: ref_points,
+        }
+    }
+}
+
+pub struct MatrixHeaderBuilder<'a> {
+    general: &'a GeneralOptions,
+    sample_labels: &'a [String],
+    group_labels: &'a [String],
+    group_counts: &'a [usize],
+    thread_count: usize,
+    sample_count: usize,
+    nan_after_end: bool,
+    layout: Option<LayoutVectors>,
+    sample_boundaries: Option<Vec<usize>>,
+}
+
+impl<'a> MatrixHeaderBuilder<'a> {
+    pub fn new(
+        general: &'a GeneralOptions,
+        sample_labels: &'a [String],
+        group_labels: &'a [String],
+        group_counts: &'a [usize],
+        thread_count: usize,
+        sample_count: usize,
+        nan_after_end: bool,
+    ) -> Self {
+        Self {
+            general,
+            sample_labels,
+            group_labels,
+            group_counts,
+            thread_count,
+            sample_count,
+            nan_after_end,
+            layout: None,
+            sample_boundaries: None,
+        }
+    }
+
+    pub fn with_layout(mut self, layout: LayoutVectors) -> Self {
+        debug_assert_eq!(layout.upstream.len(), self.sample_count);
+        debug_assert_eq!(layout.downstream.len(), self.sample_count);
+        debug_assert_eq!(layout.body.len(), self.sample_count);
+        debug_assert_eq!(layout.unscaled_5_prime.len(), self.sample_count);
+        debug_assert_eq!(layout.unscaled_3_prime.len(), self.sample_count);
+        debug_assert_eq!(layout.bin_size.len(), self.sample_count);
+        debug_assert_eq!(layout.ref_point.len(), self.sample_count);
+        self.layout = Some(layout);
+        self
+    }
+
+    pub fn with_sample_boundaries(mut self, boundaries: Vec<usize>) -> Self {
+        debug_assert!(
+            boundaries.len() == self.sample_count + 1,
+            "sample boundaries must include start and end markers"
+        );
+        self.sample_boundaries = Some(boundaries);
+        self
+    }
+
+    pub fn with_uniform_sample_boundaries(self, bins_per_sample: usize) -> Self {
+        let sample_count = self.sample_count;
+        let boundaries = MatrixData::sample_boundaries_uniform(sample_count, bins_per_sample);
+        self.with_sample_boundaries(boundaries)
+    }
+
+    pub fn build(self) -> MatrixHeader {
+        let layout = self
+            .layout
+            .expect("MatrixHeaderBuilder requires layout before build");
+        let sample_boundaries = self
+            .sample_boundaries
+            .expect("MatrixHeaderBuilder requires sample boundaries before build");
+        let group_boundaries = MatrixData::group_boundaries_from_counts(self.group_counts);
+
+        MatrixHeader {
+            verbose: self.general.verbose,
+            scale: self.general.scale_factor,
+            skip_zeros: self.general.skip_zeros,
+            nan_after_end: self.nan_after_end,
+            sort_using: self.general.sort_using.to_string(),
+            unscaled_5_prime: layout.unscaled_5_prime,
+            body: layout.body,
+            sample_labels: self.sample_labels.to_vec(),
+            downstream: layout.downstream,
+            unscaled_3_prime: layout.unscaled_3_prime,
+            group_labels: self.group_labels.to_vec(),
+            bin_size: layout.bin_size,
+            upstream: layout.upstream,
+            group_boundaries,
+            sample_boundaries,
+            missing_data_as_zero: self.general.missing_data_as_zero,
+            ref_point: layout.ref_point,
+            min_threshold: self.general.min_threshold,
+            sort_regions: self.general.sort_regions.to_string(),
+            proc_number: self.thread_count as u32,
+            bin_avg_type: self.general.average_type_bins.to_string(),
+            max_threshold: self.general.max_threshold,
+        }
+    }
 }
 
 /// A single region row within the matrix output, tracking both the original
