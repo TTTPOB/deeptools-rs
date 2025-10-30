@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 
-use crate::config::{GeneralOptions, IoOptions, ScaleRegionsOptions, SortRegions};
+use crate::config::{GeneralOptions, GtfOptions, IoOptions, ScaleRegionsOptions, SortRegions};
 use crate::io::writers;
 use crate::io::{BedRecord, Strand};
 use crate::pipeline::core::{
@@ -161,6 +161,7 @@ impl PipelineMode for ScaleRegionsMode {
 pub fn run(
     general: &GeneralOptions,
     io: &IoOptions,
+    gtf: &GtfOptions,
     options: &ScaleRegionsOptions,
 ) -> Result<RunOutcome> {
     let mode = ScaleRegionsMode::new(options.clone());
@@ -169,7 +170,7 @@ pub fn run(
     let sample_labels = core::derive_sample_labels(&io.scores, general)?;
     let sample_count = sample_labels.len();
 
-    let groups = core::load_groups(&io.regions)?;
+    let groups = core::load_groups(&io.regions, gtf)?;
     let group_labels: Vec<String> = groups.iter().map(|group| group.label.clone()).collect();
 
     let mut tasks = Vec::new();

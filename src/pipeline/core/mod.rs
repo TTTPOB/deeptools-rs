@@ -10,9 +10,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
 
-use crate::config::{AverageTypeBins, GeneralOptions};
+use crate::config::{AverageTypeBins, GeneralOptions, GtfOptions};
 use crate::io::writers::StreamingMatrixWriter;
-use crate::io::{BedReadError, BedRecord, BigWigReader};
+use crate::io::{BedReadError, BedRecord, BigWigReader, load_gtf_records};
 use crate::pipeline::matrix::{MatrixData, MatrixHeader, MatrixRow};
 
 pub trait SignalBin {
@@ -122,6 +122,12 @@ pub struct Group {
     pub records: Vec<BedRecord>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegionFormat {
+    Bed,
+    Gtf,
+}
+
 #[derive(Clone)]
 pub struct RegionTask {
     pub index: usize,
@@ -129,14 +135,27 @@ pub struct RegionTask {
     pub record: BedRecord,
 }
 
-pub fn load_groups(paths: &[PathBuf]) -> Result<Vec<Group>> {
+pub fn load_groups(paths: &[PathBuf], gtf: &GtfOptions) -> Result<Vec<Group>> {
     let mut groups = Vec::new();
     let mut seen_labels = HashSet::new();
     for path in paths {
-        let mut file_groups = parse_grouped_bed(path, &mut seen_labels)
-            .map_err(anyhow::Error::new)
-            .with_context(|| format!("Failed to parse regions file '{}'", path.display()))?;
-        groups.append(&mut file_groups);
+        match infer_region_format(path) {
+            RegionFormat::Bed => {
+                let mut file_groups = parse_grouped_bed(path, &mut seen_labels)
+                    .map_err(anyhow::Error::new)
+                    .with_context(|| {
+                        format!("Failed to parse regions file '{}'", path.display())
+                    })?;
+                groups.append(&mut file_groups);
+            }
+            RegionFormat::Gtf => {
+                let mut file_groups =
+                    parse_grouped_gtf(path, gtf, &mut seen_labels).with_context(|| {
+                        format!("Failed to parse regions file '{}'", path.display())
+                    })?;
+                groups.append(&mut file_groups);
+            }
+        }
     }
 
     Ok(groups)
@@ -473,6 +492,21 @@ fn parse_grouped_bed(
     Ok(groups)
 }
 
+fn parse_grouped_gtf(
+    path: &Path,
+    options: &GtfOptions,
+    seen_labels: &mut HashSet<String>,
+) -> Result<Vec<Group>> {
+    let default_label = bed_file_label(path);
+    let mut groups = Vec::new();
+
+    let records = load_gtf_records(path, options)?;
+    let label = next_unique_label("", &default_label, seen_labels);
+    groups.push(Group { label, records });
+
+    Ok(groups)
+}
+
 fn finalize_group(
     raw_label: &str,
     default_label: &str,
@@ -529,6 +563,21 @@ fn label_from_path(path: &Path, use_stem: bool) -> String {
 
 fn bed_file_label(path: &Path) -> String {
     label_from_path(path, false)
+}
+
+fn infer_region_format(path: &Path) -> RegionFormat {
+    let lower = path.to_string_lossy().to_ascii_lowercase();
+    if lower.ends_with(".gtf")
+        || lower.ends_with(".gtf.gz")
+        || lower.ends_with(".gff")
+        || lower.ends_with(".gff.gz")
+        || lower.ends_with(".gff3")
+        || lower.ends_with(".gff3.gz")
+    {
+        RegionFormat::Gtf
+    } else {
+        RegionFormat::Bed
+    }
 }
 
 pub trait PipelineMode: Sync {

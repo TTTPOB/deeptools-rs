@@ -120,7 +120,7 @@
 
 ## Immediate Next Steps
 - Document full CLI flag mapping (confirmed defaults, alias coverage) and ensure `config` layer encodes them.
-- Finalise region ingestion abstractions (BED groups + upcoming GTF support) and map them to existing `BedRecord`.
+- Finish wiring the region ingestion abstractions by layering keep-exons/metagene semantics on top of the new GTF loader and settling on the long-term region struct.
 - Flesh out zone-building helpers in Rust and cover them with unit tests using fixtures derived from Python’s `chopRegions` behaviour.
 - Port the worker pipeline for `reference-point` mode end-to-end, validating against `scripts/compute_matrix_regression.py`.
 - Establish regression harness via `pixi` to automate reference matrix generation for CI/local development.
@@ -130,7 +130,7 @@
 
 ## Implementation Order (Macro Level)
 - [x] `cli` + `config`: comprehensive CLI parsing with clap; full flag parity including aliases, defaults, and validation implemented.
-- [x] `io::bed` + grouping utilities: BED parser complete with group delimiter support (`#`), strand handling, and iterator interface; GTF support deferred.
+- [x] `io::regions`: BED parser complete with group delimiter support (`#`) plus bio-powered GTF ingestion (transcript + exon capture exported as BED12 metadata); keep-exons semantics still pending.
 - [x] `io::bigwig`: BigWigReader wraps bigtools with NaN/zero padding semantics; per-thread caching implemented via rayon's `map_init`.
 - [x] `pipeline::zones`: reference-point bin layout helper landed in `pipeline::zones`.
 - [x] `pipeline::reference_point`: full worker pipeline with rayon-based parallelism, zone plan integration, average-type aggregations, scale factors, threshold filtering, and nan_after_end support.

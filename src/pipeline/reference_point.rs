@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 
-use crate::config::{GeneralOptions, IoOptions, ReferencePointOptions, SortRegions};
+use crate::config::{GeneralOptions, GtfOptions, IoOptions, ReferencePointOptions, SortRegions};
 use crate::io::BedRecord;
 use crate::io::writers;
 use crate::pipeline::core::{
@@ -134,6 +134,7 @@ impl PipelineMode for ReferencePointMode {
 pub fn run(
     general: &GeneralOptions,
     io: &IoOptions,
+    gtf: &GtfOptions,
     options: &ReferencePointOptions,
 ) -> Result<RunOutcome> {
     let mode = ReferencePointMode::new(options.clone());
@@ -142,7 +143,7 @@ pub fn run(
     let sample_labels = core::derive_sample_labels(&io.scores, general)?;
     let sample_count = sample_labels.len();
 
-    let groups = core::load_groups(&io.regions)?;
+    let groups = core::load_groups(&io.regions, gtf)?;
     let group_labels: Vec<String> = groups.iter().map(|group| group.label.clone()).collect();
 
     let mut tasks = Vec::new();
