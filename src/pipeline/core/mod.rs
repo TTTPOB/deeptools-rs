@@ -6,6 +6,8 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 
 use anyhow::{Context, Result, anyhow, bail};
+use rayon::ThreadPoolBuilder;
+use rayon::prelude::*;
 
 use crate::config::{AverageTypeBins, GeneralOptions};
 use crate::io::writers::StreamingMatrixWriter;
@@ -87,6 +89,13 @@ impl WorkerSamples {
 pub struct Group {
     pub label: String,
     pub records: Vec<BedRecord>,
+}
+
+#[derive(Clone)]
+pub struct RegionTask {
+    pub index: usize,
+    pub group_index: usize,
+    pub record: BedRecord,
 }
 
 pub fn load_groups(paths: &[PathBuf]) -> Result<Vec<Group>> {
@@ -491,6 +500,32 @@ fn bed_file_label(path: &Path) -> String {
     label_from_path(path, false)
 }
 
+pub trait PipelineMode: Sync {
+    type Plan: RegionPlan;
+    type Metadata: Send + Sync;
+
+    fn validate(&self, general: &GeneralOptions) -> Result<Self::Metadata>;
+    fn total_bins(&self, metadata: &Self::Metadata) -> usize;
+    fn plan_for(&self, record: &BedRecord, metadata: &Self::Metadata) -> Self::Plan;
+    fn nan_after_end(&self, metadata: &Self::Metadata) -> bool;
+    fn postprocess_row(
+        &self,
+        record: BedRecord,
+        values: Vec<Vec<f32>>,
+        metadata: &Self::Metadata,
+    ) -> MatrixRow;
+    fn build_header(
+        &self,
+        general: &GeneralOptions,
+        metadata: &Self::Metadata,
+        sample_labels: &[String],
+        group_labels: &[String],
+        group_counts: &[usize],
+        thread_count: usize,
+        sample_count: usize,
+    ) -> MatrixHeader;
+}
+
 #[derive(Debug)]
 pub struct RegionResult {
     pub index: usize,
@@ -643,6 +678,101 @@ fn flush_ready_entries<S: RowSink>(
     }
 
     Ok(())
+}
+
+pub fn execute_mode<M, S, F>(
+    tasks: Vec<RegionTask>,
+    general: &GeneralOptions,
+    sample_paths: Arc<Vec<PathBuf>>,
+    sink: S,
+    thread_count: usize,
+    mode: &M,
+    metadata: Arc<M::Metadata>,
+    header_builder: F,
+    group_count: usize,
+) -> Result<AggregatedResult<S::Output>>
+where
+    M: PipelineMode,
+    S: RowSink + Send + 'static,
+    F: FnOnce(Vec<usize>) -> Result<MatrixHeader> + Send + 'static,
+{
+    let task_count = tasks.len();
+    let (tx, rx) = mpsc::channel();
+    let aggregator_handle =
+        spawn_row_aggregator(rx, sink, group_count, task_count, header_builder)?;
+
+    if task_count == 0 {
+        drop(tx);
+        return aggregator_handle
+            .join()
+            .map_err(|_| anyhow!("Matrix aggregation thread panicked"))?;
+    }
+
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(thread_count)
+        .build()
+        .context("Failed to initialise rayon thread pool for pipeline scheduling")?;
+
+    let sample_paths_for_workers = Arc::clone(&sample_paths);
+    let metadata_for_workers = Arc::clone(&metadata);
+    let tx_template = tx.clone();
+
+    let compute_result = pool.install(|| {
+        tasks
+            .into_par_iter()
+            .map_init(
+                move || {
+                    (
+                        WorkerSamples::new(Arc::clone(&sample_paths_for_workers)),
+                        tx_template.clone(),
+                        Arc::clone(&metadata_for_workers),
+                    )
+                },
+                |state, task| {
+                    let (worker_samples, sender, metadata) = state;
+                    let metadata_ref = metadata.as_ref();
+
+                    let RegionTask {
+                        index,
+                        group_index,
+                        record,
+                    } = task;
+
+                    let samples = worker_samples.samples()?;
+                    let plan = mode.plan_for(&record, metadata_ref);
+                    let maybe_values = compute_row(
+                        samples.as_mut_slice(),
+                        &record,
+                        &plan,
+                        general,
+                        mode.nan_after_end(metadata_ref),
+                    )?;
+                    let row = maybe_values
+                        .map(|values| mode.postprocess_row(record, values, metadata_ref));
+
+                    sender
+                        .send(RegionResult {
+                            index,
+                            group_index,
+                            row,
+                        })
+                        .map_err(|err| anyhow!("Failed to stream computed row: {err}"))?;
+
+                    Ok::<(), anyhow::Error>(())
+                },
+            )
+            .try_reduce(|| (), |_, _| Ok::<(), anyhow::Error>(()))
+    });
+
+    drop(tx);
+
+    let aggregation = aggregator_handle
+        .join()
+        .map_err(|_| anyhow!("Matrix aggregation thread panicked"))??;
+
+    compute_result?;
+
+    Ok(aggregation)
 }
 
 #[cfg(test)]

@@ -1,24 +1,117 @@
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow, bail};
-use rayon::ThreadPoolBuilder;
-use rayon::prelude::*;
+use anyhow::{Result, bail};
 
 use crate::config::{GeneralOptions, IoOptions, ReferencePointOptions, SortRegions};
 use crate::io::BedRecord;
 use crate::io::writers;
-use crate::pipeline::core::{
-    self, AggregatedResult, InMemorySink, RegionResult, StreamingSink, WorkerSamples,
-};
+use crate::pipeline::core::{self, InMemorySink, PipelineMode, RegionTask, StreamingSink};
 use crate::pipeline::zones::ReferencePointPlan;
 
 use super::RunOutcome;
 use super::matrix::{MatrixData, MatrixHeader, MatrixRow};
 
-struct RegionTask {
-    index: usize,
-    group_index: usize,
-    record: BedRecord,
+#[derive(Clone)]
+struct ReferencePointMode {
+    options: ReferencePointOptions,
+}
+
+impl ReferencePointMode {
+    fn new(options: ReferencePointOptions) -> Self {
+        Self { options }
+    }
+}
+
+#[derive(Clone)]
+struct ReferencePointMetadata {
+    bin_size: u32,
+    upstream_bins: usize,
+    downstream_bins: usize,
+    total_bins: usize,
+}
+
+impl PipelineMode for ReferencePointMode {
+    type Plan = ReferencePointPlan;
+    type Metadata = ReferencePointMetadata;
+
+    fn validate(&self, general: &GeneralOptions) -> Result<Self::Metadata> {
+        ensure_positive(general.bin_size, "binSize")?;
+        ensure_multiple(
+            general.bin_size,
+            self.options.upstream,
+            "beforeRegionStartLength",
+        )?;
+        ensure_multiple(
+            general.bin_size,
+            self.options.downstream,
+            "afterRegionStartLength",
+        )?;
+
+        let upstream_bins = (self.options.upstream / general.bin_size) as usize;
+        let downstream_bins = (self.options.downstream / general.bin_size) as usize;
+        let total_bins = upstream_bins + downstream_bins;
+
+        if total_bins == 0 {
+            bail!("Reference-point mode requires at least one upstream or downstream bin");
+        }
+
+        Ok(ReferencePointMetadata {
+            bin_size: general.bin_size,
+            upstream_bins,
+            downstream_bins,
+            total_bins,
+        })
+    }
+
+    fn total_bins(&self, metadata: &Self::Metadata) -> usize {
+        metadata.total_bins
+    }
+
+    fn plan_for(&self, record: &BedRecord, metadata: &Self::Metadata) -> Self::Plan {
+        ReferencePointPlan::reference_point(
+            record,
+            self.options.reference_point,
+            metadata.bin_size,
+            metadata.upstream_bins,
+            metadata.downstream_bins,
+        )
+    }
+
+    fn nan_after_end(&self, _metadata: &Self::Metadata) -> bool {
+        self.options.nan_after_end
+    }
+
+    fn postprocess_row(
+        &self,
+        record: BedRecord,
+        values: Vec<Vec<f32>>,
+        _metadata: &Self::Metadata,
+    ) -> MatrixRow {
+        MatrixRow { record, values }
+    }
+
+    fn build_header(
+        &self,
+        general: &GeneralOptions,
+        metadata: &Self::Metadata,
+        sample_labels: &[String],
+        group_labels: &[String],
+        group_counts: &[usize],
+        thread_count: usize,
+        sample_count: usize,
+    ) -> MatrixHeader {
+        build_reference_point_header(
+            general,
+            &self.options,
+            sample_labels,
+            group_labels,
+            group_counts,
+            metadata.bin_size,
+            metadata.total_bins,
+            sample_count,
+            thread_count,
+        )
+    }
 }
 
 pub fn run(
@@ -26,22 +119,11 @@ pub fn run(
     io: &IoOptions,
     options: &ReferencePointOptions,
 ) -> Result<RunOutcome> {
-    let bin_size = general.bin_size;
-    ensure_positive(bin_size, "binSize")?;
-
-    ensure_multiple(bin_size, options.upstream, "beforeRegionStartLength")?;
-    ensure_multiple(bin_size, options.downstream, "afterRegionStartLength")?;
-
-    let upstream_bins = (options.upstream / bin_size) as usize;
-    let downstream_bins = (options.downstream / bin_size) as usize;
-    let total_bins = upstream_bins + downstream_bins;
-
-    if total_bins == 0 {
-        bail!("Reference-point mode requires at least one upstream or downstream bin");
-    }
+    let mode = ReferencePointMode::new(options.clone());
+    let metadata = Arc::new(mode.validate(general)?);
 
     let sample_labels = core::derive_sample_labels(&io.scores, general)?;
-    let sample_count = io.scores.len();
+    let sample_count = sample_labels.len();
 
     let groups = core::load_groups(&io.regions)?;
     let group_labels: Vec<String> = groups.iter().map(|group| group.label.clone()).collect();
@@ -61,6 +143,7 @@ pub fn run(
     }
 
     let thread_count = std::cmp::max(1, general.number_of_processors.resolve() as usize);
+    let total_bins = mode.total_bins(metadata.as_ref());
     let row_count = tasks.len();
     let should_stream = writers::should_use_streaming_for_plan(
         row_count,
@@ -71,68 +154,83 @@ pub fn run(
     );
 
     let sample_paths = Arc::new(io.scores.clone());
-    let make_header_builder = |sample_labels: &[String], group_labels: &[String]| {
-        let general = general.clone();
-        let options = options.clone();
-        let sample_labels = sample_labels.to_vec();
-        let group_labels = group_labels.to_vec();
-        move |group_counts: Vec<usize>| -> Result<MatrixHeader> {
-            Ok(build_reference_point_header(
-                &general,
-                &options,
-                &sample_labels,
-                &group_labels,
-                &group_counts,
-                bin_size,
-                total_bins,
-                sample_count,
-                thread_count,
-            ))
-        }
-    };
 
     if should_stream {
-        let header_estimate = build_reference_point_header(
+        let header_estimate = mode.build_header(
             general,
-            options,
+            metadata.as_ref(),
             &sample_labels,
             &group_labels,
             &group_capacity,
-            bin_size,
-            total_bins,
-            sample_count,
             thread_count,
+            sample_count,
         );
         writers::ensure_streaming_header_capacity(&header_estimate)?;
 
         let writer = writers::StreamingMatrixWriter::start(&io.matrix_output)?;
         let sink = StreamingSink::new(writer);
-        execute_reference_point(
+        let header_builder = {
+            let general = general.clone();
+            let sample_labels = sample_labels.clone();
+            let group_labels = group_labels.clone();
+            let metadata = Arc::clone(&metadata);
+            let mode = mode.clone();
+            move |group_counts: Vec<usize>| -> Result<MatrixHeader> {
+                Ok(mode.build_header(
+                    &general,
+                    metadata.as_ref(),
+                    &sample_labels,
+                    &group_labels,
+                    &group_counts,
+                    thread_count,
+                    sample_count,
+                ))
+            }
+        };
+
+        core::execute_mode(
             tasks,
             general,
-            options,
-            sample_paths,
+            Arc::clone(&sample_paths),
             sink,
             thread_count,
-            upstream_bins,
-            downstream_bins,
-            make_header_builder(&sample_labels, &group_labels),
+            &mode,
+            Arc::clone(&metadata),
+            header_builder,
             group_labels.len(),
         )?;
         return Ok(RunOutcome::Streamed);
     }
 
     let sink = InMemorySink::with_capacity(row_count);
-    let aggregation = execute_reference_point(
+    let header_builder = {
+        let general = general.clone();
+        let sample_labels = sample_labels.clone();
+        let group_labels = group_labels.clone();
+        let metadata = Arc::clone(&metadata);
+        let mode = mode.clone();
+        move |group_counts: Vec<usize>| -> Result<MatrixHeader> {
+            Ok(mode.build_header(
+                &general,
+                metadata.as_ref(),
+                &sample_labels,
+                &group_labels,
+                &group_counts,
+                thread_count,
+                sample_count,
+            ))
+        }
+    };
+
+    let aggregation = core::execute_mode(
         tasks,
         general,
-        options,
         sample_paths,
         sink,
         thread_count,
-        upstream_bins,
-        downstream_bins,
-        make_header_builder(&sample_labels, &group_labels),
+        &mode,
+        metadata,
+        header_builder,
         group_labels.len(),
     )?;
 
@@ -155,89 +253,6 @@ pub fn run(
     matrix.prune_zero_rows();
 
     Ok(RunOutcome::Matrix(matrix))
-}
-
-fn execute_reference_point<S, F>(
-    tasks: Vec<RegionTask>,
-    general: &GeneralOptions,
-    options: &ReferencePointOptions,
-    sample_paths: Arc<Vec<std::path::PathBuf>>,
-    sink: S,
-    thread_count: usize,
-    upstream_bins: usize,
-    downstream_bins: usize,
-    header_builder: F,
-    group_count: usize,
-) -> Result<AggregatedResult<S::Output>>
-where
-    S: core::RowSink + Send + 'static,
-    F: FnOnce(Vec<usize>) -> Result<MatrixHeader> + Send + 'static,
-{
-    let task_count = tasks.len();
-    let (tx, rx) = mpsc::channel();
-
-    let aggregator_handle =
-        core::spawn_row_aggregator(rx, sink, group_count, task_count, header_builder)?;
-
-    let pool = ThreadPoolBuilder::new()
-        .num_threads(thread_count)
-        .build()
-        .context("Failed to initialise rayon thread pool for reference-point scheduling")?;
-
-    let compute_result = pool.install(|| {
-        tasks
-            .into_par_iter()
-            .map_init(
-                || (WorkerSamples::new(sample_paths.clone()), tx.clone()),
-                |state, task| {
-                    let (worker_samples, sender) = state;
-                    let RegionTask {
-                        index,
-                        group_index,
-                        record,
-                    } = task;
-
-                    let samples = worker_samples.samples()?;
-                    let plan = ReferencePointPlan::reference_point(
-                        &record,
-                        options.reference_point,
-                        general.bin_size,
-                        upstream_bins,
-                        downstream_bins,
-                    );
-
-                    let maybe_values = core::compute_row(
-                        samples.as_mut_slice(),
-                        &record,
-                        &plan,
-                        general,
-                        options.nan_after_end,
-                    )?;
-                    let row = maybe_values.map(|values| MatrixRow { record, values });
-
-                    sender
-                        .send(RegionResult {
-                            index,
-                            group_index,
-                            row,
-                        })
-                        .map_err(|err| anyhow!("Failed to stream computed row: {err}"))?;
-
-                    Ok::<(), anyhow::Error>(())
-                },
-            )
-            .try_reduce(|| (), |_, _| Ok::<(), anyhow::Error>(()))
-    });
-
-    drop(tx);
-
-    compute_result?;
-
-    let aggregation = aggregator_handle
-        .join()
-        .map_err(|_| anyhow!("Matrix aggregation thread panicked"))??;
-
-    Ok(aggregation)
 }
 
 fn build_reference_point_header(

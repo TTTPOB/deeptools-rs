@@ -1,24 +1,141 @@
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow, bail};
-use rayon::ThreadPoolBuilder;
-use rayon::prelude::*;
+use anyhow::{Result, bail};
 
 use crate::config::{GeneralOptions, IoOptions, ScaleRegionsOptions, SortRegions};
 use crate::io::writers;
 use crate::io::{BedRecord, Strand};
-use crate::pipeline::core::{
-    self, AggregatedResult, InMemorySink, RegionResult, StreamingSink, WorkerSamples,
-};
+use crate::pipeline::core::{self, InMemorySink, PipelineMode, RegionTask, StreamingSink};
 use crate::pipeline::matrix::{MatrixData, MatrixHeader, MatrixRow};
 use crate::pipeline::zones::ScaleRegionsPlan;
 
 use super::RunOutcome;
 
-struct RegionTask {
-    index: usize,
-    group_index: usize,
-    record: BedRecord,
+#[derive(Clone)]
+struct ScaleRegionsMode {
+    options: ScaleRegionsOptions,
+}
+
+impl ScaleRegionsMode {
+    fn new(options: ScaleRegionsOptions) -> Self {
+        Self { options }
+    }
+}
+
+#[derive(Clone)]
+struct ScaleRegionsMetadata {
+    bin_size: u32,
+    total_bins: usize,
+}
+
+impl PipelineMode for ScaleRegionsMode {
+    type Plan = ScaleRegionsPlan;
+    type Metadata = ScaleRegionsMetadata;
+
+    fn validate(&self, general: &GeneralOptions) -> Result<Self::Metadata> {
+        ensure_positive(general.bin_size, "binSize")?;
+
+        ensure_multiple(
+            general.bin_size,
+            self.options.upstream,
+            "beforeRegionStartLength",
+        )?;
+        ensure_multiple(
+            general.bin_size,
+            self.options.downstream,
+            "afterRegionStartLength",
+        )?;
+        ensure_multiple(
+            general.bin_size,
+            self.options.region_body_length,
+            "regionBodyLength",
+        )?;
+        ensure_multiple(
+            general.bin_size,
+            self.options.unscaled_5_prime,
+            "unscaled5prime",
+        )?;
+        ensure_multiple(
+            general.bin_size,
+            self.options.unscaled_3_prime,
+            "unscaled3prime",
+        )?;
+
+        if self.options.region_body_length == 0
+            && (self.options.unscaled_5_prime + self.options.unscaled_3_prime) > 0
+        {
+            bail!(
+                "Unscaled 5- and 3-prime regions require a non-zero --regionBodyLength in scale-regions mode"
+            );
+        }
+
+        let upstream_bins = (self.options.upstream / general.bin_size) as usize;
+        let downstream_bins = (self.options.downstream / general.bin_size) as usize;
+        let unscaled5_bins = (self.options.unscaled_5_prime / general.bin_size) as usize;
+        let unscaled3_bins = (self.options.unscaled_3_prime / general.bin_size) as usize;
+        let body_bins = (self.options.region_body_length / general.bin_size) as usize;
+
+        let total_bins =
+            upstream_bins + downstream_bins + unscaled5_bins + unscaled3_bins + body_bins;
+
+        if total_bins == 0 {
+            bail!("Scale-regions mode requires at least one bin to be generated");
+        }
+
+        Ok(ScaleRegionsMetadata {
+            bin_size: general.bin_size,
+            total_bins,
+        })
+    }
+
+    fn total_bins(&self, metadata: &Self::Metadata) -> usize {
+        metadata.total_bins
+    }
+
+    fn plan_for(&self, record: &BedRecord, metadata: &Self::Metadata) -> Self::Plan {
+        ScaleRegionsPlan::scale_regions(record, &self.options, metadata.bin_size)
+    }
+
+    fn nan_after_end(&self, _metadata: &Self::Metadata) -> bool {
+        false
+    }
+
+    fn postprocess_row(
+        &self,
+        record: BedRecord,
+        mut values: Vec<Vec<f32>>,
+        _metadata: &Self::Metadata,
+    ) -> MatrixRow {
+        if matches!(record.strand, Strand::Negative) {
+            for sample_values in &mut values {
+                sample_values.reverse();
+            }
+        }
+        MatrixRow { record, values }
+    }
+
+    fn build_header(
+        &self,
+        general: &GeneralOptions,
+        metadata: &Self::Metadata,
+        sample_labels: &[String],
+        group_labels: &[String],
+        group_counts: &[usize],
+        thread_count: usize,
+        sample_count: usize,
+    ) -> MatrixHeader {
+        build_scale_regions_header(
+            general,
+            &self.options,
+            sample_labels,
+            group_labels,
+            group_counts,
+            metadata.bin_size,
+            metadata.total_bins,
+            sample_count,
+            thread_count,
+        )
+    }
 }
 
 pub fn run(
@@ -26,35 +143,11 @@ pub fn run(
     io: &IoOptions,
     options: &ScaleRegionsOptions,
 ) -> Result<RunOutcome> {
-    let bin_size = general.bin_size;
-    ensure_positive(bin_size, "binSize")?;
-
-    ensure_multiple(bin_size, options.upstream, "beforeRegionStartLength")?;
-    ensure_multiple(bin_size, options.downstream, "afterRegionStartLength")?;
-    ensure_multiple(bin_size, options.region_body_length, "regionBodyLength")?;
-    ensure_multiple(bin_size, options.unscaled_5_prime, "unscaled5prime")?;
-    ensure_multiple(bin_size, options.unscaled_3_prime, "unscaled3prime")?;
-
-    if options.region_body_length == 0 && (options.unscaled_5_prime + options.unscaled_3_prime) > 0
-    {
-        bail!(
-            "Unscaled 5- and 3-prime regions require a non-zero --regionBodyLength in scale-regions mode"
-        );
-    }
-
-    let upstream_bins = (options.upstream / bin_size) as usize;
-    let downstream_bins = (options.downstream / bin_size) as usize;
-    let unscaled5_bins = (options.unscaled_5_prime / bin_size) as usize;
-    let unscaled3_bins = (options.unscaled_3_prime / bin_size) as usize;
-    let body_bins = (options.region_body_length / bin_size) as usize;
-
-    let total_bins = upstream_bins + downstream_bins + unscaled5_bins + unscaled3_bins + body_bins;
-    if total_bins == 0 {
-        bail!("Scale-regions mode requires at least one bin to be generated");
-    }
+    let mode = ScaleRegionsMode::new(options.clone());
+    let metadata = Arc::new(mode.validate(general)?);
 
     let sample_labels = core::derive_sample_labels(&io.scores, general)?;
-    let sample_count = io.scores.len();
+    let sample_count = sample_labels.len();
 
     let groups = core::load_groups(&io.regions)?;
     let group_labels: Vec<String> = groups.iter().map(|group| group.label.clone()).collect();
@@ -74,6 +167,7 @@ pub fn run(
     }
 
     let thread_count = std::cmp::max(1, general.number_of_processors.resolve() as usize);
+    let total_bins = mode.total_bins(metadata.as_ref());
     let row_count = tasks.len();
     let should_stream = writers::should_use_streaming_for_plan(
         row_count,
@@ -84,66 +178,83 @@ pub fn run(
     );
 
     let sample_paths = Arc::new(io.scores.clone());
-    let make_header_builder = |sample_labels: &[String], group_labels: &[String]| {
-        let general = general.clone();
-        let options = options.clone();
-        let sample_labels = sample_labels.to_vec();
-        let group_labels = group_labels.to_vec();
-        move |group_counts: Vec<usize>| -> Result<MatrixHeader> {
-            Ok(build_scale_regions_header(
-                &general,
-                &options,
-                &sample_labels,
-                &group_labels,
-                &group_counts,
-                bin_size,
-                total_bins,
-                sample_count,
-                thread_count,
-            ))
-        }
-    };
 
     if should_stream {
-        let header_estimate = build_scale_regions_header(
+        let header_estimate = mode.build_header(
             general,
-            options,
+            metadata.as_ref(),
             &sample_labels,
             &group_labels,
             &group_capacity,
-            bin_size,
-            total_bins,
-            sample_count,
             thread_count,
+            sample_count,
         );
         writers::ensure_streaming_header_capacity(&header_estimate)?;
 
         let writer = writers::StreamingMatrixWriter::start(&io.matrix_output)?;
         let sink = StreamingSink::new(writer);
-        execute_scale_regions(
+        let header_builder = {
+            let general = general.clone();
+            let sample_labels = sample_labels.clone();
+            let group_labels = group_labels.clone();
+            let metadata = Arc::clone(&metadata);
+            let mode = mode.clone();
+            move |group_counts: Vec<usize>| -> Result<MatrixHeader> {
+                Ok(mode.build_header(
+                    &general,
+                    metadata.as_ref(),
+                    &sample_labels,
+                    &group_labels,
+                    &group_counts,
+                    thread_count,
+                    sample_count,
+                ))
+            }
+        };
+
+        core::execute_mode(
             tasks,
             general,
-            options,
-            sample_paths,
+            Arc::clone(&sample_paths),
             sink,
             thread_count,
-            bin_size,
-            make_header_builder(&sample_labels, &group_labels),
+            &mode,
+            Arc::clone(&metadata),
+            header_builder,
             group_labels.len(),
         )?;
         return Ok(RunOutcome::Streamed);
     }
 
     let sink = InMemorySink::with_capacity(row_count);
-    let aggregation = execute_scale_regions(
+    let header_builder = {
+        let general = general.clone();
+        let sample_labels = sample_labels.clone();
+        let group_labels = group_labels.clone();
+        let metadata = Arc::clone(&metadata);
+        let mode = mode.clone();
+        move |group_counts: Vec<usize>| -> Result<MatrixHeader> {
+            Ok(mode.build_header(
+                &general,
+                metadata.as_ref(),
+                &sample_labels,
+                &group_labels,
+                &group_counts,
+                thread_count,
+                sample_count,
+            ))
+        }
+    };
+
+    let aggregation = core::execute_mode(
         tasks,
         general,
-        options,
         sample_paths,
         sink,
         thread_count,
-        bin_size,
-        make_header_builder(&sample_labels, &group_labels),
+        &mode,
+        metadata,
+        header_builder,
         group_labels.len(),
     )?;
 
@@ -166,86 +277,6 @@ pub fn run(
     matrix.prune_zero_rows();
 
     Ok(RunOutcome::Matrix(matrix))
-}
-
-fn execute_scale_regions<S, F>(
-    tasks: Vec<RegionTask>,
-    general: &GeneralOptions,
-    options: &ScaleRegionsOptions,
-    sample_paths: Arc<Vec<std::path::PathBuf>>,
-    sink: S,
-    thread_count: usize,
-    bin_size: u32,
-    header_builder: F,
-    group_count: usize,
-) -> Result<AggregatedResult<S::Output>>
-where
-    S: core::RowSink + Send + 'static,
-    F: FnOnce(Vec<usize>) -> Result<MatrixHeader> + Send + 'static,
-{
-    let task_count = tasks.len();
-    let (tx, rx) = mpsc::channel();
-
-    let aggregator_handle =
-        core::spawn_row_aggregator(rx, sink, group_count, task_count, header_builder)?;
-
-    let pool = ThreadPoolBuilder::new()
-        .num_threads(thread_count)
-        .build()
-        .context("Failed to initialise rayon thread pool for scale-regions scheduling")?;
-
-    let compute_result = pool.install(|| {
-        tasks
-            .into_par_iter()
-            .map_init(
-                || (WorkerSamples::new(sample_paths.clone()), tx.clone()),
-                |state, task| {
-                    let (worker_samples, sender) = state;
-                    let RegionTask {
-                        index,
-                        group_index,
-                        record,
-                    } = task;
-
-                    let samples = worker_samples.samples()?;
-                    let plan = ScaleRegionsPlan::scale_regions(&record, options, bin_size);
-                    let strand = record.strand;
-
-                    let maybe_values =
-                        core::compute_row(samples.as_mut_slice(), &record, &plan, general, false)?;
-
-                    let row = maybe_values.map(|mut values| {
-                        if matches!(strand, Strand::Negative) {
-                            for sample_values in &mut values {
-                                sample_values.reverse();
-                            }
-                        }
-                        MatrixRow { record, values }
-                    });
-
-                    sender
-                        .send(RegionResult {
-                            index,
-                            group_index,
-                            row,
-                        })
-                        .map_err(|err| anyhow!("Failed to stream computed row: {err}"))?;
-
-                    Ok::<(), anyhow::Error>(())
-                },
-            )
-            .try_reduce(|| (), |_, _| Ok::<(), anyhow::Error>(()))
-    });
-
-    drop(tx);
-
-    compute_result?;
-
-    let aggregation = aggregator_handle
-        .join()
-        .map_err(|_| anyhow!("Matrix aggregation thread panicked"))??;
-
-    Ok(aggregation)
 }
 
 fn build_scale_regions_header(
