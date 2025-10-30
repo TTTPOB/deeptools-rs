@@ -1,6 +1,7 @@
 # Streaming `matrix.gz` Investigation
 
 ## Current Behaviour Snapshot
+- `pipeline::execute` waits for `reference_point::run` / `scale_regions::run` to finish building a full `MatrixData` before spawning the `matrix-writer` thread (`src/pipeline/mod.rs:23`–`44`). That means all rows are computed, sorted, and zero-pruned prior to any gzip writes, so wall-clock still shows “compute everything, then emit”.
 - `reference_point::run` and `scale_regions::run` both return a `MatrixData` that owns the full `Vec<MatrixRow>` plus header metadata (`src/pipeline/reference_point.rs:160`, `src/pipeline/scale_regions.rs:128`).
 - `write_outputs` currently serialises on the caller thread, feeding a `flate2::write::GzEncoder` row-by-row after sorting and zero-row pruning (`src/io/writers/mod.rs:13`–`55`).
 - Because the header depends on final row counts and ordering, we keep every row in memory until all computation completes.
