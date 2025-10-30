@@ -1,38 +1,22 @@
 # Streaming `matrix.gz` Investigation
 
 ## Current Behaviour Snapshot
-- `pipeline::execute` waits for `reference_point::run` / `scale_regions::run` to finish building a full `MatrixData` before spawning the `matrix-writer` thread (`src/pipeline/mod.rs:23`–`44`). That means all rows are computed, sorted, and zero-pruned prior to any gzip writes, so wall-clock still shows “compute everything, then emit”.
-- `reference_point::run` and `scale_regions::run` both return a `MatrixData` that owns the full `Vec<MatrixRow>` plus header metadata (`src/pipeline/reference_point.rs:160`, `src/pipeline/scale_regions.rs:128`).
-- `write_outputs` currently serialises on the caller thread, feeding a `flate2::write::GzEncoder` row-by-row after sorting and zero-row pruning (`src/io/writers/mod.rs:13`–`55`).
-- Because the header depends on final row counts and ordering, we keep every row in memory until all computation completes.
+- `reference_point::run` and `scale_regions::run` now return a `RunOutcome`, choosing between a fully materialised `MatrixData` and a streaming write. When `RunOutcome::Streamed` is selected, rows are flushed to disk while computation is still in flight instead of waiting for the matrix to finish (`src/pipeline/reference_point.rs`, `src/pipeline/scale_regions.rs`).
+- Streaming is gated up front on three conditions: `sortRegions keep`, no auxiliary outputs (`matrixValues`, `sortedRegions`), and an estimated cell count of at least 100 000 (`writers::should_use_streaming_for_plan`). Other workloads continue to use the in-memory writer.
+- For streaming runs, the output `matrix.gz` grows immediately after rayon workers start. Ordering is preserved via per-row indices, and group counts are tracked on the fly for the final header.
 
-Peak memory therefore scales with `rows.len() * samples * bins`, matching Python’s behaviour and blocking very large inputs.
+## Streaming Architecture
+1. The mode runner builds a task list (one per BED record) and computes per-group capacities. A tentative header using those capacities is assembled and passed through `writers::ensure_streaming_header_capacity` to confirm it fits the 8 169-byte reserved payload.
+2. `StreamingMatrixWriter::start` opens the destination, probes for `Seek` support, writes a placeholder stored-member header, and exposes a gzip encoder for the data member.
+3. Rayon workers emit `RegionResult` structs as soon as each row finishes. Results flow through an `mpsc` channel to a dedicated “matrix-streamer” thread. A `BTreeMap` reorders out-of-order results so only contiguous indices are written, guaranteeing deterministic row order even with parallel execution.
+4. As rows arrive, the streamer writes them directly into the data member, updates per-group counts, and discards the matrix payload—no temporary spooling. Once the channel closes, remaining buffered rows flush, and a final `MatrixHeader` is constructed from the accumulated counts.
+5. The streamer rewrites the stored header member in place using the padded payload produced by `build_padded_header_payload`, finalises the gzip encoder, and surfaces any I/O errors back to the caller. In-memory mode still drives `write_outputs`, preserving the auxiliary artifacts and sorting capabilities that depend on a full `MatrixData`.
 
-## Constraints That Block Naïve Streaming
-- **Header ordering** – the JSON header embeds `group_boundaries` and `sample_boundaries`, which are only known after skip-zero/threshold pruning (and after optional sorting).
-- **Sorted outputs** – `sortRegions` can reorder rows within each group; we must not stream rows until the sort keys are final, or we break byte-for-byte parity.
-- **Shared consumers** – auxiliary sinks (`matrixValues`, `sortedRegions`) need the same ordered data.
-
-## Streaming Implementation (stored-header approach)
-1. Spill rows for large, unsorted workloads into a temporary plain-text file while keeping header metadata in memory. Dropping the `Vec<MatrixRow>` after spooling frees the dominant heap allocation even before gzip emission.
-2. Write the gzip output as **two members** whenever the destination handle is seekable:
-   - Member #1: a fixed-width header block built with `Compression::none()` so the encoder emits DEFLATE *stored* blocks. The payload is padded with spaces (with `@...\n` retained) to a reserved size of 4 096 compressed bytes (`payload = 4 096 - 23`). Because stored blocks have deterministic overhead (10-byte gzip header + 5-byte block + payload + 8-byte trailer), the member size is stable.
-   - Member #2: the streamed matrix body compressed with the usual default level. Rows are replayed from the temporary file via `io::copy` into a fresh `GzBuilder::new().mtime(0)` encoder to keep timestamp-stable output.
-3. After the data member finishes, seek back to byte 0 and rewrite member #1 with the *real* header (same padded length). Re-encoding the stored block updates CRC/ISIZE without disturbing the data member since the byte count is unchanged.
-4. For small matrices or when auxiliary sinks are requested, fall back to the in-memory writer so we avoid the temp-file overhead.
-
-This workflow stays fully standards-compliant—no fake padding members—while still allowing a single-pass stream for the heavy data portion.
-
-## Header Size Guardrails
-- The reserved payload (8 192 − 23 = 8 169 bytes) comfortably exceeds current header sizes; if `@header\n` ever outgrows that, we abandon the streaming path and render everything in-memory instead of risking corruption.
-- JSON tolerates trailing spaces, so padding before the newline keeps downstream parsers happy.
-
-## Implementation Notes
-- A quick `seek(SeekFrom::Current(0))` probe guards against pipes/FIFOs; if the check fails we keep the legacy path.
-- The temporary matrix stays as a simple newline-delimited text file so auxiliary writers can reuse it later if we add streaming support for `matrixValues`/`sortedRegions`.
-- `mtime(0)` and no filename/comment yield deterministic gzip members for reproducibility.
-- The I/O work executes on a dedicated `matrix-writer` thread so the main pipeline thread can finish orchestration and bubble up errors while keeping panic behaviour unchanged.
+## Header Guardrails
+- The reserved payload (8 192 − 23 bytes) matches the earlier design. If a tentative header exceeds the budget, streaming is bypassed so the legacy writer can handle the oversized JSON without risking corruption.
+- The final rewrite uses the same deterministic gzip layout (`mtime(0)`, no filename/comment), keeping byte-for-byte parity with the previous implementation.
 
 ## Compatibility Notes
-- Consumers that only understand single-member gzips continue to work—the stored header is just a regular gzip member containing ASCII text.
-- Split outputs (`--matrixFile`, `--matrixValues`, `--sortedRegions`) still match Python byte-for-byte because the payload copied into member #2 is identical to the in-memory writer.
+- Sorting modes other than `keep`, or requests for additional sinks, transparently fall back to the existing aggregate-and-write path.
+- Skip-zero behaviour, threshold filtering, and negative-strand reversal all occur before a row is sent to the streamer, so downstream consumers see identical data regardless of the code path.
+- Existing tests and regression harnesses continue to operate on the in-memory path by default; streaming is currently targeted at large unsorted jobs to reduce peak latency and memory pressure.
