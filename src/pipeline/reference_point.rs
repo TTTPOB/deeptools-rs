@@ -16,11 +16,15 @@ use super::RunOutcome;
 #[derive(Clone)]
 struct ReferencePointMode {
     options: ReferencePointOptions,
+    keep_exons: bool,
 }
 
 impl ReferencePointMode {
-    fn new(options: ReferencePointOptions) -> Self {
-        Self { options }
+    fn new(options: ReferencePointOptions, keep_exons: bool) -> Self {
+        Self {
+            options,
+            keep_exons,
+        }
     }
 }
 
@@ -79,6 +83,8 @@ impl PipelineMode for ReferencePointMode {
             metadata.bin_size,
             metadata.upstream_bins,
             metadata.downstream_bins,
+            self.keep_exons,
+            self.options.nan_after_end,
         )
     }
 
@@ -137,7 +143,7 @@ pub fn run(
     gtf: &GtfOptions,
     options: &ReferencePointOptions,
 ) -> Result<RunOutcome> {
-    let mode = ReferencePointMode::new(options.clone());
+    let mode = ReferencePointMode::new(options.clone(), gtf.keep_exons);
     let metadata = Arc::new(mode.validate(general)?);
 
     let sample_labels = core::derive_sample_labels(&io.scores, general)?;

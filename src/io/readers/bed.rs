@@ -4,6 +4,21 @@ use std::path::Path;
 
 use thiserror::Error;
 
+fn parse_comma_separated_u32(value: &str, expected: usize) -> Option<Vec<u32>> {
+    let mut numbers = Vec::with_capacity(expected);
+    for part in value.split(',') {
+        if part.is_empty() {
+            continue;
+        }
+        let parsed = part.trim().parse::<u32>().ok()?;
+        numbers.push(parsed);
+    }
+    if numbers.len() != expected {
+        return None;
+    }
+    Some(numbers)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Strand {
     Positive,
@@ -117,6 +132,32 @@ impl BedRecord {
     pub fn length(&self) -> u32 {
         self.end - self.start
     }
+
+    pub fn exons(&self) -> Option<Vec<(u32, u32)>> {
+        if self.extra_fields.len() < 6 {
+            return None;
+        }
+
+        let block_count = self.extra_fields[3].parse::<usize>().ok()?;
+        if block_count == 0 {
+            return Some(Vec::new());
+        }
+
+        let block_sizes = parse_comma_separated_u32(&self.extra_fields[4], block_count)?;
+        let block_starts = parse_comma_separated_u32(&self.extra_fields[5], block_count)?;
+
+        let mut exons = Vec::with_capacity(block_count);
+        for (size, start_offset) in block_sizes.into_iter().zip(block_starts.into_iter()) {
+            let exon_start = self.start.checked_add(start_offset)?;
+            let exon_end = exon_start.checked_add(size)?;
+            if exon_end <= exon_start {
+                return None;
+            }
+            exons.push((exon_start, exon_end));
+        }
+
+        Some(exons)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -193,6 +234,17 @@ impl<R: BufRead> Iterator for BedReader<R> {
 mod tests {
     use super::*;
     use std::io::{BufReader, Cursor};
+
+    #[test]
+    fn extracts_bed12_exons() {
+        let record =
+            BedRecord::parse("chr1\t100\t500\tname\t5.0\t+\t100\t500\t0\t2\t150,200,\t0,200,")
+                .expect("should parse");
+        let exons = record.exons().expect("exons");
+        assert_eq!(exons.len(), 2);
+        assert_eq!(exons[0], (100, 250));
+        assert_eq!(exons[1], (300, 500));
+    }
 
     #[test]
     fn parses_basic_bed_line() {

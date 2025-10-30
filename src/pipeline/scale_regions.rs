@@ -16,11 +16,15 @@ use super::RunOutcome;
 #[derive(Clone)]
 struct ScaleRegionsMode {
     options: ScaleRegionsOptions,
+    keep_exons: bool,
 }
 
 impl ScaleRegionsMode {
-    fn new(options: ScaleRegionsOptions) -> Self {
-        Self { options }
+    fn new(options: ScaleRegionsOptions, keep_exons: bool) -> Self {
+        Self {
+            options,
+            keep_exons,
+        }
     }
 }
 
@@ -101,7 +105,7 @@ impl PipelineMode for ScaleRegionsMode {
     }
 
     fn plan_for(&self, record: &BedRecord, metadata: &Self::Metadata) -> Self::Plan {
-        ScaleRegionsPlan::scale_regions(record, &self.options, metadata.bin_size)
+        ScaleRegionsPlan::scale_regions(record, &self.options, metadata.bin_size, self.keep_exons)
     }
 
     fn nan_after_end(&self, _metadata: &Self::Metadata) -> bool {
@@ -164,7 +168,7 @@ pub fn run(
     gtf: &GtfOptions,
     options: &ScaleRegionsOptions,
 ) -> Result<RunOutcome> {
-    let mode = ScaleRegionsMode::new(options.clone());
+    let mode = ScaleRegionsMode::new(options.clone(), gtf.keep_exons);
     let metadata = Arc::new(mode.validate(general)?);
 
     let sample_labels = core::derive_sample_labels(&io.scores, general)?;
