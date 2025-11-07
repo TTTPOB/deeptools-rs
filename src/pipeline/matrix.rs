@@ -381,12 +381,6 @@ impl MatrixData {
         }
         stats
     }
-
-    /// Placeholder for the future hmcluster implementation; keeps the API visible
-    /// for downstream wiring while signalling that the feature remains pending.
-    pub fn hmcluster_placeholder(&self, _k: usize) -> Result<()> {
-        bail!("hmcluster is not implemented yet for the Rust port");
-    }
 }
 
 fn compute_sort_metric(

@@ -94,7 +94,7 @@
   - Compute `group_boundaries`, `sample_boundaries`, and `sample_labels` (respecting `--samplesLabel` / `--smartLabels`).
   - Remove rows with zero sums when `skip_zeros` is true.
   - Sort groups using `sort_regions`/`sort_using`, optionally restricted to `sort_using_samples`, mimicking `_matrix.sort_groups` ordering and tie behaviour.
-  - Produce derived artefacts: sorted BED rows, per-group statistics, cluster placeholders (`hmcluster`) for future parity.
+  - Produce derived artefacts: sorted BED rows and per-group statistics.
 
 ### Output Serialisation & Interop
 - Implement `writer::write_matrix_gz` that:
@@ -115,7 +115,7 @@
 
 ## Performance & Future Work
 - After achieving functional parity, benchmark against Python on large datasets to validate throughput. Profiling targets include bigWig fetch batching, rayon scheduling overhead, and potential columnar accumulation strategies.
-- Future enhancements: implement clustering (`hmcluster`), silhouette scores, memory pooling for coverage buffers, and optional caching of bigWig blocks.
+- Future enhancements: implement silhouette scores, memory pooling for coverage buffers, and optional caching of bigWig blocks.
 - Investigate streaming matrix output to reduce peak RAM; design options (spool vs dual-pass) captured in `plans/streaming output.md` for follow-up.
 
 ## Immediate Next Steps
