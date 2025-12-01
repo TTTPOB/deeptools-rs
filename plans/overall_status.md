@@ -171,6 +171,10 @@
 
 ### Testing & Validation: PRODUCTION-READY
 - [x] Regression harness (`scripts/compute_matrix_regression.py`): comprehensive 30KB Python testing framework with ENCODE K562 ATAC-seq data downloads, dual execution (Python + Rust), byte-for-byte matrix comparison with configurable tolerance, performance benchmarking, and detailed reporting. Pixi environment ready with deeptools 3.5.6.
+- [x] Python Compatibility Verification System (`scripts/compute_matrix_regression_v2.py`): New modular testing framework with `--mode python-compatibility` option extracting all 10 test scenarios from `test_heatmapper.py`. YAML-based configuration (`scripts/config/python_compatibility.yaml`), modular codebase under `scripts/regression/` with core utilities, comparison logic, scenario generation, dataset management, and runner modules.
+
+### CLI Compatibility: FIXED
+- [x] Short flag parsing: Fixed `-bs` conflict with `-b` by changing to `--bs` long alias (clap does not support multi-character short flags like Python argparse)
 
 ### Architecture: ADVANCED TRAIT-BASED DESIGN
 - [x] Shared core abstractions: `PipelineMode` trait with metadata-aware validation, plan construction, header emission, and row post-processing.

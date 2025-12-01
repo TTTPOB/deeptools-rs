@@ -114,7 +114,7 @@ struct OutputArgs {
 struct GeneralArgs {
     #[arg(
         long = "binSize",
-        alias = "bs",
+        visible_alias = "bs",
         value_name = "INT bp",
         default_value_t = 10,
         help = "Length, in bases, of the non-overlapping bins for averaging the score over the regions length. (Default: 10)"
@@ -180,7 +180,7 @@ struct GeneralArgs {
 
     #[arg(
         long = "blackListFileName",
-        alias = "bl",
+        visible_alias = "bl",
         value_name = "BED file",
         help = "A BED file containing regions that should be excluded from all analyses. Currently this works by rejecting genomic chunks that happen to overlap an entry. Consequently, for BAM files, if a read partially overlaps a blacklisted region or a fragment spans over it, then the read/fragment might still be considered."
     )]
