@@ -109,7 +109,7 @@
 - Honour `--quiet` by suppressing per-region messages while still emitting fatal errors.
 
 ## Validation Strategy
-- Use `pixi` to provision the DeepTools reference environment and fixtures (`deeptools/deeptools/test/test_data/`). Maintain the unified regression harness (`scripts/compute_matrix_regression.py`) to drive both modes while sharing datasets under `target/compute-matrix-datasets/`.
+- Use `pixi` to provision the DeepTools reference environment and fixtures (`deeptools/deeptools/test/test_data/`). Maintain the unified regression harness (`scripts/custom_compare.py`) to drive both modes while sharing datasets under `target/compute-matrix-datasets/`.
 - Generate regression artefacts via `pixi run computeMatrix ...` and compare against Rust output (gzip contents, JSON header equality, per-value diff within tolerance). Integrate into `cargo test` as ignored tests gated by an environment variable to avoid requiring Python on every CI run.
 - Add unit tests for zone splitting (`chop_regions`, `trim_zones`), coverage padding, threshold filtering, and matrix sorting to ensure deterministic behaviour.
 
@@ -177,6 +177,7 @@
 - ✅ **Matrix loader comma handling**: Updated Python matrix loader to handle comma-separated exon coordinates in metagene format
 - ✅ **Metagene coordinate output format**: Added `exon_coords` field to `MatrixRow` and modified output writer to emit comma-separated exon coordinates (e.g., `0,399,979` for start, `50,510,1000` for end)
 - ✅ **Metagene intron masking**: Added explicit included-interval masking so metagene bins ignore intronic signal; metagene compatibility test now passes (max delta ≈ 1e-6)
+- ✅ **Test harness split/rename**: Regression entry points now `scripts/custom_compare.py` (self-provided/ENCODE + compatibility modes) and `scripts/full_python_compatibility.py` (deepTools mirror); legacy `compute_matrix_regression*.py` removed.
 
 ### Known Differences: Metagene Mode
 None — parity achieved for the current test corpus (see `plans/fix_metagene.md` for a historical log).
@@ -197,8 +198,8 @@ None — parity achieved for the current test corpus (see `plans/fix_metagene.md
 - [x] `pipeline::scale_regions`: Complete implementation with five-zone support (upstream, unscaled5, body, unscaled3, downstream), proper strand handling for negative coordinates, and full integration with shared core.
 
 ### Testing & Validation: PRODUCTION-READY
-- [x] Regression harness (`scripts/compute_matrix_regression.py`): comprehensive 30KB Python testing framework with ENCODE K562 ATAC-seq data downloads, dual execution (Python + Rust), byte-for-byte matrix comparison with configurable tolerance, performance benchmarking, and detailed reporting. Pixi environment ready with deeptools 3.5.6.
-- [x] Python Compatibility Verification System (`scripts/compute_matrix_regression_v2.py`): New modular testing framework with `--mode python-compatibility` option extracting all 10 test scenarios from `test_heatmapper.py`. YAML-based configuration (`scripts/config/python_compatibility.yaml`), modular codebase under `scripts/regression/` with core utilities, comparison logic, scenario generation, dataset management, and runner modules.
+- [x] Regression harness (`scripts/custom_compare.py`): comprehensive 30KB Python testing framework with ENCODE K562 ATAC-seq data downloads, dual execution (Python + Rust), byte-for-byte matrix comparison with configurable tolerance, performance benchmarking, and detailed reporting. Pixi environment ready with deeptools 3.5.6.
+- [x] Python Compatibility Verification System (`scripts/full_python_compatibility.py` → `custom_compare.py --mode python-compatibility`): Modular testing framework with 10 scenarios mirroring `test_heatmapper.py`, YAML-based configuration (`scripts/config/python_compatibility.yaml`), and shared utilities under `scripts/regression/` for comparison, scenario generation, dataset management, and reporting.
 
 ### CLI Compatibility: FIXED
 - [x] Short flag parsing: Fixed `-bs` conflict with `-b` by changing to `--bs` long alias (clap does not support multi-character short flags like Python argparse)
