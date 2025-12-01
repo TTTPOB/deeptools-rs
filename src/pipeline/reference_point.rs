@@ -98,7 +98,17 @@ impl PipelineMode for ReferencePointMode {
         values: Vec<Vec<f32>>,
         _metadata: &Self::Metadata,
     ) -> MatrixRow {
-        MatrixRow { record, values }
+        // Extract exon coordinates for metagene mode output
+        let exon_coords = if self.keep_exons {
+            record.exons()
+        } else {
+            None
+        };
+        MatrixRow {
+            record,
+            values,
+            exon_coords,
+        }
     }
 
     fn build_header(

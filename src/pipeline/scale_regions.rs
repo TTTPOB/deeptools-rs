@@ -123,7 +123,17 @@ impl PipelineMode for ScaleRegionsMode {
                 sample_values.reverse();
             }
         }
-        MatrixRow { record, values }
+        // Extract exon coordinates for metagene mode output
+        let exon_coords = if self.keep_exons {
+            record.exons()
+        } else {
+            None
+        };
+        MatrixRow {
+            record,
+            values,
+            exon_coords,
+        }
     }
 
     fn build_header(

@@ -305,9 +305,30 @@ fn write_matrix_row<W: Write>(writer: &mut W, row: &MatrixRow) -> Result<()> {
         buffer.push(b'\t');
 
         let mut int_buffer = Buffer::new();
-        buffer.extend_from_slice(int_buffer.format(row.record.start).as_bytes());
-        buffer.push(b'\t');
-        buffer.extend_from_slice(int_buffer.format(row.record.end).as_bytes());
+
+        // When exon coordinates are present (metagene mode), write them as
+        // comma-separated values to match Python's output format
+        if let Some(ref exon_coords) = row.exon_coords {
+            // Write starts
+            for (i, (start, _)) in exon_coords.iter().enumerate() {
+                if i > 0 {
+                    buffer.push(b',');
+                }
+                buffer.extend_from_slice(int_buffer.format(*start).as_bytes());
+            }
+            buffer.push(b'\t');
+            // Write ends
+            for (i, (_, end)) in exon_coords.iter().enumerate() {
+                if i > 0 {
+                    buffer.push(b',');
+                }
+                buffer.extend_from_slice(int_buffer.format(*end).as_bytes());
+            }
+        } else {
+            buffer.extend_from_slice(int_buffer.format(row.record.start).as_bytes());
+            buffer.push(b'\t');
+            buffer.extend_from_slice(int_buffer.format(row.record.end).as_bytes());
+        }
         buffer.push(b'\t');
 
         let name = row.record.name.as_deref().unwrap_or(".");

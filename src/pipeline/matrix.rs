@@ -200,6 +200,9 @@ pub struct MatrixRow {
     pub record: BedRecord,
     /// Matrix values organised as `sample -> bin`.
     pub values: Vec<Vec<f32>>,
+    /// When metagene mode is used, stores the exon coordinates as (start, end) pairs
+    /// for writing comma-separated coordinates in the output.
+    pub exon_coords: Option<Vec<(u32, u32)>>,
 }
 
 impl MatrixRow {
