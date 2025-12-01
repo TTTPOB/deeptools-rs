@@ -101,7 +101,7 @@ def validate_against_reference(test_name: str, rust_output: Path, expected_matri
     return ValidationResult(
         test_name=test_name,
         header_match=compare_headers(ref_matrix.header, rust_matrix.header),
-        value_match=compare_matrix_values(ref_matrix, rust_matrix, tolerance=0),
+        value_match=compare_matrix_values(ref_matrix, rust_matrix, tolerance=5e-6),
         row_count_match=len(ref_matrix.rows) == len(rust_matrix.rows)
     )
 ```
@@ -123,7 +123,7 @@ def cross_validate_implementations(test_scenario: TestScenario) -> CrossValidati
         test_name=test_scenario.name,
         python_output=python_output,
         rust_output=rust_output,
-        matrices_identical=compare_matrices(python_output, rust_output, tolerance=1e-10),
+        matrices_identical=compare_matrices(python_output, rust_output, tolerance=5e-6),
         python_timing=get_timing(python_output),
         rust_timing=get_timing(rust_output)
     )
@@ -213,7 +213,7 @@ test_suites:
           -S {data_root}/test.bw
           -b 100 -a 100 -bs 1 -p 1
           --outFileName {output}
-        tolerance: 0
+        tolerance: 5e-6
         
       - name: reference_point_center
         python_test: test_computeMatrix_reference_point_center
@@ -224,7 +224,7 @@ test_suites:
           -S {data_root}/test.bw
           -b 100 -a 100 --referencePoint center -bs 1 -p 1
           --outFileName {output}
-        tolerance: 0
+        tolerance: 5e-6
         
       - name: reference_point_tes
         python_test: test_computeMatrix_reference_point_tes
@@ -235,7 +235,7 @@ test_suites:
           -S {data_root}/test.bw
           -b 100 -a 100 --referencePoint TES -bs 1 -p 1
           --outFileName {output}
-        tolerance: 0
+        tolerance: 5e-6
         
       - name: reference_point_missing_data_as_zero
         python_test: test_computeMatrix_reference_point_missing_data_as_zero
@@ -246,7 +246,7 @@ test_suites:
           -S {data_root}/test.bw
           -b 100 -a 100 -bs 1 -p 1 --missingDataAsZero
           --outFileName {output}
-        tolerance: 0
+        tolerance: 5e-6
         
       - name: scale_regions_basic
         python_test: test_computeMatrix_scale_regions
@@ -257,7 +257,7 @@ test_suites:
           -S {data_root}/test.bw
           -b 100 -a 100 -m 100 -bs 1 -p 1
           --outFileName {output}
-        tolerance: 0
+        tolerance: 5e-6
         
       - name: multiple_bed
         python_test: test_computeMatrix_multiple_bed
@@ -268,7 +268,7 @@ test_suites:
           -S {data_root}/test.bw
           -b 100 -a 100 -bs 1 -p 1
           --outFileName {output}
-        tolerance: 0
+        tolerance: 5e-6
         
       - name: region_extend_beyond_chr
         python_test: test_computeMatrix_region_extend_over_chr_end
@@ -279,7 +279,7 @@ test_suites:
           -S {data_root}/test.bw
           -b 100 -a 500 -bs 1 -p 1
           --outFileName {output}
-        tolerance: 0
+        tolerance: 5e-6
         
       - name: scale_regions_unscaled
         python_test: test_computeMatrix_unscaled
@@ -290,7 +290,7 @@ test_suites:
           -S {data_root}/unscaled.bigWig
           -a 300 -b 500 --unscaled5prime 100 --unscaled3prime 50 -bs 10 -p 1
           --outFileName {output}
-        tolerance: 0
+        tolerance: 5e-6
 
       # Advanced Functionality Tests
       - name: gtf_input
@@ -302,7 +302,7 @@ test_suites:
           -S {test_data_root}/test1.bw.bw
           -a 300 -b 500 --unscaled5prime 20 --unscaled3prime 50 -bs 10 -p 1
           --outFileName {output}
-        tolerance: 0
+        tolerance: 5e-6
         
       - name: metagene
         python_test: test_computeMatrix_metagene
@@ -313,7 +313,7 @@ test_suites:
           -S {test_data_root}/test1.bw.bw
           -a 300 -b 500 --unscaled5prime 20 --unscaled3prime 50 -bs 10 -p 1 --metagene
           --outFileName {output}
-        tolerance: 0
+        tolerance: 5e-6
 
   # Extended testing with ENCODE data (existing infrastructure)
   encode_k562_atac:
@@ -322,7 +322,7 @@ test_suites:
     scenarios:
       - name: reference_point_center_encode
         cross_validate: true  # Run both Python and Rust, compare outputs
-        tolerance: 1e-5
+        tolerance: 5e-6
         # ... (existing ENCODE-based tests)
 ```
 
@@ -442,7 +442,7 @@ python scripts/compute_matrix_regression.py --mode scale-regions
     "passed": 10,
     "failed": 0,
     "skipped": 0,
-    "byte_for_byte_matches": 10,
+    "within_tolerance": 10,
     
     "test_results": {
       "reference_point_basic": {
@@ -509,7 +509,7 @@ Test Suite: python_compatibility (10 tests)
 
 ================================================================================
 SUMMARY: 10/10 tests passed (100% compatibility)
-         10/10 byte-for-byte matches
+         10/10 comparisons within tolerance (≤5e-6)
          Total time: 1.51s (3 cached, 7 fresh)
 ================================================================================
 ```
@@ -613,7 +613,7 @@ SUMMARY: 10/10 tests passed (100% compatibility)
 | Metric | Target | Measurement |
 |--------|--------|-------------|
 | Test Pass Rate | 100% | All 10 Python test scenarios pass |
-| Numerical Accuracy | 100% | Zero tolerance deviations (tolerance=1e-5) |
+| Numerical Accuracy | 100% | Max absolute delta ≤5e-6 across all scenarios |
 | Header Compatibility | 100% | All JSON header fields match |
 | Row Count Accuracy | 100% | Exact row counts in all scenarios |
 

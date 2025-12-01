@@ -2,7 +2,8 @@
 """Run the computeMatrix Python-compatibility regression suite.
 
 This entry point mirrors deepTools' `test_heatmapper.py` cases and ensures the
-Rust implementation matches the Python reference byte-for-byte.
+Rust implementation matches the Python reference numerically within the
+configured tolerance (max 5e-6).
 """
 from __future__ import annotations
 

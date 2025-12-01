@@ -58,6 +58,9 @@ from regression.test_extraction import (
 from regression.test_extraction.scenario_generator import get_default_config_path
 
 
+DEFAULT_TOLERANCE = 5e-6
+
+
 def _require_multiple(value: int, divisor: int, flag: str) -> None:
     if value % divisor != 0:
         raise CommandError(
@@ -150,8 +153,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tolerance",
         type=float,
-        default=1e-5,
-        help="Acceptable absolute tolerance when comparing matrix values (default: %(default)s)",
+        default=DEFAULT_TOLERANCE,
+        help=(
+            "Absolute tolerance for matrix value comparison (default/max: %(default)s; "
+            "smaller values are allowed, larger values are clamped)"
+        ),
     )
     parser.add_argument(
         "--keep-ref",
@@ -194,6 +200,34 @@ def ensure_commands_available(args: argparse.Namespace) -> None:
     for exe in (args.pixi, args.cargo):
         if shutil.which(exe) is None:
             raise CommandError(f"Required executable '{exe}' not found on PATH")
+
+
+def resolve_tolerance(*candidates: float) -> float:
+    """Clamp comparison tolerance to the strictest positive value (<= DEFAULT_TOLERANCE).
+
+    Accepts heterogeneous inputs (float, int, str) and ignores invalid/zero/None.
+    """
+
+    def _as_float(value):
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    positives = []
+    for candidate in candidates:
+        numeric = _as_float(candidate)
+        if numeric is not None and numeric > 0:
+            positives.append(numeric)
+
+    if not positives:
+        return DEFAULT_TOLERANCE
+
+    return min(min(positives), DEFAULT_TOLERANCE)
 
 
 def run_python_compatibility_mode(args: argparse.Namespace) -> int:
@@ -355,7 +389,7 @@ def run_single_scenario(
     ref_matrix = load_matrix(reference_path)
     rust_matrix = load_matrix(rust_output)
 
-    tolerance = scenario.tolerance if scenario.tolerance > 0 else args.tolerance
+    tolerance = resolve_tolerance(scenario.tolerance, args.tolerance)
     ok, max_delta, issues = compare_matrices(ref_matrix, rust_matrix, tolerance, args.verbose)
 
     # Determine header/value match status
@@ -548,8 +582,9 @@ def run_encode_regression_mode(args: argparse.Namespace) -> int:
     reference_matrix = load_matrix(reference_output)
     candidate_matrix = load_matrix(candidate_output)
 
+    tolerance = resolve_tolerance(args.tolerance)
     ok, max_delta, issues = compare_matrices(
-        reference_matrix, candidate_matrix, args.tolerance, args.verbose
+        reference_matrix, candidate_matrix, tolerance, args.verbose
     )
 
     print("\n" + "=" * 60)
@@ -571,7 +606,7 @@ def run_encode_regression_mode(args: argparse.Namespace) -> int:
     print("=" * 60)
 
     if ok:
-        print("✅ Matrices match within tolerance")
+        print(f"✅ Matrices match within tolerance (≤ {tolerance:.1e})")
         print(
             f"   Samples: {reference_matrix.sample_count}, bins/sample: {reference_matrix.bin_count // max(reference_matrix.sample_count, 1)}"
         )
@@ -579,7 +614,7 @@ def run_encode_regression_mode(args: argparse.Namespace) -> int:
         print(f"   Max abs delta: {max_delta:.3e}")
         return 0
 
-    print("❌ Matrices differ")
+    print(f"❌ Matrices differ (tolerance {tolerance:.1e})")
     for issue in issues:
         print(f" - {issue}")
     print(f"Max abs delta observed: {max_delta:.3e}")

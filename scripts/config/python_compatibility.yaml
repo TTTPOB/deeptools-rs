@@ -28,7 +28,7 @@ test_suites:
           - "1"
           - -p
           - "1"
-        tolerance: 0
+        tolerance: 5e-6
         
       - name: reference_point_center
         python_test: test_computeMatrix_reference_point_center
@@ -49,7 +49,7 @@ test_suites:
           - "1"
           - -p
           - "1"
-        tolerance: 0
+        tolerance: 5e-6
         
       - name: reference_point_tes
         python_test: test_computeMatrix_reference_point_tes
@@ -70,7 +70,7 @@ test_suites:
           - "1"
           - -p
           - "1"
-        tolerance: 0
+        tolerance: 5e-6
         
       - name: reference_point_missing_data_as_zero
         python_test: test_computeMatrix_reference_point_missing_data_as_zero
@@ -90,7 +90,7 @@ test_suites:
           - -p
           - "1"
           - --missingDataAsZero
-        tolerance: 0
+        tolerance: 5e-6
 
       # Core Scale-Regions Tests
       - name: scale_regions_basic
@@ -112,7 +112,7 @@ test_suites:
           - "1"
           - -p
           - "1"
-        tolerance: 0
+        tolerance: 5e-6
 
       # Multiple BED Files Test
       - name: multiple_bed
@@ -133,7 +133,7 @@ test_suites:
           - "1"
           - -p
           - "1"
-        tolerance: 0
+        tolerance: 5e-6
 
       # Region Extends Beyond Chromosome End
       - name: region_extend_beyond_chr
@@ -154,7 +154,7 @@ test_suites:
           - "1"
           - -p
           - "1"
-        tolerance: 0
+        tolerance: 5e-6
 
       # Scale-Regions with Unscaled Flanks
       - name: scale_regions_unscaled
@@ -178,7 +178,7 @@ test_suites:
           - "10"
           - -p
           - "1"
-        tolerance: 0
+        tolerance: 5e-6
 
       # GTF Input (Advanced)
       - name: gtf_input
@@ -202,7 +202,7 @@ test_suites:
           - "10"
           - -p
           - "1"
-        tolerance: 0
+        tolerance: 5e-6
 
       # Metagene Mode (Advanced)
       - name: metagene
@@ -227,7 +227,7 @@ test_suites:
           - -p
           - "1"
           - --metagene
-        tolerance: 0
+        tolerance: 5e-6
 
   # Extended testing with ENCODE data (existing infrastructure)
   encode_k562_atac:
@@ -236,5 +236,5 @@ test_suites:
     scenarios:
       - name: reference_point_center_encode
         cross_validate: true
-        tolerance: 1e-5
+        tolerance: 5e-6
         # Uses dynamically generated command from harness

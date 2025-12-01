@@ -21,7 +21,7 @@ class TestScenario:
     python_test: str
     reference_matrix: str
     rust_args: List[str]
-    tolerance: float = 0
+    tolerance: float = 5e-6
     cross_validate: bool = False
     enabled: bool = True
 
@@ -90,7 +90,7 @@ def load_test_config(config_path: Path) -> Dict[str, TestSuite]:
                 python_test=scenario_config.get("python_test", ""),
                 reference_matrix=scenario_config.get("reference_matrix", ""),
                 rust_args=scenario_config.get("rust_args", []),
-                tolerance=scenario_config.get("tolerance", 0),
+                tolerance=scenario_config.get("tolerance", 5e-6),
                 cross_validate=scenario_config.get("cross_validate", False),
                 enabled=scenario_config.get("enabled", True),
             )

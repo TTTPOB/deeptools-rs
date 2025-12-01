@@ -13,6 +13,9 @@ from typing import List, Optional
 from ..core.timing import CommandTiming
 
 
+TOLERANCE_CAP = 5e-6
+
+
 @dataclass
 class TestResult:
     """Result of a single test scenario."""
@@ -61,7 +64,7 @@ class CompatibilityReport:
     failed: int = 0
     skipped: int = 0
     errors: int = 0
-    byte_for_byte_matches: int = 0
+    within_tolerance: int = 0
     test_results: dict = field(default_factory=dict)
     performance_summary: dict = field(default_factory=dict)
 
@@ -74,7 +77,7 @@ class CompatibilityReport:
                 "failed": self.failed,
                 "skipped": self.skipped,
                 "errors": self.errors,
-                "byte_for_byte_matches": self.byte_for_byte_matches,
+                "within_tolerance": self.within_tolerance,
                 "test_results": self.test_results,
                 "performance_summary": self.performance_summary,
             }
@@ -137,7 +140,7 @@ def format_summary(report: CompatibilityReport) -> str:
         "=" * 70,
         f"SUMMARY: {report.passed}/{report.total_tests} tests passed "
         f"({100 * report.passed / max(report.total_tests, 1):.0f}% compatibility)",
-        f"         {report.byte_for_byte_matches}/{report.total_tests} byte-for-byte matches",
+        f"         {report.within_tolerance}/{report.total_tests} comparisons within tolerance (≤{TOLERANCE_CAP:g})",
     ])
 
     # Performance summary
@@ -175,8 +178,8 @@ def create_report(results: List[TestResult]) -> CompatibilityReport:
 
         if result.status == "PASS":
             report.passed += 1
-            if result.max_delta == 0.0 and result.header_match:
-                report.byte_for_byte_matches += 1
+            # A passing result implies all values are within the configured tolerance
+            report.within_tolerance += 1
         elif result.status == "FAIL":
             report.failed += 1
         elif result.status == "SKIP":

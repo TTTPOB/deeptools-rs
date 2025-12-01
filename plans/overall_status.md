@@ -2,7 +2,7 @@
 
 ## Objectives
 - Maintain CLI parity with DeepTools `computeMatrix` (`reference-point` and `scale-regions`) including flag spelling, defaults, aliases, mutually exclusive groups, and help semantics. Any unavoidable deviation must be documented alongside user-visible implications.
-- Reproduce DeepTools matrix outputs byte-for-byte (JSON header + BED-like rows) for supported options so that downstream tools (`plotHeatmap`, `plotProfile`, `computeMatrixOperations`) remain interoperable.
+- Reproduce DeepTools matrix outputs numerically within an absolute tolerance of ≤5e-6 (JSON header + BED-like rows) for supported options so that downstream tools (`plotHeatmap`, `plotProfile`, `computeMatrixOperations`) remain interoperable.
 - Mirror Python behaviour across edge cases: strand-aware windows, NaN vs zero padding, unscaled zones, reference-point handling, sorting/threshold logic, and headers for legacy compatibility.
 - Build an idiomatic Rust architecture that leverages existing crates (`bigtools` for bigWig IO, `rayon` for parallelism) while keeping the codebase modular and testable.
 
@@ -144,7 +144,7 @@
 ## Current Priorities
 
 ### Primary Objectives: COMPLETED ✅
-- ✅ **Byte-for-byte compatibility**: Achieved with DeepTools computeMatrix for both modes
+- ✅ **Numeric compatibility (≤5e-6)**: Achieved with DeepTools computeMatrix for both modes
 - ✅ **Production-ready pipeline**: Both reference-point and scale-regions fully functional
 - ✅ **Comprehensive testing**: Regression harness with real ENCODE data integration
 
@@ -178,6 +178,7 @@
 - ✅ **Metagene coordinate output format**: Added `exon_coords` field to `MatrixRow` and modified output writer to emit comma-separated exon coordinates (e.g., `0,399,979` for start, `50,510,1000` for end)
 - ✅ **Metagene intron masking**: Added explicit included-interval masking so metagene bins ignore intronic signal; metagene compatibility test now passes (max delta ≈ 1e-6)
 - ✅ **Test harness split/rename**: Regression entry points now `scripts/custom_compare.py` (self-provided/ENCODE + compatibility modes) and `scripts/full_python_compatibility.py` (deepTools mirror); legacy `compute_matrix_regression*.py` removed.
+- ✅ **Numeric regression tolerance**: Hardened tolerance parsing (string/float) with clamp to ≤5e-6 and shifted reporting to “within tolerance” instead of byte-for-byte; compatibility suite re-run and passing at the new threshold.
 
 ### Known Differences: Metagene Mode
 None — parity achieved for the current test corpus (see `plans/fix_metagene.md` for a historical log).
@@ -198,7 +199,7 @@ None — parity achieved for the current test corpus (see `plans/fix_metagene.md
 - [x] `pipeline::scale_regions`: Complete implementation with five-zone support (upstream, unscaled5, body, unscaled3, downstream), proper strand handling for negative coordinates, and full integration with shared core.
 
 ### Testing & Validation: PRODUCTION-READY
-- [x] Regression harness (`scripts/custom_compare.py`): comprehensive 30KB Python testing framework with ENCODE K562 ATAC-seq data downloads, dual execution (Python + Rust), byte-for-byte matrix comparison with configurable tolerance, performance benchmarking, and detailed reporting. Pixi environment ready with deeptools 3.5.6.
+- [x] Regression harness (`scripts/custom_compare.py`): comprehensive 30KB Python testing framework with ENCODE K562 ATAC-seq data downloads, dual execution (Python + Rust), numerical matrix comparison capped at 5e-6 absolute tolerance, performance benchmarking, and detailed reporting. Pixi environment ready with deeptools 3.5.6.
 - [x] Python Compatibility Verification System (`scripts/full_python_compatibility.py` → `custom_compare.py --mode python-compatibility`): Modular testing framework with 10 scenarios mirroring `test_heatmapper.py`, YAML-based configuration (`scripts/config/python_compatibility.yaml`), and shared utilities under `scripts/regression/` for comparison, scenario generation, dataset management, and reporting.
 
 ### CLI Compatibility: FIXED
@@ -216,7 +217,7 @@ None — parity achieved for the current test corpus (see `plans/fix_metagene.md
 - [x] Memory management: Sophisticated header capacity planning with fallback strategies.
 
 ### Current Status: READY FOR PRODUCTION
-The implementation achieves byte-for-byte compatibility with DeepTools computeMatrix while providing significant performance improvements. Both `reference-point` and `scale-regions` modes are fully functional with comprehensive test coverage.
+The implementation achieves numerical parity with DeepTools computeMatrix within an absolute tolerance of 5e-6 while providing significant performance improvements. Both `reference-point` and `scale-regions` modes are fully functional with comprehensive test coverage.
 
 ## Refactor Status: COMPLETED ✅
 
