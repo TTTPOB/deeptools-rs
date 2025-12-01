@@ -153,9 +153,9 @@
 - [ ] Documentation updates: Finalize user-facing documentation
 - [ ] Advanced clustering: Implement silhouette scores and regrouping features
 - [ ] Performance profiling: Large-scale benchmarking and optimization tuning
-- [ ] Metagene output format: Emit comma-separated exon coordinates in start/end columns (currently outputs gene-level coordinates instead of exon boundaries)
+- [x] Metagene output format: Emit comma-separated exon coordinates in start/end columns (currently outputs gene-level coordinates instead of exon boundaries)
 
-## Python Compatibility Test Status: 9/10 PASSING ✅
+## Python Compatibility Test Status: 10/10 PASSING ✅
 
 ### Test Results (as of 2025-12-01)
 | Test | Status |
@@ -169,20 +169,17 @@
 | region_extend_beyond_chr | ✅ PASS |
 | scale_regions_unscaled | ✅ PASS |
 | gtf_input | ✅ PASS |
-| metagene | ❌ FAIL (signal value differences) |
+| metagene | ✅ PASS |
 
 ### Recent Fixes (2025-12-01)
 - ✅ **BED score column `.` parsing**: Fixed to accept `.` as a valid missing value indicator in BED score column (previously errored as "must be a floating point number")
 - ✅ **Group label `genes` default**: When there's only one BED/GTF region file, the default group label is now `"genes"` to match Python's behavior (previously used the file name)
 - ✅ **Matrix loader comma handling**: Updated Python matrix loader to handle comma-separated exon coordinates in metagene format
 - ✅ **Metagene coordinate output format**: Added `exon_coords` field to `MatrixRow` and modified output writer to emit comma-separated exon coordinates (e.g., `0,399,979` for start, `50,510,1000` for end)
+- ✅ **Metagene intron masking**: Added explicit included-interval masking so metagene bins ignore intronic signal; metagene compatibility test now passes (max delta ≈ 1e-6)
 
 ### Known Differences: Metagene Mode
-The metagene test fails due to actual signal value computation differences:
-- The coordinate output format now matches Python (comma-separated exon coordinates)
-- However, the computed signal values differ at certain positions (e.g., `31.231524` vs `26.540000`)
-- This indicates an algorithmic difference in how metagene binning handles exon boundaries
-- Header also has minor formatting difference: `"scale":1.0` vs `"scale":1`
+None — parity achieved for the current test corpus (see `plans/fix_metagene.md` for a historical log).
 
 ## Implementation Status: PRODUCTION-READY ✅
 

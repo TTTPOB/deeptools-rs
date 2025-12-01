@@ -57,6 +57,13 @@ pub trait RegionPlan {
     fn window_start(&self) -> i64;
     fn window_end(&self) -> i64;
     fn bins(&self) -> &[Self::Bin];
+
+    /// Optional list of intervals that should contribute signal to this plan.
+    /// When present (metagene mode), coverage outside these intervals is
+    /// treated as missing data to avoid counting intronic signal.
+    fn included_intervals(&self) -> Option<&[(i64, i64)]> {
+        None
+    }
 }
 
 pub struct Sample {
@@ -300,34 +307,70 @@ fn compute_sample_bins<P: RegionPlan>(
     };
 
     let mut coverage = vec![default_fill; window_len];
-    let fetch_start = clamp_coordinate(plan.window_start(), chrom_length);
-    let fetch_end = clamp_coordinate(plan.window_end(), chrom_length);
-
-    if fetch_start < fetch_end {
-        let intervals = sample
-            .reader_mut()
-            .values(&record.chrom, fetch_start, fetch_end)
-            .map_err(anyhow::Error::new)
-            .with_context(|| {
-                format!(
-                    "Failed to read bigWig intervals for '{}' in '{}'",
-                    record.chrom,
-                    sample.path().display()
-                )
-            })?;
-
+    if let Some(allowed) = plan.included_intervals() {
         let base_offset = plan.window_start();
-        for interval in intervals {
-            let overlap_start = i64::from(interval.start).max(i64::from(fetch_start));
-            let overlap_end = i64::from(interval.end).min(i64::from(fetch_end));
-            if overlap_start >= overlap_end {
+        for (seg_start, seg_end) in allowed {
+            let fetch_start = clamp_coordinate(*seg_start, chrom_length);
+            let fetch_end = clamp_coordinate(*seg_end, chrom_length);
+            if fetch_start >= fetch_end {
                 continue;
             }
-            let rel_start = usize::try_from(overlap_start - base_offset)
-                .expect("relative start offset exceeded usize");
-            let rel_end = usize::try_from(overlap_end - base_offset)
-                .expect("relative end offset exceeded usize");
-            coverage[rel_start..rel_end].fill(interval.value);
+
+            let intervals = sample
+                .reader_mut()
+                .values(&record.chrom, fetch_start, fetch_end)
+                .map_err(anyhow::Error::new)
+                .with_context(|| {
+                    format!(
+                        "Failed to read bigWig intervals for '{}' in '{}'",
+                        record.chrom,
+                        sample.path().display()
+                    )
+                })?;
+
+            for interval in intervals {
+                let overlap_start = i64::from(interval.start).max(i64::from(fetch_start));
+                let overlap_end = i64::from(interval.end).min(i64::from(fetch_end));
+                if overlap_start >= overlap_end {
+                    continue;
+                }
+                let rel_start = usize::try_from(overlap_start - base_offset)
+                    .expect("relative start offset exceeded usize");
+                let rel_end = usize::try_from(overlap_end - base_offset)
+                    .expect("relative end offset exceeded usize");
+                coverage[rel_start..rel_end].fill(interval.value);
+            }
+        }
+    } else {
+        let fetch_start = clamp_coordinate(plan.window_start(), chrom_length);
+        let fetch_end = clamp_coordinate(plan.window_end(), chrom_length);
+
+        if fetch_start < fetch_end {
+            let intervals = sample
+                .reader_mut()
+                .values(&record.chrom, fetch_start, fetch_end)
+                .map_err(anyhow::Error::new)
+                .with_context(|| {
+                    format!(
+                        "Failed to read bigWig intervals for '{}' in '{}'",
+                        record.chrom,
+                        sample.path().display()
+                    )
+                })?;
+
+            let base_offset = plan.window_start();
+            for interval in intervals {
+                let overlap_start = i64::from(interval.start).max(i64::from(fetch_start));
+                let overlap_end = i64::from(interval.end).min(i64::from(fetch_end));
+                if overlap_start >= overlap_end {
+                    continue;
+                }
+                let rel_start = usize::try_from(overlap_start - base_offset)
+                    .expect("relative start offset exceeded usize");
+                let rel_end = usize::try_from(overlap_end - base_offset)
+                    .expect("relative end offset exceeded usize");
+                coverage[rel_start..rel_end].fill(interval.value);
+            }
         }
     }
 

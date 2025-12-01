@@ -103,6 +103,7 @@ pub struct ScaleRegionsPlan {
     pub window_start: i64,
     pub window_end: i64,
     pub bins: Vec<ScaleBin>,
+    pub included_intervals: Option<Vec<(i64, i64)>>,
 }
 
 impl SignalBin for ScaleBin {
@@ -132,6 +133,10 @@ impl RegionPlan for ScaleRegionsPlan {
 
     fn bins(&self) -> &[Self::Bin] {
         &self.bins
+    }
+
+    fn included_intervals(&self) -> Option<&[(i64, i64)]> {
+        self.included_intervals.as_deref()
     }
 }
 
@@ -220,6 +225,7 @@ impl ScaleRegionsPlan {
             window_start,
             window_end,
             bins,
+            included_intervals: None,
         }
     }
 }
@@ -431,8 +437,8 @@ fn collect_window_bounds(intervals: &[(i64, i64)], mut window: (i64, i64)) -> (i
 
 mod metagene {
     use super::{
-        collect_window_bounds, intervals_to_bins, intervals_total_length, ReferenceBin,
-        ReferencePoint, ScaleBin, ScaleRegionsPlan,
+        ReferenceBin, ReferencePoint, ScaleBin, ScaleRegionsPlan, collect_window_bounds,
+        intervals_to_bins, intervals_total_length,
     };
     use crate::config::ScaleRegionsOptions;
     use crate::io::{BedRecord, Strand};
@@ -518,6 +524,7 @@ mod metagene {
         let mut bins = Vec::with_capacity(
             upstream_bins + downstream_bins + unscaled5_bins + unscaled3_bins + body_bins,
         );
+        let mut included_intervals = Vec::new();
         let mut window = (i64::MAX, i64::MIN);
 
         match record.strand {
@@ -531,6 +538,7 @@ mod metagene {
                 body_bins,
                 &mut bins,
                 &mut window,
+                &mut included_intervals,
             ),
             _ => build_scale_positive(
                 &exons,
@@ -542,6 +550,7 @@ mod metagene {
                 body_bins,
                 &mut bins,
                 &mut window,
+                &mut included_intervals,
             ),
         }
 
@@ -556,6 +565,7 @@ mod metagene {
             window_start: window.0,
             window_end: window.1,
             bins,
+            included_intervals: Some(included_intervals),
         })
     }
 
@@ -823,6 +833,7 @@ mod metagene {
         body_bins: usize,
         bins: &mut Vec<ScaleBin>,
         window: &mut (i64, i64),
+        included: &mut Vec<(i64, i64)>,
     ) {
         let feature_start = exons.first().map(|(start, _)| *start).unwrap_or(0);
         let feature_end = exons.last().map(|(_, end)| *end).unwrap_or(0);
@@ -832,18 +843,22 @@ mod metagene {
         } else {
             Vec::new()
         };
+        included.extend_from_slice(&upstream_intervals);
         *window = collect_window_bounds(&upstream_intervals, *window);
         append_scale_bins(bins, &upstream_intervals, upstream_bins);
 
         let (unscaled5, body, unscaled3, _, _) =
             chop_regions(exons, options.unscaled_5_prime, options.unscaled_3_prime);
 
+        included.extend_from_slice(&unscaled5);
         *window = collect_window_bounds(&unscaled5, *window);
         append_scale_bins(bins, &unscaled5, unscaled5_bins);
 
+        included.extend_from_slice(&body);
         *window = collect_window_bounds(&body, *window);
         append_scale_bins(bins, &body, body_bins);
 
+        included.extend_from_slice(&unscaled3);
         *window = collect_window_bounds(&unscaled3, *window);
         append_scale_bins(bins, &unscaled3, unscaled3_bins);
 
@@ -852,6 +867,7 @@ mod metagene {
         } else {
             Vec::new()
         };
+        included.extend_from_slice(&downstream_intervals);
         *window = collect_window_bounds(&downstream_intervals, *window);
         append_scale_bins(bins, &downstream_intervals, downstream_bins);
     }
@@ -866,6 +882,7 @@ mod metagene {
         body_bins: usize,
         bins: &mut Vec<ScaleBin>,
         window: &mut (i64, i64),
+        included: &mut Vec<(i64, i64)>,
     ) {
         let feature_start = exons.first().map(|(start, _)| *start).unwrap_or(0);
         let feature_end = exons.last().map(|(_, end)| *end).unwrap_or(0);
@@ -875,26 +892,36 @@ mod metagene {
         } else {
             Vec::new()
         };
+        included.extend_from_slice(&upstream_intervals);
         *window = collect_window_bounds(&upstream_intervals, *window);
         append_scale_bins(bins, &upstream_intervals, downstream_bins);
 
         let (unscaled5, body, unscaled3, _, _) =
             chop_regions(exons, options.unscaled_3_prime, options.unscaled_5_prime);
 
-        *window = collect_window_bounds(&unscaled3, *window);
-        append_scale_bins(bins, &unscaled3, unscaled3_bins);
+        // For - strand, the "left" chop (unscaled5) contains biological 3' unscaled region
+        // and should use unscaled3_bins. The "right" chop (unscaled3) contains biological
+        // 5' unscaled region and should use unscaled5_bins.
+        // Python uses: zones = [(upstream, a), (unscaled5prime, b), (body, c), (unscaled3prime, d), (downstream, e)]
+        // where b = unscaled_3_prime // bin_size and d = unscaled_5_prime // bin_size
+        included.extend_from_slice(&unscaled5);
+        *window = collect_window_bounds(&unscaled5, *window);
+        append_scale_bins(bins, &unscaled5, unscaled3_bins);
 
+        included.extend_from_slice(&body);
         *window = collect_window_bounds(&body, *window);
         append_scale_bins(bins, &body, body_bins);
 
-        *window = collect_window_bounds(&unscaled5, *window);
-        append_scale_bins(bins, &unscaled5, unscaled5_bins);
+        included.extend_from_slice(&unscaled3);
+        *window = collect_window_bounds(&unscaled3, *window);
+        append_scale_bins(bins, &unscaled3, unscaled5_bins);
 
         let downstream_intervals = if upstream_bins > 0 {
             vec![(feature_end, feature_end + options.upstream as i64)]
         } else {
             Vec::new()
         };
+        included.extend_from_slice(&downstream_intervals);
         *window = collect_window_bounds(&downstream_intervals, *window);
         append_scale_bins(bins, &downstream_intervals, upstream_bins);
     }
