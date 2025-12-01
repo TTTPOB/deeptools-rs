@@ -185,6 +185,7 @@
 - ✅ **Metagene intron masking**: Added explicit included-interval masking so metagene bins ignore intronic signal; metagene compatibility test now passes (max delta ≈ 1e-6)
 - ✅ **Test harness split/rename**: Regression entry points now `scripts/custom_compare.py` (self-provided/ENCODE + compatibility modes) and `scripts/full_python_compatibility.py` (deepTools mirror); legacy `compute_matrix_regression*.py` removed.
 - ✅ **Numeric regression tolerance**: Hardened tolerance parsing (string/float) with clamp to ≤5e-6 and shifted reporting to “within tolerance” instead of byte-for-byte; compatibility suite re-run and passing at the new threshold.
+- ✅ **CLI guard for `-bs`/`-bl`**: Added early exit with guidance when multi-letter short flags are used, pointing users to `--bs/--binSize` and `--bl/--blackListFileName`.
 - ✅ **Documentation update**: `readme.md` refreshed with current status, quickstart commands, and latest compatibility/performance results.
 
 ### Known Differences: Metagene Mode
