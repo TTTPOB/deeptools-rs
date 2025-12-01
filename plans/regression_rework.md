@@ -1,410 +1,647 @@
-# Comprehensive Regression Test System for computeMatrix
+# Python Compatibility Verification System for computeMatrix
 
 ## Overview
 
-This document outlines a plan to rework the current monolithic regression script (`scripts/compute_matrix_regression.py`) into a modular, configurable test system that can handle many different computeMatrix scenarios. The new system will be split into reusable components and support configurable command lists for comprehensive testing.
+This document outlines a systematic approach to ensure the Rust reimplementation of `computeMatrix` produces **identical results** to the Python DeepTools implementation. The system extracts and automates all 13 Python test cases from `deeptools/test/test_heatmapper.py`, compares against reference matrix files, and integrates with the existing regression harness.
 
-**Note**: This plan aligns with the project's validation strategy (line 112-114 in overall_status.md) to maintain a unified regression harness that drives both `reference-point` and `scale-regions` modes while sharing datasets under `target/compute-matrix-datasets/`.
+**Goal**: Achieve 100% compatibility with Python DeepTools computeMatrix across all documented test scenarios, with numerical matrix accuracy and downstream tool interoperability.
+
+**Note**: This plan aligns with the project's validation strategy (overall_status.md) to maintain a unified regression harness that drives both `reference-point` and `scale-regions` modes while sharing datasets under `target/compute-matrix-datasets/`.
+
+---
+
 ## DeepTools Python Test Coverage Analysis
 
-Based on analysis of the DeepTools Python implementation (`deeptools/deeptools/test/test_heatmapper.py`), the current test suite includes **13 functional tests** covering computeMatrix functionality:
+Based on analysis of `deeptools/deeptools/test/test_heatmapper.py`, the Python test suite includes **13 functional tests** covering computeMatrix functionality:
 
 ### Core Functionality Tests (8 tests)
-1. **`test_computeMatrix_reference_point()`** - Basic reference-point mode with default parameters
-2. **`test_computeMatrix_reference_point_center()`** - Reference-point with center reference point
-3. **`test_computeMatrix_reference_point_tes()`** - Reference-point with TES reference point
-4. **`test_computeMatrix_reference_point_missing_data_as_zero()`** - Reference-point with `--missingDataAsZero` flag
-5. **`test_computeMatrix_scale_regions()`** - Basic scale-regions mode
-6. **`test_computeMatrix_multiple_bed()`** - Multiple BED files as input
-7. **`test_computeMatrix_region_extend_over_chr_end()`** - Regions extending beyond chromosome end
-8. **`test_computeMatrix_unscaled()`** - Scale-regions with unscaled 5' and 3' regions
+
+| Test Name | Description | Reference Matrix |
+|-----------|-------------|------------------|
+| `test_computeMatrix_reference_point` | Basic reference-point mode (TSS default) | `master.mat` |
+| `test_computeMatrix_reference_point_center` | Reference-point with `--referencePoint center` | `master_center.mat` |
+| `test_computeMatrix_reference_point_tes` | Reference-point with `--referencePoint TES` | `master_TES.mat` |
+| `test_computeMatrix_reference_point_missing_data_as_zero` | Reference-point with `--missingDataAsZero` | `master_nan_to_zero.mat` |
+| `test_computeMatrix_scale_regions` | Basic scale-regions mode | `master_scale_reg.mat` |
+| `test_computeMatrix_multiple_bed` | Multiple BED files as input (group handling) | `master_multibed.mat` |
+| `test_computeMatrix_region_extend_over_chr_end` | Regions extending beyond chromosome boundaries | `master_extend_beyond_chr_size.mat` |
+| `test_computeMatrix_unscaled` | Scale-regions with `--unscaled5prime` and `--unscaled3prime` | `master_unscaled.mat` |
 
 ### Advanced Functionality Tests (2 tests)
-9. **`test_computeMatrix_gtf()`** - GTF file input with scale-regions
-10. **`test_computeMatrix_metagene()`** - Metagene mode with GTF input
 
-### Low-level Unit Tests (3 tests)
-11. **`test_chopRegions_body()`** - Tests region chopping for body mode
-12. **`test_chopRegions_TSS()`** - Tests region chopping for TSS reference point
-13. **`test_chopRegions_TES()`** - Tests region chopping for TES reference point
-14. **`test_chopRegionsFromMiddle()`** - Tests region chopping from middle (center reference point)
+| Test Name | Description | Reference Matrix |
+|-----------|-------------|------------------|
+| `test_computeMatrix_gtf` | GTF file input with scale-regions | `master_gtf.mat` |
+| `test_computeMatrix_metagene` | Metagene mode with `--metagene` flag | `master_metagene.mat` |
 
-### Test Data Coverage
-The test suite uses **10 different reference matrix files**:
-- `master.mat` - Basic reference-point
-- `master_center.mat` - Reference-point with center
-- `master_TES.mat` - Reference-point with TES
-- `master_nan_to_zero.mat` - Missing data as zero
-- `master_scale_reg.mat` - Scale-regions
-- `master_multibed.mat` - Multiple BED files
-- `master_extend_beyond_chr_size.mat` - Regions beyond chromosome end
-- `master_unscaled.mat` - Scale-regions with unscaled regions
-- `master_gtf.mat` - GTF input
-- `master_metagene.mat` - Metagene mode
+### Low-level Unit Tests (4 tests - Zone Chopping)
 
-### Test Parameters Covered
-- **Modes**: `reference-point`, `scale-regions`
-- **Reference Points**: `center`, `TSS`, `TES`
-- **Parameters**: upstream/downstream distances, bin size, region body length, unscaled regions
-- **Data Types**: BED files, bigWig files, GTF files
-- **Special Cases**: Missing data handling, chromosome boundary conditions, multiple input files
-- **Strand Handling**: Both positive and negative strands in region chopping tests
+| Test Name | Description |
+|-----------|-------------|
+| `test_chopRegions_body` | Region chopping for body mode (scale-regions) |
+| `test_chopRegions_TSS` | Region chopping for TSS reference point |
+| `test_chopRegions_TES` | Region chopping for TES reference point |
+| `test_chopRegionsFromMiddle` | Region chopping for center reference point |
 
-### Gaps in Current Test Coverage
-Based on the analysis, the following areas have limited or no test coverage:
-1. **Parameter Matrix Testing**: No systematic testing of parameter combinations
-2. **Performance Testing**: No large-scale performance benchmarks
-3. **Error Handling**: Limited testing of error conditions and edge cases
-4. **Output Formats**: Limited testing of different output formats (matrix, tabulated, BED)
-5. **Sorting and Filtering**: No tests for `--sortRegions`, `--skipZeros`, thresholding
-6. **Multiple Signal Files**: Limited testing with multiple bigWig inputs
-7. **Different Average Types**: No testing of mean, median, min, max, sum, std
-8. **Chromosome Name Variations**: No testing of chromosome name normalization
+### Test Data Assets
 
+Located in `deeptools/deeptools/test/test_heatmapper/`:
+- **Signal files**: `test.bw`, `unscaled.bigWig`
+- **Region files**: `test2.bed`, `group1.bed`, `group2.bed`, `unscaled.bed`
+- **Reference matrices**: 10 `.mat` files serving as ground truth
+- **GTF data**: `../test_data/test.gtf`, `../test_data/test1.bw.bw`
 
-## Current Limitations
+---
 
-The existing regression script has several limitations:
+## Existing Infrastructure Analysis
 
-1. **Monolithic Design**: All functionality is in a single 969-line file
-2. **Limited Test Scenarios**: Only supports basic `reference-point` and `scale-regions` modes
-3. **Hardcoded Configuration**: Test parameters are embedded in the code
-4. **Fixed Dataset**: Only uses one specific dataset (ENCODE K562 ATAC-seq)
-5. **Limited Extensibility**: Adding new test scenarios requires code modifications
+### Current Regression Script (`scripts/compute_matrix_regression.py`)
 
-## Proposed Modular Architecture
+The existing 970-line script provides robust infrastructure that should be **preserved and extended**:
 
-The new system will be split into four main modules:
+#### Key Components to Retain
 
-### 1. data_downloader Module
+1. **`CommandTiming` dataclass** (lines 155-175): Tracks wall/user/system time
+2. **`CachedResult` dataclass** (lines 200-235): Stores command hash, output path, timing, timestamp
+3. **`run_command_cached()`** (lines 320-380): Hash-based execution caching with JSON persistence
+4. **`Matrix` / `MatrixRow` classes** (lines 35-55): Matrix parsing and representation
+5. **`compare_matrices()`** (lines 580-610): Tolerance-based value comparison
+6. **`compare_headers()`** (lines 500-520): JSON header field comparison
+7. **`ensure_downloaded()`** / `prepare_dataset()`**: Dataset download and caching
 
-**Purpose**: Handle downloading, caching, and preparation of test datasets
-
-**Responsibilities**:
-- Download test data from various sources (ENCODE, custom URLs, local files)
-- Manage dataset caching and versioning under `target/compute-matrix-datasets/`
-- Support multiple dataset types (bigWig, BED, GTF) with focus on current ENCODE K562 ATAC-seq data
-- Prepare region files for testing (no file splitting)
-- Validate dataset integrity
-- Integrate with existing pixi environment for DeepTools reference data
-
-**Key Classes**:
-- `DatasetManager`: Orchestrates dataset operations
-- `DataDownloader`: Handles URL downloads with retry logic
-- `DatasetCache`: Manages local caching of datasets
-
-### 2. task_runner Module
-
-**Purpose**: Execute computeMatrix commands and manage results
-
-**Responsibilities**:
-- Execute provided command strings directly (no complex CLI argument mapping)
-- Execute both reference (Python/pixi) and candidate (Rust/cargo) implementations
-- Track execution timing and resource usage (extending existing `CommandTiming` class)
-- Manage result caching (enhancing existing caching mechanism)
-- Support both reference and candidate command strings
-- Handle parallel execution of multiple test scenarios
-- Support the existing `--keep-ref` and `--keep-rust` flags
-
-**Key Classes**:
-- `TaskRunner`: Main execution orchestrator
-- `CommandBuilder`: Constructs command lines from parameters
-- `ExecutionCache`: Manages result caching
-- `PerformanceTracker`: Tracks timing and resource usage
-
-### 3. matrix_comparer Module
-
-**Purpose**: Compare matrix outputs and report differences
-
-**Responsibilities**:
-- Load and parse matrix files (extending existing `Matrix`, `MatrixRow` classes)
-- Perform detailed comparisons (headers, values, metadata) with byte-for-byte accuracy
-- Generate comprehensive difference reports
-- Support various comparison tolerances and modes (maintaining existing tolerance logic)
-- Export comparison results in multiple formats
-- Ensure compatibility with downstream tools (`plotHeatmap`, `plotProfile`, `computeMatrixOperations`)
-- Compare outputs from any command string pairs
-
-**Key Classes**:
-- `MatrixComparer`: Main comparison engine
-- `MatrixLoader`: Loads and parses matrix files
-- `DifferenceReporter`: Generates comparison reports
-- `ComparisonResult`: Stores and formats comparison results
-
-### 4. test_config Module
-
-**Purpose**: Define and manage test scenarios and configurations
-
-**Responsibilities**:
-- Define test scenarios in configuration files
-- Support parameter variations and combinations
-- Manage test suites and test groups
-- Provide configuration validation
-- Support test scenario inheritance
-- Support arbitrary command strings for both reference and candidate implementations
-- Validate basic command structure
-
-**Key Classes**:
-- `TestConfig`: Loads and validates configuration files
-- `TestScenario`: Represents a single test scenario
-- `TestSuite`: Manages collections of test scenarios
-- `ParameterGenerator`: Generates parameter combinations
-
-## Configuration System
-
-The new system will use YAML configuration files to define test scenarios:
-
-```yaml
-# test_scenarios.yaml
-test_suites:
-  basic_functionality:
-    description: "Basic functionality tests"
-    datasets:
-      - encode_k562_atac
-    scenarios:
-      - name: "reference_point_center"
-        reference_command: "pixi run computeMatrix reference-point -R target/compute-matrix-datasets/encode_k562_atac/ENCFF333TAT.bed -S target/compute-matrix-datasets/encode_k562_atac/ENCFF093IIW.bigWig target/compute-matrix-datasets/encode_k562_atac/ENCFF019IPA.bigWig --beforeRegionStartLength 100 --afterRegionStartLength 100 --referencePoint center --binSize 10 --numberOfProcessors 4 --outFileName {output}"
-        candidate_command: "cargo run --release --quiet -- reference-point -R target/compute-matrix-datasets/encode_k562_atac/ENCFF333TAT.bed -S target/compute-matrix-datasets/encode_k562_atac/ENCFF093IIW.bigWig target/compute-matrix-datasets/encode_k562_atac/ENCFF019IPA.bigWig --beforeRegionStartLength 100 --afterRegionStartLength 100 --referencePoint center --binSize 10 --numberOfProcessors 4 --outFileName {output}"
-        tolerance: 1e-5
-      
-      - name: "scale_regions_default"
-        reference_command: "pixi run computeMatrix scale-regions -R target/compute-matrix-datasets/encode_k562_atac/ENCFF333TAT.bed -S target/compute-matrix-datasets/encode_k562_atac/ENCFF093IIW.bigWig target/compute-matrix-datasets/encode_k562_atac/ENCFF019IPA.bigWig --regionBodyLength 200 --beforeRegionStartLength 100 --afterRegionStartLength 100 --unscaled5prime 50 --unscaled3prime 50 --binSize 10 --numberOfProcessors 4 --outFileName {output}"
-        candidate_command: "cargo run --release --quiet -- scale-regions -R target/compute-matrix-datasets/encode_k562_atac/ENCFF333TAT.bed -S target/compute-matrix-datasets/encode_k562_atac/ENCFF093IIW.bigWig target/compute-matrix-datasets/encode_k562_atac/ENCFF019IPA.bigWig --regionBodyLength 200 --beforeRegionStartLength 100 --afterRegionStartLength 100 --unscaled5prime 50 --unscaled3prime 50 --binSize 10 --numberOfProcessors 4 --outFileName {output}"
-        tolerance: 1e-5
-
-  custom_commands:
-    description: "Custom command tests"
-    scenarios:
-      - name: "custom_test_1"
-        reference_command: "pixi run computeMatrix reference-point -R /path/to/custom.bed -S /path/to/custom.bw --beforeRegionStartLength 500 --afterRegionStartLength 500 --referencePoint TSS --binSize 25 --outFileName {output}"
-        candidate_command: "cargo run --release --quiet -- reference-point -R /path/to/custom.bed -S /path/to/custom.bw --beforeRegionStartLength 500 --afterRegionStartLength 500 --referencePoint TSS --binSize 25 --outFileName {output}"
-        tolerance: 1e-6
-
-datasets:
-  encode_k562_atac:
-    description: "ENCODE K562 ATAC-seq data"
-    signals:
-      - url: "https://www.encodeproject.org/files/ENCFF093IIW/@@download/ENCFF093IIW.bigWig"
-        name: "k562_1"
-      - url: "https://www.encodeproject.org/files/ENCFF019IPA/@@download/ENCFF019IPA.bigWig"
-        name: "k562_2"
-      - url: "https://www.encodeproject.org/files/ENCFF656ZKM/@@download/ENCFF656ZKM.bigWig"
-        name: "k562_3"
-    regions:
-      - url: "https://www.encodeproject.org/files/ENCFF333TAT/@@download/ENCFF333TAT.bed.gz"
-        name: "k562_peaks"
+#### Cache Directory Structure (Existing)
+```
+target/<mode>-regression/
+├── .cache/
+│   ├── reference/           # Python command timing cache
+│   │   └── <hash>.json
+│   └── rust/                # Rust command timing cache
+│       └── <hash>.json
+├── <mode>_reference_<hash>.mat.gz
+└── <mode>_rust_<hash>.mat.gz
 ```
 
-## Comprehensive Test Scenarios
+---
 
-The new system will support testing many different scenarios:
+## Proposed Three-Tier Validation System
 
-### 1. Basic Functionality Tests
-- Both `reference-point` and `scale-regions` modes
-- Different reference points (TSS, TES, center)
-- Various upstream/downstream lengths
-- Different bin sizes
+### Tier 1: Direct Reference Matrix Comparison
 
-### 2. Edge Case Tests
-- Very small regions (smaller than bin size)
-- Very large regions (megabase-scale)
-- Regions at chromosome boundaries
-- Empty region files
-- Single-region files
+Compare Rust output directly against the 10 pre-computed Python reference matrices stored in `test_heatmapper/`.
 
-### 3. Parameter Combination Tests
-- All valid parameter combinations
-- Boundary value testing
-- Invalid parameter rejection
-- Parameter inheritance and overrides
+```python
+def validate_against_reference(test_name: str, rust_output: Path, expected_matrix: Path) -> ValidationResult:
+    """
+    Compare Rust-generated matrix against Python reference matrix.
+    This is the primary validation tier - if this passes, the implementation is correct.
+    """
+    rust_matrix = load_matrix(rust_output)
+    ref_matrix = load_matrix(expected_matrix)
+    
+    return ValidationResult(
+        test_name=test_name,
+        header_match=compare_headers(ref_matrix.header, rust_matrix.header),
+        value_match=compare_matrix_values(ref_matrix, rust_matrix, tolerance=0),
+        row_count_match=len(ref_matrix.rows) == len(rust_matrix.rows)
+    )
+```
 
-### 4. Performance Tests
-- Large datasets (many regions, many signals)
-- Memory usage profiling
-- Execution time benchmarks
-- Scalability testing
+### Tier 2: Live Python-Rust Cross-Validation
 
-### 5. Data Format Tests
-- Different bigWig formats
-- Various BED formats (BED3, BED6, BED12)
-- GTF format support
-- Compressed input files
+Run both implementations with identical arguments and compare outputs.
 
-### 6. Error Handling Tests
-- Missing files
-- Corrupted data files
-- Network failures
-- Insufficient permissions
+```python
+def cross_validate_implementations(test_scenario: TestScenario) -> CrossValidationResult:
+    """
+    Execute both Python and Rust implementations and compare outputs.
+    Useful for scenarios not covered by reference matrices or when testing new features.
+    """
+    python_output = run_python_command(test_scenario.python_command)
+    rust_output = run_rust_command(test_scenario.rust_command)
+    
+    return CrossValidationResult(
+        test_name=test_scenario.name,
+        python_output=python_output,
+        rust_output=rust_output,
+        matrices_identical=compare_matrices(python_output, rust_output, tolerance=1e-10),
+        python_timing=get_timing(python_output),
+        rust_timing=get_timing(rust_output)
+    )
+```
 
-## Implementation Plan
+### Tier 3: Downstream Tool Compatibility
 
-### Phase 1: Core Module Development
-1. **data_downloader Module**
-   - Implement `DatasetManager` class
-   - Add support for multiple data sources
-   - Implement caching and versioning
-   - Add data validation
+Verify that Rust-generated matrices work correctly with downstream DeepTools utilities.
 
-2. **task_runner Module**
-   - Implement `TaskRunner` class
-   - Add command building logic
-   - Implement execution caching
-   - Add performance tracking
+```python
+def verify_downstream_compatibility(rust_matrix: Path) -> DownstreamResult:
+    """
+    Ensure generated matrices are compatible with plotHeatmap, plotProfile, etc.
+    """
+    results = {}
+    
+    # Test plotHeatmap
+    results['plotHeatmap'] = run_command([
+        'pixi', 'run', 'plotHeatmap', '-m', str(rust_matrix),
+        '-out', '/tmp/test_heatmap.png'
+    ])
+    
+    # Test plotProfile  
+    results['plotProfile'] = run_command([
+        'pixi', 'run', 'plotProfile', '-m', str(rust_matrix),
+        '-out', '/tmp/test_profile.png'
+    ])
+    
+    return DownstreamResult(compatibility=all(r.success for r in results.values()))
+```
 
-3. **matrix_comparer Module**
-   - Implement `MatrixComparer` class
-   - Add detailed comparison logic
-   - Implement various report formats
-   - Add tolerance handling
+---
 
-### Phase 2: Configuration System
-1. **test_config Module**
-   - Implement YAML configuration parser
-   - Add parameter matrix expansion
-   - Implement test scenario inheritance
-   - Add configuration validation
+## Implementation Architecture
 
-2. **Configuration Files**
-   - Create basic test scenario configurations
-   - Add dataset definitions
-   - Implement command string templates
-   - Add output path substitution
-
-### Phase 3: Integration and Testing
-1. **Main Script Integration**
-   - Rewrite main script to use new modules
-   - Add command-line interface for configuration
-   - Implement parallel test execution
-   - Add progress reporting
-   - Support command string execution
-
-2. **Test Suite Expansion**
-   - Create comprehensive test scenarios
-   - Add edge case tests
-   - Implement performance tests
-   - Add error handling tests
-   - Support custom command strings
-
-### Phase 4: Advanced Features
-1. **Reporting and Visualization**
-   - Add HTML report generation
-   - Implement trend analysis
-   - Add performance graphs
-   - Implement regression detection
-
-2. **CI/CD Integration**
-   - Add GitHub Actions integration
-   - Implement automated test execution
-   - Add result archiving
-   - Implement notification system
-
-## Directory Structure
+### Module Structure
 
 ```
 scripts/
-├── compute_matrix_regression.py          # Main entry point
+├── compute_matrix_regression.py      # Main entry point (enhanced)
 ├── regression/
 │   ├── __init__.py
-│   ├── data_downloader/
+│   ├── core/
 │   │   ├── __init__.py
-│   │   ├── dataset_manager.py
-│   │   ├── data_downloader.py
-│   │   ├── dataset_cache.py
-│   │   └── region_splitter.py
-│   ├── task_runner/
+│   │   ├── timing.py                 # CommandTiming, CachedResult (extracted)
+│   │   ├── cache.py                  # run_command_cached, load_cache, save_cache
+│   │   └── matrix.py                 # Matrix, MatrixRow, load_matrix
+│   ├── comparison/
 │   │   ├── __init__.py
-│   │   ├── task_runner.py
-│   │   ├── command_builder.py
-│   │   ├── execution_cache.py
-│   │   └── performance_tracker.py
-│   ├── matrix_comparer/
+│   │   ├── header_compare.py         # compare_headers()
+│   │   ├── value_compare.py          # compare_matrix_values(), almost_equal()
+│   │   └── reporter.py               # Comparison result formatting
+│   ├── test_extraction/
 │   │   ├── __init__.py
-│   │   ├── matrix_comparer.py
-│   │   ├── matrix_loader.py
-│   │   ├── difference_reporter.py
-│   │   └── comparison_result.py
-│   ├── test_config/
+│   │   ├── python_test_parser.py     # Parse test_heatmapper.py
+│   │   └── scenario_generator.py     # Generate test scenarios from parsed tests
+│   ├── datasets/
 │   │   ├── __init__.py
-│   │   ├── test_config.py
-│   │   ├── test_scenario.py
-│   │   ├── test_suite.py
-│   │   └── parameter_generator.py
-│   └── utils/
+│   │   ├── downloader.py             # ensure_downloaded(), prepare_dataset()
+│   │   └── test_data_manager.py      # Manage test_heatmapper/ assets
+│   └── runners/
 │       ├── __init__.py
-│       ├── command_timing.py
-│       ├── file_utils.py
-│       └── validation.py
-├── config/
-│   ├── test_scenarios.yaml              # Main test configuration
-│   ├── datasets.yaml                    # Dataset definitions
-│   └── test_environments.yaml           # Environment-specific settings
-└── reports/                             # Generated test reports
-    ├── templates/
-    │   ├── html_report.html
-    │   └── json_schema.json
-    └── output/
+│       ├── python_runner.py          # Execute pixi-based Python commands
+│       └── rust_runner.py            # Execute cargo-based Rust commands
+└── config/
+    └── python_compatibility.yaml     # Test scenario definitions
 ```
 
-## Usage Examples
+### Test Scenario Configuration
 
-### Basic Usage
+```yaml
+# config/python_compatibility.yaml
+test_suites:
+  python_compatibility:
+    description: "All 10 computeMatrix tests from test_heatmapper.py"
+    data_root: "deeptools/deeptools/test/test_heatmapper"
+    test_data_root: "deeptools/deeptools/test/test_data"
+    
+    scenarios:
+      # Core Functionality Tests
+      - name: reference_point_basic
+        python_test: test_computeMatrix_reference_point
+        reference_matrix: master.mat
+        rust_command: >
+          cargo run --release --quiet -- reference-point
+          -R {data_root}/test2.bed
+          -S {data_root}/test.bw
+          -b 100 -a 100 -bs 1 -p 1
+          --outFileName {output}
+        tolerance: 0
+        
+      - name: reference_point_center
+        python_test: test_computeMatrix_reference_point_center
+        reference_matrix: master_center.mat
+        rust_command: >
+          cargo run --release --quiet -- reference-point
+          -R {data_root}/test2.bed
+          -S {data_root}/test.bw
+          -b 100 -a 100 --referencePoint center -bs 1 -p 1
+          --outFileName {output}
+        tolerance: 0
+        
+      - name: reference_point_tes
+        python_test: test_computeMatrix_reference_point_tes
+        reference_matrix: master_TES.mat
+        rust_command: >
+          cargo run --release --quiet -- reference-point
+          -R {data_root}/test2.bed
+          -S {data_root}/test.bw
+          -b 100 -a 100 --referencePoint TES -bs 1 -p 1
+          --outFileName {output}
+        tolerance: 0
+        
+      - name: reference_point_missing_data_as_zero
+        python_test: test_computeMatrix_reference_point_missing_data_as_zero
+        reference_matrix: master_nan_to_zero.mat
+        rust_command: >
+          cargo run --release --quiet -- reference-point
+          -R {data_root}/test2.bed
+          -S {data_root}/test.bw
+          -b 100 -a 100 -bs 1 -p 1 --missingDataAsZero
+          --outFileName {output}
+        tolerance: 0
+        
+      - name: scale_regions_basic
+        python_test: test_computeMatrix_scale_regions
+        reference_matrix: master_scale_reg.mat
+        rust_command: >
+          cargo run --release --quiet -- scale-regions
+          -R {data_root}/test2.bed
+          -S {data_root}/test.bw
+          -b 100 -a 100 -m 100 -bs 1 -p 1
+          --outFileName {output}
+        tolerance: 0
+        
+      - name: multiple_bed
+        python_test: test_computeMatrix_multiple_bed
+        reference_matrix: master_multibed.mat
+        rust_command: >
+          cargo run --release --quiet -- reference-point
+          -R {data_root}/group1.bed {data_root}/group2.bed
+          -S {data_root}/test.bw
+          -b 100 -a 100 -bs 1 -p 1
+          --outFileName {output}
+        tolerance: 0
+        
+      - name: region_extend_beyond_chr
+        python_test: test_computeMatrix_region_extend_over_chr_end
+        reference_matrix: master_extend_beyond_chr_size.mat
+        rust_command: >
+          cargo run --release --quiet -- reference-point
+          -R {data_root}/group1.bed {data_root}/group2.bed
+          -S {data_root}/test.bw
+          -b 100 -a 500 -bs 1 -p 1
+          --outFileName {output}
+        tolerance: 0
+        
+      - name: scale_regions_unscaled
+        python_test: test_computeMatrix_unscaled
+        reference_matrix: master_unscaled.mat
+        rust_command: >
+          cargo run --release --quiet -- scale-regions
+          -R {data_root}/unscaled.bed
+          -S {data_root}/unscaled.bigWig
+          -a 300 -b 500 --unscaled5prime 100 --unscaled3prime 50 -bs 10 -p 1
+          --outFileName {output}
+        tolerance: 0
+
+      # Advanced Functionality Tests
+      - name: gtf_input
+        python_test: test_computeMatrix_gtf
+        reference_matrix: master_gtf.mat
+        rust_command: >
+          cargo run --release --quiet -- scale-regions
+          -R {test_data_root}/test.gtf
+          -S {test_data_root}/test1.bw.bw
+          -a 300 -b 500 --unscaled5prime 20 --unscaled3prime 50 -bs 10 -p 1
+          --outFileName {output}
+        tolerance: 0
+        
+      - name: metagene
+        python_test: test_computeMatrix_metagene
+        reference_matrix: master_metagene.mat
+        rust_command: >
+          cargo run --release --quiet -- scale-regions
+          -R {test_data_root}/test.gtf
+          -S {test_data_root}/test1.bw.bw
+          -a 300 -b 500 --unscaled5prime 20 --unscaled3prime 50 -bs 10 -p 1 --metagene
+          --outFileName {output}
+        tolerance: 0
+
+  # Extended testing with ENCODE data (existing infrastructure)
+  encode_k562_atac:
+    description: "Large-scale performance testing with ENCODE K562 ATAC-seq data"
+    data_root: "target/compute-matrix-datasets/encode_k562_atac"
+    scenarios:
+      - name: reference_point_center_encode
+        cross_validate: true  # Run both Python and Rust, compare outputs
+        tolerance: 1e-5
+        # ... (existing ENCODE-based tests)
+```
+
+---
+
+## Caching Strategy
+
+### Preserved Cache Mechanisms
+
+The existing caching system will be **fully retained** with these enhancements:
+
+```python
+# Extended cache structure
+target/python-compatibility/
+├── .cache/
+│   ├── rust/                          # Rust command timing cache
+│   │   └── <scenario_hash>.json       # {command_hash, output_path, timing, timestamp}
+│   └── reference/                     # Optional: regenerated Python reference cache
+│       └── <scenario_hash>.json
+├── outputs/
+│   └── <scenario_name>_rust.mat.gz    # Rust-generated matrices
+└── reports/
+    └── compatibility_<date>.json      # Test results summary
+```
+
+### Cache Key Generation
+
+```python
+def compute_scenario_hash(scenario: TestScenario) -> str:
+    """
+    Generate a stable hash for caching based on:
+    - Rust command (excluding output filename)
+    - Reference matrix path
+    - Test data file hashes (optional, for integrity)
+    """
+    hasher = hashlib.sha256()
+    
+    # Hash command parameters (excluding output)
+    filtered_cmd = filter_output_arg(scenario.rust_command)
+    hasher.update(filtered_cmd.encode())
+    
+    # Hash reference matrix identifier
+    hasher.update(scenario.reference_matrix.encode())
+    
+    return hasher.hexdigest()[:16]
+```
+
+### Cache Invalidation Rules
+
+1. **Reference Matrix Change**: Invalidate if reference `.mat` file is modified
+2. **Rust Binary Change**: Invalidate on `cargo build` if binary timestamp changes
+3. **Command Parameter Change**: Automatic via hash-based key generation
+4. **Manual Override**: `--no-cache` flag to force re-execution
+
+---
+
+## CLI Interface
+
+### New Command-Line Options
+
 ```bash
-# Run all test scenarios
-python scripts/compute_matrix_regression.py --config config/test_scenarios.yaml
+# Run all Python compatibility tests against reference matrices
+python scripts/compute_matrix_regression.py --mode python-compatibility
 
 # Run specific test suite
-python scripts/compute_matrix_regression.py --config config/test_scenarios.yaml --suite basic_functionality
+python scripts/compute_matrix_regression.py --mode python-compatibility \
+    --suite python_compatibility
 
-# Run with custom tolerance
-python scripts/compute_matrix_regression.py --config config/test_scenarios.yaml --tolerance 1e-6
+# Run single test scenario
+python scripts/compute_matrix_regression.py --mode python-compatibility \
+    --test reference_point_center
 
-# Generate detailed report
-python scripts/compute_matrix_regression.py --config config/test_scenarios.yaml --report-format html --output reports/latest.html
+# Generate detailed JSON report
+python scripts/compute_matrix_regression.py --mode python-compatibility \
+    --output reports/compatibility_$(date +%Y%m%d).json
+
+# Cross-validate with live Python execution (Tier 2)
+python scripts/compute_matrix_regression.py --mode python-compatibility \
+    --cross-validate
+
+# Verify downstream tool compatibility (Tier 3)
+python scripts/compute_matrix_regression.py --mode python-compatibility \
+    --verify-downstream
+
+# Force re-execution (bypass cache)
+python scripts/compute_matrix_regression.py --mode python-compatibility \
+    --no-cache
+
+# Keep existing Rust outputs (reuse cached)
+python scripts/compute_matrix_regression.py --mode python-compatibility \
+    --keep-rust
 ```
 
-### Advanced Usage
+### Backward Compatibility
+
+Existing CLI interface remains fully functional:
+
 ```bash
-# Run with parallel execution
-python scripts/compute_matrix_regression.py --config config/test_scenarios.yaml --parallel 4
+# Original reference-point regression (unchanged)
+python scripts/compute_matrix_regression.py --mode reference-point
 
-# Run performance benchmarks
-python scripts/compute_matrix_regression.py --config config/test_scenarios.yaml --suite performance --benchmark
-
-# Run with custom dataset
-python scripts/compute_matrix_regression.py --config config/test_scenarios.yaml --dataset custom_dataset.yaml
-
-# Generate parameter matrix
-python scripts/compute_matrix_regression.py --generate-param-matrix --output config/generated_scenarios.yaml
+# Original scale-regions regression (unchanged)
+python scripts/compute_matrix_regression.py --mode scale-regions
 ```
 
-## Benefits of the New System
+---
 
-1. **Modularity**: Each component has a single responsibility and can be tested independently
-2. **Extensibility**: New test scenarios can be added without code changes
-3. **Reusability**: Components can be reused for other testing purposes
-4. **Maintainability**: Smaller, focused modules are easier to maintain
-5. **Flexibility**: Configuration-driven approach supports many testing scenarios
-6. **Scalability**: Parallel execution and efficient caching support large test suites
-7. **Reporting**: Comprehensive reports help identify and diagnose issues
-8. **CI/CD Integration**: Designed for automated testing in continuous integration
+## Reporting System
 
-## Migration Strategy
+### JSON Report Structure
 
-1. **Backward Compatibility**: Maintain compatibility with existing command-line interface
-2. **Incremental Migration**: Implement modules incrementally while keeping the original script functional
-3. **Parallel Development**: New modules can be developed in parallel with existing functionality
-4. **Testing**: Each module will have comprehensive unit tests
-5. **Documentation**: Detailed documentation for each module and the overall system
+```json
+{
+  "compatibility_report": {
+    "timestamp": "2025-12-01T10:30:00Z",
+    "total_tests": 10,
+    "passed": 10,
+    "failed": 0,
+    "skipped": 0,
+    "byte_for_byte_matches": 10,
+    
+    "test_results": {
+      "reference_point_basic": {
+        "status": "PASS",
+        "reference_matrix": "master.mat",
+        "rust_output": "reference_point_basic_rust.mat.gz",
+        "header_match": true,
+        "value_match": true,
+        "row_count": 6,
+        "max_delta": 0.0,
+        "rust_timing": {
+          "wall_seconds": 0.15,
+          "user_seconds": 0.12,
+          "system_seconds": 0.02
+        },
+        "from_cache": false
+      },
+      "reference_point_center": {
+        "status": "PASS",
+        "reference_matrix": "master_center.mat",
+        "header_match": true,
+        "value_match": true,
+        "row_count": 6,
+        "max_delta": 0.0,
+        "rust_timing": {
+          "wall_seconds": 0.14,
+          "user_seconds": 0.11,
+          "system_seconds": 0.02
+        },
+        "from_cache": true
+      }
+      // ... remaining tests
+    },
+    
+    "performance_summary": {
+      "average_rust_time": 0.145,
+      "total_rust_time": 1.45,
+      "cached_tests": 3,
+      "fresh_tests": 7
+    }
+  }
+}
+```
+
+### Console Output Format
+
+```
+================================================================================
+📊 PYTHON COMPATIBILITY TEST RESULTS
+================================================================================
+
+Test Suite: python_compatibility (10 tests)
+
+  ✅ reference_point_basic ............ PASS (0.15s)
+  ✅ reference_point_center ........... PASS (cached)
+  ✅ reference_point_tes .............. PASS (0.14s)
+  ✅ reference_point_missing_data ..... PASS (0.16s)
+  ✅ scale_regions_basic .............. PASS (0.18s)
+  ✅ multiple_bed ..................... PASS (0.13s)
+  ✅ region_extend_beyond_chr ......... PASS (0.15s)
+  ✅ scale_regions_unscaled ........... PASS (0.17s)
+  ✅ gtf_input ........................ PASS (0.22s)
+  ✅ metagene ......................... PASS (0.21s)
+
+================================================================================
+SUMMARY: 10/10 tests passed (100% compatibility)
+         10/10 byte-for-byte matches
+         Total time: 1.51s (3 cached, 7 fresh)
+================================================================================
+```
+
+---
+
+## Implementation Plan
+
+### Phase 1: Test Extraction & Configuration (Week 1)
+
+**Tasks:**
+1. Extract module structure from existing `compute_matrix_regression.py`
+   - Move `CommandTiming`, `CachedResult` to `regression/core/timing.py`
+   - Move `Matrix`, `MatrixRow`, `load_matrix` to `regression/core/matrix.py`
+   - Move cache functions to `regression/core/cache.py`
+   - Move comparison functions to `regression/comparison/`
+
+2. Create test scenario configuration
+   - Write `config/python_compatibility.yaml` with all 10 test scenarios
+   - Implement YAML loader in `regression/test_extraction/scenario_generator.py`
+
+3. Implement reference matrix comparison
+   - Add Tier 1 validation in `regression/comparison/value_compare.py`
+   - Handle uncompressed `.mat` files from `test_heatmapper/`
+
+**Success Criteria:**
+- All 10 test scenarios defined in YAML
+- Reference matrix loading works for all `.mat` files
+- Cache mechanism preserved and functional
+
+### Phase 2: Core Validation Implementation (Week 1-2)
+
+**Tasks:**
+1. Implement test runner
+   - Add `--mode python-compatibility` CLI option
+   - Create scenario execution loop with caching
+   - Integrate with existing `run_command_cached()`
+
+2. Implement Tier 1 validation
+   - Compare Rust output against reference matrices
+   - Report header mismatches, value deltas, row count differences
+
+3. Add reporting system
+   - JSON report generation
+   - Console output formatting
+   - Detailed error messages for failures
+
+**Success Criteria:**
+- All 10 tests can be executed via CLI
+- Caching works correctly for repeated runs
+- JSON and console reports generated
+
+### Phase 3: Cross-Validation & Downstream Testing (Week 2)
+
+**Tasks:**
+1. Implement Tier 2 cross-validation (optional)
+   - Add `--cross-validate` flag
+   - Execute Python via pixi, compare with Rust output
+   - Track performance differences
+
+2. Implement Tier 3 downstream validation (optional)
+   - Add `--verify-downstream` flag
+   - Test `plotHeatmap`, `plotProfile` with Rust matrices
+
+3. Integration with existing ENCODE tests
+   - Merge python-compatibility mode with existing regression tests
+   - Unified reporting for all test types
+
+**Success Criteria:**
+- Cross-validation functional for all scenarios
+- Downstream tools work with Rust-generated matrices
+- Single unified test harness for all validation types
+
+### Phase 4: CI/CD Integration (Week 3)
+
+**Tasks:**
+1. Create GitHub Actions workflow
+   - Run python-compatibility tests on PR/push
+   - Cache test data and reference matrices
+   - Upload test reports as artifacts
+
+2. Add pre-commit hook (optional)
+   - Run subset of fast tests before commit
+   - Block commits with failing compatibility tests
+
+3. Documentation
+   - Update `AGENTS.md` with new testing workflow
+   - Document all CLI options and configuration format
+
+**Success Criteria:**
+- Automated testing on every PR
+- Clear pass/fail indication in CI
+- Comprehensive documentation
+
+---
 
 ## Success Metrics
 
-1. **Code Quality**: Reduced complexity and improved maintainability
-2. **Test Coverage**: Increased test scenario coverage
-3. **Execution Time**: Improved parallel execution and caching
-4. **Extensibility**: Easier to add new test scenarios
-5. **Reporting**: Better visibility into test results and trends
-6. **CI/CD Integration**: Automated testing in continuous integration
+### Primary Compatibility Criteria
+
+| Metric | Target | Measurement |
+|--------|--------|-------------|
+| Test Pass Rate | 100% | All 10 Python test scenarios pass |
+| Numerical Accuracy | 100% | Zero tolerance deviations (tolerance=1e-5) |
+| Header Compatibility | 100% | All JSON header fields match |
+| Row Count Accuracy | 100% | Exact row counts in all scenarios |
+
+### Secondary Performance Criteria
+
+| Metric | Target | Measurement |
+|--------|--------|-------------|
+| Speedup vs Python | ≥2x | Average wall time ratio |
+| CI Runtime | <5 min | Total GitHub Actions runtime |
+
+### Downstream Compatibility
+
+| Tool | Target | Validation |
+|------|--------|------------|
+| plotHeatmap | Works | Generates valid PNG output |
+| plotProfile | Works | Generates valid PNG output |
+| computeMatrixOperations | Works | Can read and manipulate matrices |
+
+---
 
 ## Conclusion
 
-This modular regression testing system will significantly improve the testing capabilities for the computeMatrix reimplementation. By separating concerns into focused modules and using a configuration-driven approach, we can create a comprehensive, extensible testing framework that ensures the reliability and correctness of the Rust implementation.
+This Python Compatibility Verification System provides a **systematic, automated approach** to ensure the Rust reimplementation produces identical results to Python DeepTools. By:
+
+1. **Extracting all 13 Python test cases** into a structured configuration
+2. **Leveraging the 10 reference matrices** as ground truth for numerical validation
+3. **Preserving the existing cache mechanism** for efficient repeated testing
+4. **Implementing a three-tier validation system** (reference, cross-validation, downstream)
+5. **Integrating with CI/CD** for automated verification on every code change
+
+The system guarantees compatibility while maintaining the performance advantages of the Rust implementation. The modular architecture allows for easy extension as new test scenarios are identified or as the Rust implementation adds new features.
