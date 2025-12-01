@@ -171,6 +171,12 @@
 | gtf_input | ✅ PASS |
 | metagene | ✅ PASS |
 
+### Performance Timing (2025-12-01)
+- `pixi run python scripts/custom_compare.py --mode python-compatibility` (deepTools test_heatmapper corpus): 10/10 fresh runs, total Rust time **11.48s**; slowest case `reference_point_basic` at 9.09s.
+- ENCODE K562 ATAC cached benchmarks (4 cores, bin 10):
+  - reference-point (center, ±100 bp): Python 171.35s vs Rust 17.90s → **9.57× faster**.
+  - scale-regions (body 200, ±100 bp, unscaled 50/50): Python 346.56s vs Rust 18.64s → **18.59× faster**.
+
 ### Recent Fixes (2025-12-01)
 - ✅ **BED score column `.` parsing**: Fixed to accept `.` as a valid missing value indicator in BED score column (previously errored as "must be a floating point number")
 - ✅ **Group label `genes` default**: When there's only one BED/GTF region file, the default group label is now `"genes"` to match Python's behavior (previously used the file name)
@@ -179,6 +185,7 @@
 - ✅ **Metagene intron masking**: Added explicit included-interval masking so metagene bins ignore intronic signal; metagene compatibility test now passes (max delta ≈ 1e-6)
 - ✅ **Test harness split/rename**: Regression entry points now `scripts/custom_compare.py` (self-provided/ENCODE + compatibility modes) and `scripts/full_python_compatibility.py` (deepTools mirror); legacy `compute_matrix_regression*.py` removed.
 - ✅ **Numeric regression tolerance**: Hardened tolerance parsing (string/float) with clamp to ≤5e-6 and shifted reporting to “within tolerance” instead of byte-for-byte; compatibility suite re-run and passing at the new threshold.
+- ✅ **Documentation update**: `readme.md` refreshed with current status, quickstart commands, and latest compatibility/performance results.
 
 ### Known Differences: Metagene Mode
 None — parity achieved for the current test corpus (see `plans/fix_metagene.md` for a historical log).
@@ -204,6 +211,7 @@ None — parity achieved for the current test corpus (see `plans/fix_metagene.md
 
 ### CLI Compatibility: FIXED
 - [x] Short flag parsing: Fixed `-bs` conflict with `-b` by changing to `--bs` long alias (clap does not support multi-character short flags like Python argparse)
+- **CLI caveat:** deepTools multi-letter short flags `-bs` (bin size) and `-bl` (blacklist) are not available; use `--bs/--binSize` and `--bl/--blackListFileName` instead because clap only supports single-letter short flags.
 
 ### Architecture: ADVANCED TRAIT-BASED DESIGN
 - [x] Shared core abstractions: `PipelineMode` trait with metadata-aware validation, plan construction, header emission, and row post-processing.
