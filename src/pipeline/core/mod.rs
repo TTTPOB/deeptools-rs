@@ -138,21 +138,25 @@ pub struct RegionTask {
 pub fn load_groups(paths: &[PathBuf], gtf: &GtfOptions) -> Result<Vec<Group>> {
     let mut groups = Vec::new();
     let mut seen_labels = HashSet::new();
+    // When there's only one file, Python uses "genes" as the default label
+    let use_default_genes_label = paths.len() == 1;
     for path in paths {
         match infer_region_format(path) {
             RegionFormat::Bed => {
-                let mut file_groups = parse_grouped_bed(path, &mut seen_labels)
-                    .map_err(anyhow::Error::new)
-                    .with_context(|| {
-                        format!("Failed to parse regions file '{}'", path.display())
-                    })?;
+                let mut file_groups =
+                    parse_grouped_bed(path, use_default_genes_label, &mut seen_labels)
+                        .map_err(anyhow::Error::new)
+                        .with_context(|| {
+                            format!("Failed to parse regions file '{}'", path.display())
+                        })?;
                 groups.append(&mut file_groups);
             }
             RegionFormat::Gtf => {
                 let mut file_groups =
-                    parse_grouped_gtf(path, gtf, &mut seen_labels).with_context(|| {
-                        format!("Failed to parse regions file '{}'", path.display())
-                    })?;
+                    parse_grouped_gtf(path, gtf, use_default_genes_label, &mut seen_labels)
+                        .with_context(|| {
+                            format!("Failed to parse regions file '{}'", path.display())
+                        })?;
                 groups.append(&mut file_groups);
             }
         }
@@ -435,12 +439,17 @@ fn open_samples(paths: &[PathBuf]) -> Result<Vec<Sample>> {
 
 fn parse_grouped_bed(
     path: &Path,
+    use_default_genes_label: bool,
     seen_labels: &mut HashSet<String>,
 ) -> Result<Vec<Group>, BedReadError> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
 
-    let default_label = bed_file_label(path);
+    let default_label = if use_default_genes_label {
+        "genes".to_string()
+    } else {
+        bed_file_label(path)
+    };
     let mut groups = Vec::new();
     let mut current_records = Vec::new();
 
@@ -495,9 +504,14 @@ fn parse_grouped_bed(
 fn parse_grouped_gtf(
     path: &Path,
     options: &GtfOptions,
+    use_default_genes_label: bool,
     seen_labels: &mut HashSet<String>,
 ) -> Result<Vec<Group>> {
-    let default_label = bed_file_label(path);
+    let default_label = if use_default_genes_label {
+        "genes".to_string()
+    } else {
+        bed_file_label(path)
+    };
     let mut groups = Vec::new();
 
     let records = load_gtf_records(path, options)?;

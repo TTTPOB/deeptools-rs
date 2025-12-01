@@ -153,6 +153,34 @@
 - [ ] Documentation updates: Finalize user-facing documentation
 - [ ] Advanced clustering: Implement silhouette scores and regrouping features
 - [ ] Performance profiling: Large-scale benchmarking and optimization tuning
+- [ ] Metagene output format: Emit comma-separated exon coordinates in start/end columns (currently outputs gene-level coordinates instead of exon boundaries)
+
+## Python Compatibility Test Status: 9/10 PASSING ✅
+
+### Test Results (as of 2025-12-01)
+| Test | Status |
+|------|--------|
+| reference_point_basic | ✅ PASS |
+| reference_point_center | ✅ PASS |
+| reference_point_tes | ✅ PASS |
+| reference_point_missing_data_as_zero | ✅ PASS |
+| scale_regions_basic | ✅ PASS |
+| multiple_bed | ✅ PASS |
+| region_extend_beyond_chr | ✅ PASS |
+| scale_regions_unscaled | ✅ PASS |
+| gtf_input | ✅ PASS |
+| metagene | ❌ FAIL (exon coordinate format difference) |
+
+### Recent Fixes (2025-12-01)
+- ✅ **BED score column `.` parsing**: Fixed to accept `.` as a valid missing value indicator in BED score column (previously errored as "must be a floating point number")
+- ✅ **Group label `genes` default**: When there's only one BED/GTF region file, the default group label is now `"genes"` to match Python's behavior (previously used the file name)
+- ✅ **Matrix loader comma handling**: Updated Python matrix loader to handle comma-separated exon coordinates in metagene format
+
+### Known Differences: Metagene Mode
+The metagene test fails because of output format differences:
+- **Python**: Writes exon coordinates as comma-separated values (e.g., `0,399,979` for start, `50,510,1000` for end)
+- **Rust**: Writes gene-level coordinates (e.g., `0` for start, `1000` for end)
+- The computed signal values are correct, but the coordinate format in the output differs
 
 ## Implementation Status: PRODUCTION-READY ✅
 

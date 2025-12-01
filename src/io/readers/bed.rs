@@ -93,7 +93,7 @@ impl BedRecord {
             .filter(|v| !v.is_empty());
         let score =
             if let Some(raw) = fields.get(4) {
-                if raw.is_empty() {
+                if raw.is_empty() || *raw == "." {
                     None
                 } else {
                     Some(raw.parse::<f32>().map_err(|_| {

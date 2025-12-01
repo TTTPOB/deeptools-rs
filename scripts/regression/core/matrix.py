@@ -107,8 +107,10 @@ def load_matrix(path: Path) -> Matrix:
                 raise ValueError(f"Malformed row in '{path}': {line!r}")
 
             chrom, start, end, name, raw_score, strand = fields[:6]
-            start_i = int(start)
-            end_i = int(end)
+            # Handle metagene format where start/end are comma-separated exon coordinates
+            # Just take the first value for comparison purposes
+            start_i = int(start.split(",")[0])
+            end_i = int(end.split(",")[-1])
             name = name or "."
             strand = strand or "."
 
