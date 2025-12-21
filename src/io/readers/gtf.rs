@@ -168,7 +168,9 @@ fn transcript_to_bed(transcript: Transcript) -> Result<BedRecord> {
         end: transcript.end,
         name: Some(transcript.id),
         score: None,
+        score_raw: None,
         strand: transcript.strand,
+        strand_raw: None,
         extra_fields,
     })
 }

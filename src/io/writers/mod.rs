@@ -335,14 +335,20 @@ fn write_matrix_row<W: Write>(writer: &mut W, row: &MatrixRow) -> Result<()> {
         buffer.extend_from_slice(name.as_bytes());
         buffer.push(b'\t');
 
-        if let Some(score) = row.record.score {
+        if let Some(raw) = row.record.score_raw.as_deref() {
+            buffer.extend_from_slice(raw.as_bytes());
+        } else if let Some(score) = row.record.score {
             write_matrix_value(&mut *buffer, score)?;
         } else {
             buffer.push(b'.');
         }
         buffer.push(b'\t');
 
-        buffer.push(row.record.strand.as_char() as u8);
+        if let Some(raw) = row.record.strand_raw.as_deref() {
+            buffer.extend_from_slice(raw.as_bytes());
+        } else {
+            buffer.push(row.record.strand.as_char() as u8);
+        }
 
         for sample_values in &row.values {
             for value in sample_values {
@@ -435,9 +441,15 @@ fn write_sorted_regions(path: &Path, matrix: &MatrixData) -> Result<()> {
         let name = row.record.name.as_deref().unwrap_or(".");
         let score = row
             .record
-            .score
-            .map(|score| format!("{score:.6}"))
+            .score_raw
+            .clone()
+            .or_else(|| row.record.score.map(|score| format!("{score:.6}")))
             .unwrap_or_else(|| ".".to_string());
+        let strand = row
+            .record
+            .strand_raw
+            .clone()
+            .unwrap_or_else(|| row.record.strand.as_char().to_string());
         let group = group_label_for_index(matrix, index).unwrap_or(".");
         writeln!(
             writer,
@@ -447,7 +459,7 @@ fn write_sorted_regions(path: &Path, matrix: &MatrixData) -> Result<()> {
             row.record.end,
             name,
             score,
-            row.record.strand.as_char(),
+            strand,
             group
         )?;
     }

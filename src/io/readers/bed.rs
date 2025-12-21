@@ -52,7 +52,9 @@ pub struct BedRecord {
     pub end: u32,
     pub name: Option<String>,
     pub score: Option<f32>,
+    pub score_raw: Option<String>,
     pub strand: Strand,
+    pub strand_raw: Option<String>,
     pub extra_fields: Vec<String>,
 }
 
@@ -91,25 +93,26 @@ impl BedRecord {
             .get(3)
             .map(|value| value.to_string())
             .filter(|v| !v.is_empty());
-        let score =
-            if let Some(raw) = fields.get(4) {
-                if raw.is_empty() || *raw == "." {
-                    None
-                } else {
-                    Some(raw.parse::<f32>().map_err(|_| {
-                        "BED score column must be a floating point number".to_string()
-                    })?)
-                }
+        let (score, score_raw) = if let Some(raw) = fields.get(4) {
+            if raw.is_empty() || *raw == "." {
+                (None, None)
+            } else if let Ok(parsed) = raw.parse::<f32>() {
+                (Some(parsed), None)
             } else {
-                None
-            };
-
-        let strand = if let Some(raw) = fields.get(5) {
-            Strand::from_symbol(raw).ok_or_else(|| {
-                "BED strand column must be one of '+', '-', '.', '?' or '*'".to_string()
-            })?
+                (None, Some(raw.to_string()))
+            }
         } else {
-            Strand::Unstranded
+            (None, None)
+        };
+
+        let (strand, strand_raw) = if let Some(raw) = fields.get(5) {
+            if let Some(parsed) = Strand::from_symbol(raw) {
+                (parsed, None)
+            } else {
+                (Strand::Unstranded, Some(raw.to_string()))
+            }
+        } else {
+            (Strand::Unstranded, None)
         };
 
         let extra_fields = if fields.len() > 6 {
@@ -124,7 +127,9 @@ impl BedRecord {
             end,
             name,
             score,
+            score_raw,
             strand,
+            strand_raw,
             extra_fields,
         })
     }
@@ -254,7 +259,9 @@ mod tests {
         assert_eq!(record.end, 20);
         assert_eq!(record.name.as_deref(), Some("name"));
         assert_eq!(record.score, Some(5.0));
+        assert!(record.score_raw.is_none());
         assert_eq!(record.strand, Strand::Positive);
+        assert!(record.strand_raw.is_none());
         assert!(record.extra_fields.is_empty());
     }
 
@@ -265,5 +272,15 @@ mod tests {
         let records: Vec<_> = reader.collect::<Result<_, _>>().expect("valid records");
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].chrom, "chr2");
+    }
+
+    #[test]
+    fn keeps_invalid_score_and_strand_as_raw_strings() {
+        let record =
+            BedRecord::parse("chr1\t10\t20\tname\tabc\tstrandx").expect("should parse");
+        assert!(record.score.is_none());
+        assert_eq!(record.score_raw.as_deref(), Some("abc"));
+        assert_eq!(record.strand, Strand::Unstranded);
+        assert_eq!(record.strand_raw.as_deref(), Some("strandx"));
     }
 }

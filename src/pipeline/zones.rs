@@ -1126,7 +1126,9 @@ mod tests {
             end,
             name: None,
             score: None,
+            score_raw: None,
             strand,
+            strand_raw: None,
             extra_fields: Vec::new(),
         }
     }
@@ -1253,7 +1255,9 @@ mod tests {
             end,
             name: None,
             score: None,
+            score_raw: None,
             strand,
+            strand_raw: None,
             extra_fields: vec![
                 start.to_string(),
                 end.to_string(),

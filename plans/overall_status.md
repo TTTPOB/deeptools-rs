@@ -177,7 +177,8 @@
   - reference-point (center, ±100 bp): Python 171.35s vs Rust 17.90s → **9.57× faster**.
   - scale-regions (body 200, ±100 bp, unscaled 50/50): Python 346.56s vs Rust 18.64s → **18.59× faster**.
 
-### Recent Fixes (2025-12-01)
+### Recent Fixes (2025-12-21)
+- ✅ **2025-12-21**: Made BED parsing tolerant of non-standard score/strand strings by preserving raw values and defaulting invalid strands to unstranded (processed as plus strand) instead of erroring.
 - ✅ **2025-12-05**: Added `Rust CI & Release` GitHub Actions workflow to build, package, and upload release artifacts; regression harness integration into CI remains pending.
 - ✅ **BED score column `.` parsing**: Fixed to accept `.` as a valid missing value indicator in BED score column (previously errored as "must be a floating point number")
 - ✅ **Group label `genes` default**: When there's only one BED/GTF region file, the default group label is now `"genes"` to match Python's behavior (previously used the file name)
