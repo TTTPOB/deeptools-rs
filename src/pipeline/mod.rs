@@ -2,8 +2,11 @@ pub use matrix::{MatrixData, MatrixHeader, MatrixRow};
 pub mod core;
 pub mod matrix;
 mod reference_point;
+mod run;
 mod scale_regions;
 pub mod zones;
+
+pub(crate) use run::run_pipeline;
 
 use crate::config::{Config, IoOptions, ModeConfig};
 use crate::io::writers;
