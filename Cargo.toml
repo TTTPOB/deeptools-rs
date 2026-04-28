@@ -16,3 +16,8 @@ thiserror = "1.0"
 tempfile = "3.10"
 itoa = "1.0"
 bio = "3.0.0"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
