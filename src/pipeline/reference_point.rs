@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 
-use crate::config::{GeneralOptions, GtfOptions, IoOptions, ReferencePointOptions, SortRegions};
+use crate::config::{GeneralOptions, GtfOptions, IoOptions, ReferencePointOptions};
 use crate::io::BedRecord;
 use crate::io::writers;
 use crate::pipeline::core::{
@@ -186,7 +186,7 @@ pub fn run(
         row_count,
         sample_count,
         total_bins,
-        matches!(general.sort_regions, SortRegions::Keep | SortRegions::No),
+        general.sort_regions,
         io,
     );
 

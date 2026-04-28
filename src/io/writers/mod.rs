@@ -9,7 +9,7 @@ use flate2::{Compression, GzBuilder};
 use itoa::Buffer;
 use tempfile::{NamedTempFile, TempPath};
 
-use crate::config::IoOptions;
+use crate::config::{IoOptions, SortRegions};
 use crate::pipeline::matrix::{MatrixData, MatrixHeader, MatrixRow};
 
 const STREAMING_CELL_THRESHOLD: usize = 100_000;
@@ -41,11 +41,13 @@ pub fn write_outputs(mut matrix: MatrixData, io: &IoOptions) -> Result<()> {
 }
 
 fn should_use_streaming(matrix: &MatrixData, io: &IoOptions) -> bool {
+    let sort_regions_str = &matrix.header.sort_regions;
+    let sort_ok = sort_regions_str == "keep" || sort_regions_str == "no";
     should_use_streaming_for_plan(
         matrix.rows.len(),
         matrix.sample_count,
         matrix.bin_count,
-        matrix.header.sort_regions == "keep",
+        if sort_ok { SortRegions::Keep } else { SortRegions::Descend },
         io,
     )
 }
@@ -54,14 +56,14 @@ pub fn should_use_streaming_for_plan(
     row_count: usize,
     sample_count: usize,
     bin_count: usize,
-    sort_is_keep: bool,
+    sort_regions: SortRegions,
     io: &IoOptions,
 ) -> bool {
     if io.matrix_values_output.is_some() || io.sorted_regions_output.is_some() {
         return false;
     }
 
-    if !sort_is_keep {
+    if !matches!(sort_regions, SortRegions::Keep | SortRegions::No) {
         return false;
     }
 
