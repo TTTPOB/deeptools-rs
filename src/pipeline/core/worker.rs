@@ -6,7 +6,8 @@ use crate::config::{AverageTypeBins, GeneralOptions};
 use crate::io::BedRecord;
 use crate::pipeline::matrix::MatrixRow;
 
-use super::{PipelineMode, RegionPlan, Sample, SignalBin};
+use super::traits::{PipelineMode, RegionPlan, SignalBin};
+use super::samples::Sample;
 use super::coalesce::CoalescedBatch;
 
 thread_local! {

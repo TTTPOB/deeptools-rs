@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::io::BedRecord;
 
-use super::WorkItem;
+use super::executor::WorkItem;
 
 // ── Query coalescing ──────────────────────────────────────────────────────
 
