@@ -1,8 +1,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io;
 use std::path::Path;
 
+use memmap2::{Mmap, MmapOptions};
 use thiserror::Error;
 use zune_inflate::DeflateDecoder;
 
@@ -59,7 +60,7 @@ struct CachedCirNode {
 }
 
 pub struct BigWigReader {
-    file: File,
+    mmap: Mmap,
     uncompress_buf_size: usize,
     chroms: Vec<ChromInfo>,
     chrom_id_by_name: Vec<(String, u32)>,
@@ -83,25 +84,24 @@ fn read_u32(s: &mut &[u8]) -> io::Result<u32> { Ok(read_le!(s, 4, u32)) }
 fn read_u64(s: &mut &[u8]) -> io::Result<u64> { Ok(read_le!(s, 8, u64)) }
 fn read_f32(s: &mut &[u8]) -> io::Result<f32> { Ok(read_le!(s, 4, f32)) }
 
-fn read_exact_at(file: &mut File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
-    file.seek(SeekFrom::Start(offset))?;
-    file.read_exact(buf)
-}
-
 impl BigWigReader {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, BigWigReadError> {
-        let mut file = File::open(path)?;
+        let file = File::open(path)?;
+        // SAFETY: The file is opened read-only and is not modified while the
+        // mmap exists. The mmap is kept alive by BigWigReader for the duration
+        // of its lifetime.
+        let mmap = unsafe { MmapOptions::new().map(&file)? };
+        // File can be closed; the mmap keeps the pages alive on Linux.
+        drop(file);
 
-        // BBI header (64 bytes)
-        let mut hdr = [0u8; 64];
-        file.read_exact(&mut hdr)?;
-        let mut s = &hdr[..];
+        // BBI header (64 bytes) — read from mmap
+        let mut s = &mmap[..64];
         let magic = read_u32(&mut s)?;
         if magic != BIGWIG_MAGIC {
             return Err(BigWigReadError::InvalidMagic(magic));
         }
         let _version = read_u16(&mut s)?;
-        let zoom_levels = read_u16(&mut s)?;
+        let _zoom_levels = read_u16(&mut s)?;
         let chrom_tree_offset = read_u64(&mut s)?;
         let _data_offset = read_u64(&mut s)?;
         let cir_tree_offset = read_u64(&mut s)?;
@@ -111,20 +111,16 @@ impl BigWigReader {
         let _total_summary_offset = read_u64(&mut s)?;
         let uncompress_buf_size = read_u32(&mut s)? as usize;
 
-        // Skip zoom headers
-        if zoom_levels > 0 {
-            file.seek(SeekFrom::Current(zoom_levels as i64 * 24))?;
-        }
-
-        // Parse chromosome B+ tree
+        // Parse chromosome B+ tree from mmap (no seek needed for zoom levels,
+        // since all subsequent reads use absolute offsets from the header).
         let (chroms, chrom_id_by_name) =
-            Self::parse_chrom_tree(&mut file, chrom_tree_offset)?;
+            Self::parse_chrom_tree(&mmap[..], chrom_tree_offset)?;
 
         // The CIR tree root node is at offset + 48
         let cir_tree_root = cir_tree_offset + 48;
 
         Ok(Self {
-            file,
+            mmap,
             uncompress_buf_size,
             chroms,
             chrom_id_by_name,
@@ -150,11 +146,10 @@ impl BigWigReader {
         let blocks = self.search_cir_tree(chrom_id, start, end)?;
 
         let mut values = Vec::new();
-        let mut comp_buf = vec![0u8; self.uncompress_buf_size * 2];
         let mut work_buf = vec![0u8; self.uncompress_buf_size];
 
         for block in &blocks {
-            let data = self.get_or_cache_block(block.offset, block.size, &mut comp_buf, &mut work_buf)?;
+            let data = self.get_or_cache_block(block.offset, block.size, &mut work_buf)?;
             if data.is_empty() { continue; }
             parse_block_values(&data, start, end, &mut values);
         }
@@ -178,7 +173,7 @@ impl BigWigReader {
             let node = if let Some(cached) = self.cir_node_cache.get(&node_offset) {
                 cached.clone()
             } else {
-                let parsed = Self::read_cir_node_raw(&mut self.file, node_offset)?;
+                let parsed = Self::read_cir_node_raw(&self.mmap[..], node_offset)?;
                 self.cir_node_cache.insert(node_offset, parsed.clone());
                 parsed
             };
@@ -205,16 +200,22 @@ impl BigWigReader {
         Ok(blocks)
     }
 
-    fn read_cir_node_raw(file: &mut File, offset: u64) -> io::Result<CachedCirNode> {
-        let mut hdr = [0u8; 4];
-        read_exact_at(file, offset, &mut hdr)?;
-        let is_leaf = hdr[0];
-        let count = u16::from_le_bytes([hdr[2], hdr[3]]) as usize;
+    fn read_cir_node_raw(mmap_data: &[u8], offset: u64) -> io::Result<CachedCirNode> {
+        let start = offset as usize;
+        // Need at least 4 bytes for the node header
+        if start + 4 > mmap_data.len() {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated CIR node header"));
+        }
+
+        let is_leaf = mmap_data[start];
+        let count = u16::from_le_bytes([mmap_data[start + 2], mmap_data[start + 3]]) as usize;
 
         let item_size = if is_leaf == 0 { 24 } else { 32 };
         let total = 4 + count * item_size;
-        let mut node_data = vec![0u8; total];
-        read_exact_at(file, offset, &mut node_data)?;
+        if start + total > mmap_data.len() {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated CIR node data"));
+        }
+        let node_data = &mmap_data[start..start + total];
 
         let mut items = Vec::with_capacity(count);
         for i in 0..count {
@@ -261,7 +262,6 @@ impl BigWigReader {
         &mut self,
         offset: u64,
         size: u64,
-        comp_buf: &mut Vec<u8>,
         work_buf: &mut Vec<u8>,
     ) -> io::Result<Vec<u8>> {
         let key = (offset, size);
@@ -269,7 +269,7 @@ impl BigWigReader {
             return Ok(data.clone());
         }
 
-        let raw = read_and_decompress(&mut self.file, offset, comp_buf, work_buf)?;
+        let raw = read_and_decompress(&self.mmap[..], offset, size, work_buf)?;
         let data = raw.to_vec();
 
         if !data.is_empty() {
@@ -283,28 +283,33 @@ impl BigWigReader {
     }
 
     fn parse_chrom_tree(
-        file: &mut File,
+        mmap_data: &[u8],
         offset: u64,
     ) -> Result<(Vec<ChromInfo>, Vec<(String, u32)>), BigWigReadError> {
+        let start = offset as usize;
+        if start + 32 > mmap_data.len() {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated chrom tree header").into());
+        }
         // Read tree header (32 bytes)
-        let mut tree_hdr = [0u8; 32];
-        read_exact_at(file, offset, &mut tree_hdr)?;
-        let mut s = &tree_hdr[..];
+        let mut s = &mmap_data[start..start + 32];
         let _magic = read_u32(&mut s)?;
         let _block_size = read_u32(&mut s)?;
         let key_size = read_u32(&mut s)?;
         let val_size = read_u32(&mut s)?;
 
         // Read root node
-        let root_offset = offset + 32;
-        let mut node_hdr = [0u8; 4];
-        read_exact_at(file, root_offset, &mut node_hdr)?;
-        let count = u16::from_le_bytes([node_hdr[2], node_hdr[3]]) as usize;
+        let root_offset = (offset + 32) as usize;
+        if root_offset + 4 > mmap_data.len() {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated chrom tree root node header").into());
+        }
+        let count = u16::from_le_bytes([mmap_data[root_offset + 2], mmap_data[root_offset + 3]]) as usize;
 
         let item_size = key_size as usize + val_size as usize;
         let root_size = 4 + count * item_size;
-        let mut root_data = vec![0u8; root_size];
-        read_exact_at(file, root_offset, &mut root_data)?;
+        if root_offset + root_size > mmap_data.len() {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated chrom tree root node data").into());
+        }
+        let root_data = &mmap_data[root_offset..root_offset + root_size];
 
         let mut chroms = Vec::new();
         let mut id_by_name = Vec::new();
@@ -337,20 +342,25 @@ impl BigWigReader {
 }
 
 fn read_and_decompress<'a>(
-    file: &mut File,
+    mmap_data: &'a [u8],
     offset: u64,
-    comp_buf: &'a mut Vec<u8>,
+    size: u64,
     work_buf: &'a mut Vec<u8>,
 ) -> io::Result<&'a [u8]> {
-    file.seek(SeekFrom::Start(offset))?;
-    let n = file.read(comp_buf)?;
-    if n < 2 {
+    let start = offset as usize;
+    let end = start + size as usize;
+    if end > mmap_data.len() || start >= mmap_data.len() {
+        return Ok(&[]);
+    }
+    let block = &mmap_data[start..end];
+
+    if block.is_empty() {
         return Ok(&[]);
     }
 
-    if comp_buf[0] == 0x78 {
+    if block[0] == 0x78 {
         // zlib compressed
-        let decoded = DeflateDecoder::new(&comp_buf[..n])
+        let decoded = DeflateDecoder::new(block)
             .decode_zlib()
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
         let len = decoded.len();
@@ -360,7 +370,7 @@ fn read_and_decompress<'a>(
         work_buf[..len].copy_from_slice(&decoded);
         Ok(&work_buf[..len])
     } else {
-        Ok(&comp_buf[..n])
+        Ok(block)
     }
 }
 
