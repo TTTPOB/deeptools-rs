@@ -953,6 +953,29 @@ fn create_coalesced_batches(work_items: Vec<WorkItem>, coalesce_gap: i64) -> Vec
     batches
 }
 
+thread_local! {
+    static COVERAGE_POOL: std::cell::RefCell<Vec<Vec<f32>>> =
+        std::cell::RefCell::new(Vec::new());
+}
+
+fn take_coverage_buffers(sample_count: usize, window_len: usize, default_fill: f32) -> Vec<Vec<f32>> {
+    COVERAGE_POOL.with(|pool| {
+        let mut bufs = pool.borrow_mut();
+        bufs.resize_with(sample_count, Vec::new);
+        for buf in bufs.iter_mut() {
+            buf.clear();
+            buf.resize(window_len, default_fill);
+        }
+        std::mem::take(&mut *bufs)
+    })
+}
+
+fn return_coverage_buffers(bufs: Vec<Vec<f32>>) {
+    COVERAGE_POOL.with(|pool| {
+        *pool.borrow_mut() = bufs;
+    });
+}
+
 /// Process a single coalesced batch.
 ///
 /// Performs one bigWig read per sample for the batch's merged query window,
@@ -1004,12 +1027,11 @@ fn process_batch<M: PipelineMode>(
     let chrom = &batch.items[0].2.chrom;
 
     // ── ONE bigWig read per sample for the entire merged window ────────
-    let mut sample_coverages: Vec<Vec<f32>> = Vec::with_capacity(sample_count);
-    for sample in samples.iter_mut() {
+    let mut sample_coverages = take_coverage_buffers(sample_count, window_len, default_fill);
+    for (si, sample) in samples.iter_mut().enumerate() {
         let chrom_length = match sample.chrom_length(chrom) {
             Some(l) => l,
             None => {
-                sample_coverages.push(vec![default_fill; window_len]);
                 continue;
             }
         };
@@ -1018,7 +1040,6 @@ fn process_batch<M: PipelineMode>(
         let fetch_end = clamp_coordinate(batch.query_end, chrom_length);
 
         if fetch_start >= fetch_end {
-            sample_coverages.push(vec![default_fill; window_len]);
             continue;
         }
 
@@ -1034,7 +1055,7 @@ fn process_batch<M: PipelineMode>(
                 )
             })?;
 
-        let mut cov = vec![default_fill; window_len];
+        let cov = &mut sample_coverages[si];
         for v in intervals {
             let rs = i64::from(v.start)
                 .saturating_sub(batch.query_start)
@@ -1047,7 +1068,6 @@ fn process_batch<M: PipelineMode>(
                 cov[rs as usize..re as usize].fill(v.value);
             }
         }
-        sample_coverages.push(cov);
     }
 
     // ── Extract per-region bins from the pre-read coverage buffers ─────
@@ -1119,6 +1139,7 @@ fn process_batch<M: PipelineMode>(
         results.push((orig_idx, group_index, row));
     }
 
+    return_coverage_buffers(sample_coverages);
     Ok(results)
 }
 
