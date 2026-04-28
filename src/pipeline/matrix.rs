@@ -479,6 +479,40 @@ fn compare_ascending(left: f32, right: f32) -> Ordering {
     }
 }
 
+#[cfg(test)]
+impl MatrixHeader {
+    pub fn default_for_test(group_counts: Vec<usize>) -> Self {
+        let mut boundaries = vec![0usize];
+        for &count in &group_counts {
+            boundaries.push(boundaries.last().unwrap() + count);
+        }
+        Self {
+            verbose: false,
+            scale: 1.0,
+            skip_zeros: false,
+            nan_after_end: false,
+            sort_using: "mean".into(),
+            unscaled_5_prime: vec![0],
+            body: vec![0],
+            sample_labels: vec!["test".into()],
+            downstream: vec![0],
+            unscaled_3_prime: vec![0],
+            group_labels: (0..group_counts.len()).map(|i| format!("group{i}")).collect(),
+            bin_size: vec![10],
+            upstream: vec![0],
+            group_boundaries: boundaries,
+            sample_boundaries: vec![0, 1],
+            missing_data_as_zero: false,
+            ref_point: vec![None],
+            min_threshold: None,
+            sort_regions: "keep".into(),
+            proc_number: 1,
+            bin_avg_type: "mean".into(),
+            max_threshold: None,
+        }
+    }
+}
+
 fn row_is_all_zero(row: &MatrixRow) -> bool {
     for &value in &row.values {
         if value.is_nan() {

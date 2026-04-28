@@ -441,7 +441,7 @@ pub trait PipelineMode: Sync {
 }
 
 mod collector;
-pub use collector::{RowCollector, InMemoryCollector, FileCollector};
+pub use collector::{RowCollector, InMemoryCollector, FileCollector, GroupBucketCollector};
 
 mod coalesce;
 use coalesce::{
