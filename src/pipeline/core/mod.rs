@@ -169,7 +169,7 @@ enum RegionFormat {
 pub struct RegionTask {
     pub index: usize,
     pub group_index: usize,
-    pub record: BedRecord,
+    pub record: Arc<BedRecord>,
 }
 
 pub fn load_groups(paths: &[PathBuf], gtf: &GtfOptions) -> Result<Vec<Group>> {
@@ -816,7 +816,7 @@ impl RowCollector for FileCollector {
 struct WorkItem {
     orig_idx: usize,
     group_index: usize,
-    record: BedRecord,
+    record: Arc<BedRecord>,
     query_start: i64,
     query_end: i64,
 }
@@ -871,7 +871,7 @@ fn estimate_coalesce_gap(work_items: &[WorkItem]) -> i64 {
 /// `WorkItem`s, and `work_items` is consumed.
 struct CoalescedBatch {
     /// Items in original sorted order: (orig_idx, group_index, record).
-    items: Vec<(usize, usize, BedRecord)>,
+    items: Vec<(usize, usize, Arc<BedRecord>)>,
     /// Start of the merged query window (minimum of all item windows).
     query_start: i64,
     /// End of the merged query window (maximum of all item windows).
@@ -884,7 +884,7 @@ struct CoalescedBatch {
 fn create_batches(work_items: Vec<WorkItem>, coalesce_gap: i64) -> Vec<CoalescedBatch> {
     let mut batches = Vec::new();
     let mut current_chrom: Arc<str> = Arc::from("");
-    let mut current_items: Vec<(usize, usize, BedRecord)> = Vec::new();
+    let mut current_items: Vec<(usize, usize, Arc<BedRecord>)> = Vec::new();
     let mut batch_start: i64 = 0;
     let mut batch_end: i64 = 0;
 
@@ -956,7 +956,7 @@ fn process_batch<M: PipelineMode>(
             let maybe_values =
                 compute_row(samples, &record, &plan, general, nan_after_end)?;
             let row = maybe_values
-                .map(|(flat, sc, bc)| mode.postprocess_row(record, flat, sc, bc, metadata));
+                .map(|(flat, sc, bc)| mode.postprocess_row(Arc::unwrap_or_clone(record), flat, sc, bc, metadata));
             results.push((orig_idx, group_index, row));
         }
         return Ok(results);
@@ -1034,7 +1034,7 @@ fn process_batch<M: PipelineMode>(
             let maybe_values =
                 compute_row(samples, &record, &plan, general, nan_after_end)?;
             let row = maybe_values
-                .map(|(flat, sc, bc)| mode.postprocess_row(record, flat, sc, bc, metadata));
+                .map(|(flat, sc, bc)| mode.postprocess_row(Arc::unwrap_or_clone(record), flat, sc, bc, metadata));
             results.push((orig_idx, group_index, row));
             continue;
         }
@@ -1079,7 +1079,7 @@ fn process_batch<M: PipelineMode>(
             None
         } else {
             Some(mode.postprocess_row(
-                record,
+                Arc::unwrap_or_clone(record),
                 all_values,
                 sample_count,
                 bin_count,

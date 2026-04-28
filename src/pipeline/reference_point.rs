@@ -175,7 +175,7 @@ pub fn run(
             tasks.push(RegionTask {
                 index,
                 group_index,
-                record: record.clone(),
+                record: Arc::new(record.clone()),
             });
         }
     }
