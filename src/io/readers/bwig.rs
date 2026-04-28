@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use thiserror::Error;
-use zune_inflate::DeflateDecoder;
+use flate2::Decompress;
 
 const BIGWIG_MAGIC: u32 = 0x888F_FC26;
 
@@ -451,10 +451,13 @@ fn read_and_decompress<'a>(
     }
 
     if block[0] == 0x78 {
-        // zlib compressed
-        let decoded = DeflateDecoder::new(block)
-            .decode_zlib()
+        // zlib compressed — use zlib-rs via flate2
+        let mut decoder = Decompress::new(true); // true = zlib wrapper
+        let mut decoded = Vec::with_capacity(buf_len * 4);
+        decoder
+            .decompress_vec(block, &mut decoded, flate2::FlushDecompress::Finish)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+
         let len = decoded.len();
         if len > work_buf.len() {
             work_buf.resize(len, 0);
