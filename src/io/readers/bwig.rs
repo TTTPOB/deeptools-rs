@@ -296,6 +296,7 @@ pub struct BigWigReader {
     shared: Arc<SharedBigWigReader>,
     cir_node_cache: HashMap<u64, Arc<CachedCirNode>>,
     block_cache: HashMap<(u64, u64), Arc<[u8]>>,
+    work_buf: Vec<u8>,
 }
 
 impl BigWigReader {
@@ -309,10 +310,12 @@ impl BigWigReader {
     /// already-opened [`SharedBigWigReader`]. Each worker gets its own
     /// CIR-node and block caches.
     pub fn from_shared(shared: Arc<SharedBigWigReader>) -> Self {
+        let uncompress_buf_size = shared.uncompress_buf_size;
         Self {
             shared,
             cir_node_cache: HashMap::new(),
             block_cache: HashMap::new(),
+            work_buf: Vec::with_capacity(uncompress_buf_size),
         }
     }
 
@@ -335,10 +338,9 @@ impl BigWigReader {
         let blocks = self.search_cir_tree(chrom_id, start, end)?;
 
         let mut values = Vec::new();
-        let mut work_buf = vec![0u8; self.shared.uncompress_buf_size];
 
         for block in &blocks {
-            let data = self.get_or_cache_block(block.offset, block.size, &mut work_buf)?;
+            let data = self.get_or_cache_block(block.offset, block.size)?;
             if data.is_empty() {
                 continue;
             }
@@ -406,14 +408,13 @@ impl BigWigReader {
         &mut self,
         offset: u64,
         size: u64,
-        work_buf: &mut Vec<u8>,
     ) -> io::Result<Arc<[u8]>> {
         let key = (offset, size);
         if let Some(data) = self.block_cache.get(&key) {
             return Ok(Arc::clone(data));
         }
 
-        let raw = read_and_decompress(&self.shared.file, offset, size, work_buf)?;
+        let raw = read_and_decompress(&self.shared.file, offset, size, &mut self.work_buf)?;
         let data: Arc<[u8]> = Arc::from(raw.to_vec().into_boxed_slice());
 
         if !data.is_empty() {
