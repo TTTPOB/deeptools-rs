@@ -306,7 +306,14 @@ impl MatrixData {
             .map(|row| compute_sort_metric(row, sort_using, sample_list))
             .collect();
 
-        let mut reordered = self.rows.clone();
+        // Move rows out of self and wrap in Option so we can take() individual
+        // entries without cloning any MatrixRow (avoids duplicating ~400 MB for
+        // realistic inputs).
+        let old_rows = std::mem::take(&mut self.rows);
+        let mut takeable: Vec<Option<MatrixRow>> = old_rows.into_iter().map(Some).collect();
+        let old_len = takeable.len();
+        let mut reordered = Vec::with_capacity(old_len);
+
         for window in self.header.group_boundaries.windows(2) {
             let start = window[0];
             let end = window[1];
@@ -320,8 +327,10 @@ impl MatrixData {
                 indices.reverse();
             }
 
-            for (offset, row_index) in indices.into_iter().enumerate() {
-                reordered[start + offset] = self.rows[row_index].clone();
+            for index in indices {
+                if let Some(row) = takeable[index].take() {
+                    reordered.push(row);
+                }
             }
         }
 
