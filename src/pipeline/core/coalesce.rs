@@ -18,7 +18,7 @@ pub(super) enum CoalesceStrategy {
 ///
 /// Returns a threshold in `[100, 2000]` based on the 75th percentile of
 /// observed gaps.  Falls back to 500 bp when there are too few gaps (< 10).
-pub(super) fn estimate_coalesce_gap(work_items: &[WorkItem]) -> i64 {
+pub(super) fn estimate_coalesce_gap(work_items: &[WorkItem], verbose: bool) -> i64 {
     if work_items.len() < 2 {
         return 500;
     }
@@ -34,10 +34,12 @@ pub(super) fn estimate_coalesce_gap(work_items: &[WorkItem]) -> i64 {
     }
 
     if gaps.len() < 10 {
-        eprintln!(
-            "[coalesce-gap] {} gaps (< 10), using default threshold: 500",
-            gaps.len()
-        );
+        if verbose {
+            eprintln!(
+                "[coalesce-gap] {} gaps (< 10), using default threshold: 500",
+                gaps.len()
+            );
+        }
         return 500;
     }
 
@@ -48,10 +50,12 @@ pub(super) fn estimate_coalesce_gap(work_items: &[WorkItem]) -> i64 {
     let p75 = gaps[(n * 3) / 4];
     let threshold = p75.clamp(100, 2000);
 
-    eprintln!(
-        "[coalesce-gap] n_gaps={} p50={} p75={} threshold={}",
-        n, p50, p75, threshold
-    );
+    if verbose {
+        eprintln!(
+            "[coalesce-gap] n_gaps={} p50={} p75={} threshold={}",
+            n, p50, p75, threshold
+        );
+    }
     threshold
 }
 

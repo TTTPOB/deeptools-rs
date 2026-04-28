@@ -571,23 +571,25 @@ where
     );
 
     // ── Phase 4: Create coalesced batches ───────────────────────────────
-    let coalesce_gap = estimate_coalesce_gap(&work_items);
+    let coalesce_gap = estimate_coalesce_gap(&work_items, general.verbose);
     let coalesce_strategy = if coalesce_gap >= COALESCE_CLAMP_MAX {
         CoalesceStrategy::NoCoalesce
     } else {
         CoalesceStrategy::Coalesce(coalesce_gap)
     };
     let batches = create_batches(work_items, &coalesce_strategy);
-    eprintln!(
-        "[coalesce-gap] strategy={:?} batches={} items={} ratio={:.2}",
-        match &coalesce_strategy {
-            CoalesceStrategy::Coalesce(g) => format!("coalesce({g})"),
-            CoalesceStrategy::NoCoalesce => "no-coalesce".into(),
-        },
-        batches.len(),
-        task_count,
-        batches.len() as f64 / task_count as f64
-    );
+    if general.verbose {
+        eprintln!(
+            "[coalesce-gap] strategy={:?} batches={} items={} ratio={:.2}",
+            match &coalesce_strategy {
+                CoalesceStrategy::Coalesce(g) => format!("coalesce({g})"),
+                CoalesceStrategy::NoCoalesce => "no-coalesce".into(),
+            },
+            batches.len(),
+            task_count,
+            batches.len() as f64 / task_count as f64
+        );
+    }
 
     // ── Phase 5: Build thread pool ──────────────────────────────────────
     let pool = ThreadPoolBuilder::new()
