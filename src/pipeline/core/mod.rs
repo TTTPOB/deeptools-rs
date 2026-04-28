@@ -1235,8 +1235,8 @@ where
                     let (grp, row_opt) = entry;
                     if let Some(row) = row_opt {
                         collector.on_row(row)?;
+                        group_counts[grp] += 1;
                     }
-                    group_counts[grp] += 1;
                     next_idx += 1;
                 }
             }
