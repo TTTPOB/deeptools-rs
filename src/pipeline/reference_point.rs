@@ -95,7 +95,9 @@ impl PipelineMode for ReferencePointMode {
     fn postprocess_row(
         &self,
         record: BedRecord,
-        values: Vec<Vec<f32>>,
+        values: Vec<f32>,
+        sample_count: usize,
+        bin_count: usize,
         _metadata: &Self::Metadata,
     ) -> MatrixRow {
         // Extract exon coordinates for metagene mode output
@@ -107,6 +109,8 @@ impl PipelineMode for ReferencePointMode {
         MatrixRow {
             record,
             values,
+            sample_count,
+            bin_count,
             exon_coords,
         }
     }

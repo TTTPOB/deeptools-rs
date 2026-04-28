@@ -115,12 +115,15 @@ impl PipelineMode for ScaleRegionsMode {
     fn postprocess_row(
         &self,
         record: BedRecord,
-        mut values: Vec<Vec<f32>>,
+        mut values: Vec<f32>,
+        sample_count: usize,
+        bin_count: usize,
         _metadata: &Self::Metadata,
     ) -> MatrixRow {
         if matches!(record.strand, Strand::Negative) {
-            for sample_values in &mut values {
-                sample_values.reverse();
+            for sample_idx in 0..sample_count {
+                let start = sample_idx * bin_count;
+                values[start..start + bin_count].reverse();
             }
         }
         // Extract exon coordinates for metagene mode output
@@ -132,6 +135,8 @@ impl PipelineMode for ScaleRegionsMode {
         MatrixRow {
             record,
             values,
+            sample_count,
+            bin_count,
             exon_coords,
         }
     }

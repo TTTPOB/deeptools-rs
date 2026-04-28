@@ -350,11 +350,9 @@ fn write_matrix_row<W: Write>(writer: &mut W, row: &MatrixRow) -> Result<()> {
             buffer.push(row.record.strand.as_char() as u8);
         }
 
-        for sample_values in &row.values {
-            for value in sample_values {
-                buffer.push(b'\t');
-                write_matrix_value(&mut *buffer, *value)?;
-            }
+        for value in &row.values {
+            buffer.push(b'\t');
+            write_matrix_value(&mut *buffer, *value)?;
         }
 
         buffer.push(b'\n');
@@ -417,15 +415,13 @@ fn write_matrix_values_header<W: Write>(writer: &mut W, matrix: &MatrixData) -> 
 
 fn write_plain_row<W: Write>(writer: &mut W, row: &MatrixRow) -> Result<()> {
     let mut first = true;
-    for sample_values in &row.values {
-        for value in sample_values {
-            if !first {
-                writer.write_all(b"\t")?;
-            } else {
-                first = false;
-            }
-            writer.write_all(format_plain_value(*value).as_bytes())?;
+    for value in &row.values {
+        if !first {
+            writer.write_all(b"\t")?;
+        } else {
+            first = false;
         }
+        writer.write_all(format_plain_value(*value).as_bytes())?;
     }
     writer.write_all(b"\n")?;
     Ok(())

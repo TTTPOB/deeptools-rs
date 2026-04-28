@@ -196,28 +196,30 @@ pub fn compute_row<P: RegionPlan>(
     plan: &P,
     general: &GeneralOptions,
     nan_after_end: bool,
-) -> Result<Option<Vec<Vec<f32>>>> {
-    let mut per_sample = Vec::with_capacity(samples.len());
+) -> Result<Option<(Vec<f32>, usize, usize)>> {
+    let sample_count = samples.len();
+    let bin_count = plan.bins().len();
+    let mut all_values = Vec::with_capacity(sample_count * bin_count);
     for sample in samples.iter_mut() {
         let values = compute_sample_bins(sample, record, plan, general, nan_after_end)?;
-        per_sample.push(values);
+        all_values.extend(values);
     }
 
-    if should_skip_row(&per_sample, general) {
+    if should_skip_row_flat(&all_values, general) {
         return Ok(None);
     }
 
-    Ok(Some(per_sample))
+    Ok(Some((all_values, sample_count, bin_count)))
 }
 
-fn should_skip_row(values: &[Vec<f32>], general: &GeneralOptions) -> bool {
+fn should_skip_row_flat(values: &[f32], general: &GeneralOptions) -> bool {
     if general.skip_zeros {
         let mut all_zero = true;
-        for value in values.iter().flat_map(|sample| sample.iter()) {
+        for &value in values {
             if value.is_nan() {
                 continue;
             }
-            if *value != 0.0 {
+            if value != 0.0 {
                 all_zero = false;
                 break;
             }
@@ -230,7 +232,6 @@ fn should_skip_row(values: &[Vec<f32>], general: &GeneralOptions) -> bool {
     if let Some(min_threshold) = general.min_threshold {
         if values
             .iter()
-            .flat_map(|sample| sample.iter())
             .filter(|value| !value.is_nan())
             .any(|value| (*value as f64) <= min_threshold)
         {
@@ -241,7 +242,6 @@ fn should_skip_row(values: &[Vec<f32>], general: &GeneralOptions) -> bool {
     if let Some(max_threshold) = general.max_threshold {
         if values
             .iter()
-            .flat_map(|sample| sample.iter())
             .filter(|value| !value.is_nan())
             .any(|value| (*value as f64) >= max_threshold)
         {
@@ -714,7 +714,9 @@ pub trait PipelineMode: Sync {
     fn postprocess_row(
         &self,
         record: BedRecord,
-        values: Vec<Vec<f32>>,
+        values: Vec<f32>,
+        sample_count: usize,
+        bin_count: usize,
         metadata: &Self::Metadata,
     ) -> MatrixRow;
     fn build_header(
@@ -953,7 +955,7 @@ where
                         mode.nan_after_end(metadata_ref),
                     )?;
                     let row = maybe_values
-                        .map(|values| mode.postprocess_row(record, values, metadata_ref));
+                        .map(|(flat_values, sample_count, bin_count)| mode.postprocess_row(record, flat_values, sample_count, bin_count, metadata_ref));
 
                     sender
                         .send(RegionResult {

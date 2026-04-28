@@ -198,20 +198,19 @@ impl<'a> MatrixHeaderBuilder<'a> {
 #[derive(Debug, Clone)]
 pub struct MatrixRow {
     pub record: BedRecord,
-    /// Matrix values organised as `sample -> bin`.
-    pub values: Vec<Vec<f32>>,
+    /// Flattened values in sample-major order: sample 0 bins, sample 1 bins, ...
+    pub values: Vec<f32>,
+    pub sample_count: usize,
+    pub bin_count: usize,
     /// When metagene mode is used, stores the exon coordinates as (start, end) pairs
     /// for writing comma-separated coordinates in the output.
     pub exon_coords: Option<Vec<(u32, u32)>>,
 }
 
 impl MatrixRow {
-    /// Returns a flattened view of the row values in sample-major order.
+    /// Returns a clone of the flat values in sample-major order.
     pub fn flattened_values(&self) -> Vec<f32> {
-        self.values
-            .iter()
-            .flat_map(|sample| sample.iter().copied())
-            .collect()
+        self.values.clone()
     }
 }
 
@@ -452,19 +451,20 @@ fn compute_sort_metric(
 }
 
 fn collect_values(row: &MatrixRow, sample_list: Option<&[usize]>) -> Vec<f32> {
+    let bin_count = row.bin_count;
     let mut values = Vec::new();
     match sample_list {
         Some(indices) => {
             for &sample_index in indices {
-                if let Some(sample_values) = row.values.get(sample_index) {
-                    values.extend(sample_values.iter().copied().filter(|v| !v.is_nan()));
+                let start = sample_index * bin_count;
+                if start < row.values.len() {
+                    let end = (start + bin_count).min(row.values.len());
+                    values.extend(row.values[start..end].iter().copied().filter(|v| !v.is_nan()));
                 }
             }
         }
         None => {
-            for sample_values in &row.values {
-                values.extend(sample_values.iter().copied().filter(|v| !v.is_nan()));
-            }
+            values.extend(row.values.iter().copied().filter(|v| !v.is_nan()));
         }
     }
     values
@@ -480,14 +480,12 @@ fn compare_ascending(left: f32, right: f32) -> Ordering {
 }
 
 fn row_is_all_zero(row: &MatrixRow) -> bool {
-    for sample_values in &row.values {
-        for value in sample_values {
-            if value.is_nan() {
-                continue;
-            }
-            if *value != 0.0 {
-                return false;
-            }
+    for &value in &row.values {
+        if value.is_nan() {
+            continue;
+        }
+        if value != 0.0 {
+            return false;
         }
     }
     true
