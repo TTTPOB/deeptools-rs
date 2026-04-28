@@ -1,10 +1,9 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, mpsc};
-use std::thread;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
 use rayon::ThreadPoolBuilder;
@@ -731,13 +730,6 @@ pub trait PipelineMode: Sync {
     ) -> MatrixHeader;
 }
 
-#[derive(Debug)]
-pub struct RegionResult {
-    pub index: usize,
-    pub group_index: usize,
-    pub row: Option<MatrixRow>,
-}
-
 pub trait RowCollector: Send {
     type Output: Send;
 
@@ -801,90 +793,13 @@ impl RowCollector for FileCollector {
     }
 }
 
-pub fn spawn_row_aggregator<C, F>(
-    rx: mpsc::Receiver<RegionResult>,
-    collector: C,
-    group_count: usize,
-    task_count: usize,
-    header_builder: F,
-) -> Result<thread::JoinHandle<Result<C::Output>>>
-where
-    C: RowCollector + 'static,
-    F: FnOnce(Vec<usize>) -> Result<MatrixHeader> + Send + 'static,
-{
-    thread::Builder::new()
-        .name("matrix-aggregator".into())
-        .spawn(move || consume_row_results(rx, collector, group_count, task_count, header_builder))
-        .map_err(|err| anyhow!("Failed to spawn matrix streaming thread: {err}"))
-}
-
-fn consume_row_results<C, F>(
-    rx: mpsc::Receiver<RegionResult>,
-    mut collector: C,
-    group_count: usize,
-    task_count: usize,
-    header_builder: F,
-) -> Result<C::Output>
-where
-    C: RowCollector,
-    F: FnOnce(Vec<usize>) -> Result<MatrixHeader>,
-{
-    let mut group_counts = vec![0usize; group_count];
-    let mut buffer = BTreeMap::new();
-    let mut next_index = 0usize;
-
-    while let Ok(result) = rx.recv() {
-        buffer.insert(result.index, result);
-        flush_ready_entries(
-            &mut buffer,
-            &mut collector,
-            &mut group_counts,
-            &mut next_index,
-        )?;
-    }
-
-    flush_ready_entries(
-        &mut buffer,
-        &mut collector,
-        &mut group_counts,
-        &mut next_index,
-    )?;
-
-    if next_index != task_count {
-        return Err(anyhow!(
-            "Streamed matrix received {} of {} expected rows",
-            next_index,
-            task_count
-        ));
-    }
-
-    let header = header_builder(group_counts)?;
-    collector.finalize(header)
-}
-
-fn flush_ready_entries<C: RowCollector>(
-    buffer: &mut BTreeMap<usize, RegionResult>,
-    collector: &mut C,
-    group_counts: &mut [usize],
-    next_index: &mut usize,
-) -> Result<()> {
-    loop {
-        let key = *next_index;
-        let Some(entry) = buffer.remove(&key) else {
-            break;
-        };
-
-        if let Some(row) = entry.row {
-            collector.on_row(row)?;
-            if let Some(count) = group_counts.get_mut(entry.group_index) {
-                *count += 1;
-            }
-        }
-
-        *next_index += 1;
-    }
-
-    Ok(())
+/// Internal work item carrying the original index and I/O sort key.
+struct WorkItem {
+    orig_idx: usize,
+    group_index: usize,
+    record: BedRecord,
+    query_start: i64,
+    query_end: i64,
 }
 
 pub fn execute_mode<M, C, F>(
@@ -904,17 +819,38 @@ where
     F: FnOnce(Vec<usize>) -> Result<MatrixHeader> + Send + 'static,
 {
     let task_count = tasks.len();
-    let (tx, rx) = mpsc::channel();
-    let aggregator_handle =
-        spawn_row_aggregator(rx, collector, group_count, task_count, header_builder)?;
 
+    // ── Phase 1: Pre-compute sort keys for I/O locality ──────────────────
+    let mut work_items: Vec<WorkItem> = tasks
+        .into_iter()
+        .map(|task| {
+            let plan = mode.plan_for(&task.record, metadata.as_ref());
+            WorkItem {
+                orig_idx: task.index,
+                group_index: task.group_index,
+                record: task.record,
+                query_start: plan.window_start(),
+                query_end: plan.window_end(),
+            }
+        })
+        .collect();
+
+    // ── Phase 2: Sort by (chrom, window_start, window_end) ────────────────
+    work_items.sort_by(|a, b| {
+        a.record
+            .chrom
+            .cmp(&b.record.chrom)
+            .then(a.query_start.cmp(&b.query_start))
+            .then(a.query_end.cmp(&b.query_end))
+    });
+
+    // Empty input: build an empty header and return.
     if task_count == 0 {
-        drop(tx);
-        return aggregator_handle
-            .join()
-            .map_err(|_| anyhow!("Matrix aggregation thread panicked"))?;
+        let header = header_builder(vec![0; group_count])?;
+        return collector.finalize(header);
     }
 
+    // ── Phase 3: Parallel processing (sorted order) ──────────────────────
     let pool = ThreadPoolBuilder::new()
         .num_threads(thread_count)
         .build()
@@ -922,64 +858,64 @@ where
 
     let sample_paths_for_workers = Arc::clone(&sample_paths);
     let metadata_for_workers = Arc::clone(&metadata);
-    let tx_template = tx.clone();
 
-    let compute_result = pool.install(|| {
-        tasks
+    let computed: Vec<Result<(usize, usize, Option<MatrixRow>)>> = pool.install(|| {
+        work_items
             .into_par_iter()
             .map_init(
-                move || {
-                    (
-                        WorkerSamples::new(Arc::clone(&sample_paths_for_workers)),
-                        tx_template.clone(),
-                        Arc::clone(&metadata_for_workers),
-                    )
-                },
-                |state, task| {
-                    let (worker_samples, sender, metadata) = state;
-                    let metadata_ref = metadata.as_ref();
-
-                    let RegionTask {
-                        index,
-                        group_index,
-                        record,
-                    } = task;
-
+                move || WorkerSamples::new(Arc::clone(&sample_paths_for_workers)),
+                |worker_samples, item| {
+                    let metadata_ref = metadata_for_workers.as_ref();
                     let samples = worker_samples.samples()?;
-                    let plan = mode.plan_for(&record, metadata_ref);
+                    let plan = mode.plan_for(&item.record, metadata_ref);
                     let maybe_values = compute_row(
                         samples.as_mut_slice(),
-                        &record,
+                        &item.record,
                         &plan,
                         general,
                         mode.nan_after_end(metadata_ref),
                     )?;
-                    let row = maybe_values
-                        .map(|(flat_values, sample_count, bin_count)| mode.postprocess_row(record, flat_values, sample_count, bin_count, metadata_ref));
-
-                    sender
-                        .send(RegionResult {
-                            index,
-                            group_index,
-                            row,
-                        })
-                        .map_err(|err| anyhow!("Failed to stream computed row: {err}"))?;
-
-                    Ok::<(), anyhow::Error>(())
+                    let row = maybe_values.map(|(flat_values, sample_count, bin_count)| {
+                        mode.postprocess_row(
+                            item.record,
+                            flat_values,
+                            sample_count,
+                            bin_count,
+                            metadata_ref,
+                        )
+                    });
+                    Ok::<(usize, usize, Option<MatrixRow>), anyhow::Error>((
+                        item.orig_idx,
+                        item.group_index,
+                        row,
+                    ))
                 },
             )
-            .try_reduce(|| (), |_, _| Ok::<(), anyhow::Error>(()))
+            .collect()
     });
 
-    drop(tx);
+    // ── Phase 4: Scatter results by orig_idx ──────────────────────────────
+    let mut result_slots: Vec<(usize, Option<MatrixRow>)> = Vec::with_capacity(task_count);
+    result_slots.resize_with(task_count, || (0, None));
 
-    let aggregation = aggregator_handle
-        .join()
-        .map_err(|_| anyhow!("Matrix aggregation thread panicked"))??;
+    for result in computed {
+        let (orig_idx, group_index, row) = result?;
+        result_slots[orig_idx] = (group_index, row);
+    }
 
-    compute_result?;
+    // ── Phase 5: Write results in original input order ────────────────────
+    let mut collector = collector;
+    let mut group_counts = vec![0usize; group_count];
+    for (group_index, row) in result_slots.into_iter() {
+        if let Some(row) = row {
+            collector.on_row(row)?;
+            group_counts[group_index] += 1;
+        }
+    }
 
-    Ok(aggregation)
+    // ── Phase 6: Finalize ─────────────────────────────────────────────────
+    let header = header_builder(group_counts)?;
+    collector.finalize(header)
 }
 
 #[cfg(test)]
