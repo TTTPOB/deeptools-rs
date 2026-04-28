@@ -190,18 +190,17 @@ pub fn run(
     let sample_count = sample_labels.len();
 
     let groups = core::load_groups(&io.regions, gtf)?;
-    let group_labels: Vec<String> = groups.iter().map(|group| group.label.clone()).collect();
+    let group_labels: Vec<String> = groups.iter().map(|g| g.label.clone()).collect();
+    let group_capacity: Vec<usize> = groups.iter().map(|g| g.records.len()).collect();
 
     let mut tasks = Vec::new();
-    let mut group_capacity = Vec::with_capacity(groups.len());
-    for (group_index, group) in groups.iter().enumerate() {
-        group_capacity.push(group.records.len());
-        for record in &group.records {
+    for (group_index, group) in groups.into_iter().enumerate() {
+        for record in group.records {
             let index = tasks.len();
             tasks.push(RegionTask {
                 index,
                 group_index,
-                record: Arc::new(record.clone()),
+                record: Arc::new(record),
             });
         }
     }
