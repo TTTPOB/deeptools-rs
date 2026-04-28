@@ -3,13 +3,13 @@ use std::fmt;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
 
-use crate::config::{GeneralOptions, GtfOptions};
+use crate::config::{GeneralOptions, GtfOptions, SortRegions};
 use crate::io::{BedReadError, BedRecord, BigWigReader, SharedBigWigReader, load_gtf_records};
 use crate::pipeline::matrix::{MatrixHeader, MatrixRow};
 
@@ -452,6 +452,32 @@ mod worker;
 use worker::process_batch;
 pub use worker::compute_row;
 
+/// Output dispatch strategy for the chunk-collect pipeline.
+enum OutputStrategy {
+    /// Input order already matches compute-sorted order (or SortRegions::No).
+    /// Results can be streamed directly to the collector in chunk order.
+    StreamOrdered,
+    /// SortRegions::Keep but input order differs from compute-sorted order.
+    /// Collect all results in memory, sort by orig_idx, then emit.
+    InMemoryKeep,
+    /// SortRegions::Ascend or Descend — bucket rows by group, then let the
+    /// downstream sort handle ordering within each group.
+    InMemoryGroupBucket,
+}
+
+fn into_chunks<T>(items: Vec<T>, chunk_size: usize) -> Vec<Vec<T>> {
+    let mut chunks = Vec::new();
+    let mut iter = items.into_iter();
+    loop {
+        let chunk: Vec<T> = iter.by_ref().take(chunk_size).collect();
+        if chunk.is_empty() {
+            break;
+        }
+        chunks.push(chunk);
+    }
+    chunks
+}
+
 type BatchResult = (usize, usize, Option<MatrixRow>);
 
 /// Internal work item carrying the original index and I/O sort key.
@@ -505,7 +531,15 @@ where
         })
         .collect();
 
-    // ── Phase 2: Sort by (chrom, window_start, window_end) ────────────────
+    // ── Phase 2: Determine output strategy, then sort for I/O locality ───
+    let already_sorted = input_order_is_compute_sorted(&work_items);
+    let output_strategy = match general.sort_regions {
+        SortRegions::Keep if already_sorted => OutputStrategy::StreamOrdered,
+        SortRegions::No => OutputStrategy::StreamOrdered,
+        SortRegions::Keep => OutputStrategy::InMemoryKeep,
+        SortRegions::Ascend | SortRegions::Descend => OutputStrategy::InMemoryGroupBucket,
+    };
+
     work_items.sort_by(|a, b| {
         a.record
             .chrom
@@ -521,11 +555,6 @@ where
     }
 
     // ── Phase 3: Open shared bigWig readers once ────────────────────────
-    // Open one set of readers per file and share them across rayon workers
-    // via Arc.  The shared readers use pread-based I/O (not mmap) so RSS
-    // stays low — file pages live in the kernel page cache, not in the
-    // process address space.  We still drop the Arc before the thread-pool
-    // exits for clean resource management.
     let shared_readers = Arc::new(
         sample_paths
             .iter()
@@ -539,23 +568,17 @@ where
             .collect::<Result<Vec<_>>>()?,
     );
 
-    // ── Phase 3.5: Create coalesced batches ─────────────────────────────
-    // Estimate a coalescing gap from the actual gap distribution, then
-    // decide whether to coalesce or skip it for sparse datasets.  When
-    // the estimated gap exceeds COALESCE_CLAMP_MAX the data is sparse
-    // enough that coalescing would not merge many items, so we skip it.
-    // Records are moved (not cloned) from work_items, so work_items is
-    // consumed here.
+    // ── Phase 4: Create coalesced batches ───────────────────────────────
     let coalesce_gap = estimate_coalesce_gap(&work_items);
-    let strategy = if coalesce_gap >= COALESCE_CLAMP_MAX {
+    let coalesce_strategy = if coalesce_gap >= COALESCE_CLAMP_MAX {
         CoalesceStrategy::NoCoalesce
     } else {
         CoalesceStrategy::Coalesce(coalesce_gap)
     };
-    let batches = create_batches(work_items, &strategy);
+    let batches = create_batches(work_items, &coalesce_strategy);
     eprintln!(
         "[coalesce-gap] strategy={:?} batches={} items={} ratio={:.2}",
-        match &strategy {
+        match &coalesce_strategy {
             CoalesceStrategy::Coalesce(g) => format!("coalesce({g})"),
             CoalesceStrategy::NoCoalesce => "no-coalesce".into(),
         },
@@ -564,94 +587,185 @@ where
         batches.len() as f64 / task_count as f64
     );
 
-    // ── Phase 4: Spawn writer thread ────────────────────────────────────
-    // Channel buffers up to 256 results between compute workers and the
-    // writer.  The writer reorders via a BTreeMap so rows are emitted in
-    // the same order as the original input (orig_idx).
-    let (tx, rx) = mpsc::sync_channel::<BatchResult>(256);
-
-    let writer_handle = std::thread::Builder::new()
-        .name("matrix-writer".into())
-        .spawn(move || {
-            let mut next_idx: usize = 0;
-            let mut pending: std::collections::BTreeMap<usize, (usize, Option<MatrixRow>)> =
-                std::collections::BTreeMap::new();
-            let mut collector = collector;
-            let mut group_counts = vec![0usize; group_count];
-
-            for (orig_idx, group_index, row) in rx {
-                pending.insert(orig_idx, (group_index, row));
-                while let Some(entry) = pending.remove(&next_idx) {
-                    let (grp, row_opt) = entry;
-                    if let Some(row) = row_opt {
-                        collector.on_row(row)?;
-                        group_counts[grp] += 1;
-                    }
-                    next_idx += 1;
-                }
-            }
-            let header = header_builder(group_counts)?;
-            collector.finalize(header)
-        })
-        .context("Failed to spawn writer thread")?;
-
-    // ── Phase 5: Parallel processing ────────────────────────────────────
-    // Compute workers process batches in parallel and stream results to
-    // the writer thread via the sync channel.  This avoids buffering all
-    // results in a result_slots Vec, reducing peak RSS and letting the
-    // writer start I/O while compute is still in progress.
+    // ── Phase 5: Build thread pool ──────────────────────────────────────
     let pool = ThreadPoolBuilder::new()
         .num_threads(thread_count)
         .build()
         .context("Failed to initialise rayon thread pool for pipeline scheduling")?;
 
-    let sample_paths_for_workers = Arc::clone(&sample_paths);
-    let shared_for_workers = Arc::clone(&shared_readers);
+    // ── Phase 6: Split batches into chunks ──────────────────────────────
+    let chunk_size = std::cmp::max(256, batches.len() / (thread_count * 4));
+    let chunks = into_chunks(batches, chunk_size);
+
     let metadata_ref = metadata.as_ref();
 
-    let batch_errors: Vec<Result<()>> = pool.install(|| {
-        batches
-            .into_par_iter()
-            .map_init(
-                move || {
-                    WorkerSamples::from_shared(
-                        Arc::clone(&sample_paths_for_workers),
-                        Arc::clone(&shared_for_workers),
-                    )
-                },
-                |worker_samples, batch| {
-                    let samples = worker_samples.samples()?;
-                    let results = process_batch(
-                        samples.as_mut_slice(),
-                        batch,
-                        mode,
-                        general,
-                        metadata_ref,
-                    )?;
-                    for result in results {
-                        if tx.send(result).is_err() {
-                            break;
+    // ── Phase 7: Dispatch based on output strategy ──────────────────────
+    match output_strategy {
+        OutputStrategy::StreamOrdered => {
+            let mut collector = collector;
+            let mut group_counts = vec![0usize; group_count];
+
+            for chunk in chunks {
+                let sample_paths_c = Arc::clone(&sample_paths);
+                let shared_c = Arc::clone(&shared_readers);
+
+                let chunk_results: Vec<Result<Vec<BatchResult>>> = pool.install(|| {
+                    chunk
+                        .into_par_iter()
+                        .map_init(
+                            move || {
+                                WorkerSamples::from_shared(
+                                    Arc::clone(&sample_paths_c),
+                                    Arc::clone(&shared_c),
+                                )
+                            },
+                            |worker_samples, batch| {
+                                let samples = worker_samples.samples()?;
+                                process_batch(
+                                    samples.as_mut_slice(),
+                                    batch,
+                                    mode,
+                                    general,
+                                    metadata_ref,
+                                )
+                            },
+                        )
+                        .collect()
+                });
+
+                // Emit results in order — par_iter preserves input order
+                for batch_result in chunk_results {
+                    let rows = batch_result?;
+                    for (_orig_idx, group_index, row) in rows {
+                        if let Some(row) = row {
+                            collector.on_row(row)?;
+                            group_counts[group_index] += 1;
                         }
                     }
-                    Ok(())
-                },
-            )
-            .collect()
-    });
+                }
+            }
 
-    drop(tx);
-    drop(shared_readers);
+            drop(shared_readers);
+            let header = header_builder(group_counts)?;
+            collector.finalize(header)
+        }
 
-    // Propagate any batch processing errors
-    for result in batch_errors {
-        result?;
-    }
+        OutputStrategy::InMemoryKeep => {
+            let mut all_results: Vec<BatchResult> = Vec::with_capacity(task_count);
 
-    // ── Phase 6: Join writer thread ─────────────────────────────────────
-    match writer_handle.join() {
-        Ok(Ok(output)) => Ok(output),
-        Ok(Err(e)) => Err(e),
-        Err(panic) => std::panic::resume_unwind(panic),
+            for chunk in chunks {
+                let sample_paths_c = Arc::clone(&sample_paths);
+                let shared_c = Arc::clone(&shared_readers);
+
+                let chunk_results: Vec<Result<Vec<BatchResult>>> = pool.install(|| {
+                    chunk
+                        .into_par_iter()
+                        .map_init(
+                            move || {
+                                WorkerSamples::from_shared(
+                                    Arc::clone(&sample_paths_c),
+                                    Arc::clone(&shared_c),
+                                )
+                            },
+                            |worker_samples, batch| {
+                                let samples = worker_samples.samples()?;
+                                process_batch(
+                                    samples.as_mut_slice(),
+                                    batch,
+                                    mode,
+                                    general,
+                                    metadata_ref,
+                                )
+                            },
+                        )
+                        .collect()
+                });
+
+                for batch_result in chunk_results {
+                    let rows = batch_result?;
+                    all_results.extend(rows);
+                }
+            }
+
+            drop(shared_readers);
+
+            // Restore original input order
+            all_results.sort_by_key(|r| r.0);
+
+            let mut collector = collector;
+            let mut group_counts = vec![0usize; group_count];
+            for (_orig_idx, group_index, row) in all_results {
+                if let Some(row) = row {
+                    collector.on_row(row)?;
+                    group_counts[group_index] += 1;
+                }
+            }
+
+            let header = header_builder(group_counts)?;
+            collector.finalize(header)
+        }
+
+        OutputStrategy::InMemoryGroupBucket => {
+            // Use GroupBucketCollector to bucket rows by group; downstream
+            // sort (Ascend/Descend) is applied by the caller on the
+            // returned MatrixData.
+            let mut all_results: Vec<BatchResult> = Vec::with_capacity(task_count);
+
+            for chunk in chunks {
+                let sample_paths_c = Arc::clone(&sample_paths);
+                let shared_c = Arc::clone(&shared_readers);
+
+                let chunk_results: Vec<Result<Vec<BatchResult>>> = pool.install(|| {
+                    chunk
+                        .into_par_iter()
+                        .map_init(
+                            move || {
+                                WorkerSamples::from_shared(
+                                    Arc::clone(&sample_paths_c),
+                                    Arc::clone(&shared_c),
+                                )
+                            },
+                            |worker_samples, batch| {
+                                let samples = worker_samples.samples()?;
+                                process_batch(
+                                    samples.as_mut_slice(),
+                                    batch,
+                                    mode,
+                                    general,
+                                    metadata_ref,
+                                )
+                            },
+                        )
+                        .collect()
+                });
+
+                for batch_result in chunk_results {
+                    let rows = batch_result?;
+                    all_results.extend(rows);
+                }
+            }
+
+            drop(shared_readers);
+
+            // Feed results through the generic collector interface.
+            // For Ascend/Descend, the caller passes an InMemoryCollector
+            // and handles sorting on the returned MatrixData, so we just
+            // need to emit rows in a reasonable order.  Sort by orig_idx
+            // so the per-group order is deterministic.
+            all_results.sort_by_key(|r| r.0);
+
+            let mut collector = collector;
+            let mut group_counts = vec![0usize; group_count];
+            for (_orig_idx, group_index, row) in all_results {
+                if let Some(row) = row {
+                    collector.on_row(row)?;
+                    group_counts[group_index] += 1;
+                }
+            }
+
+            let header = header_builder(group_counts)?;
+            collector.finalize(header)
+        }
     }
 }
 
