@@ -10,6 +10,20 @@ use flate2::Decompress;
 
 const BIGWIG_MAGIC: u32 = 0x888F_FC26;
 
+#[derive(Debug, Default)]
+pub struct BigWigReaderStats {
+    pub values_calls: u64,
+    pub values_returned: u64,
+    pub blocks_per_query_total: u64,
+    pub cir_cache_hits: u64,
+    pub cir_cache_misses: u64,
+    pub cir_cache_clears: u64,
+    pub block_cache_hits: u64,
+    pub block_cache_misses: u64,
+    pub block_cache_clears: u64,
+    pub decoded_bytes: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct ChromInfo {
     pub name: String,
@@ -301,6 +315,7 @@ pub struct BigWigReader {
     values_buf: Vec<BigWigValue>,
     blocks_buf: Vec<Block>,
     remaining_buf: VecDeque<u64>,
+    pub stats: BigWigReaderStats,
 }
 
 impl BigWigReader {
@@ -324,6 +339,7 @@ impl BigWigReader {
             values_buf: Vec::new(),
             blocks_buf: Vec::new(),
             remaining_buf: VecDeque::new(),
+            stats: BigWigReaderStats::default(),
         }
     }
 
@@ -337,6 +353,8 @@ impl BigWigReader {
         start: u32,
         end: u32,
     ) -> Result<&[BigWigValue], BigWigReadError> {
+        self.stats.values_calls += 1;
+
         let chrom_id = self
             .shared
             .find_chrom_id(chrom)
@@ -356,6 +374,9 @@ impl BigWigReader {
             parse_block_values(&data, start, end, &mut self.values_buf);
         }
 
+        self.stats.values_returned += self.values_buf.len() as u64;
+        self.stats.blocks_per_query_total += self.blocks_buf.len() as u64;
+
         Ok(&self.values_buf)
     }
 
@@ -365,7 +386,6 @@ impl BigWigReader {
         start: u32,
         end: u32,
     ) -> io::Result<()> {
-        let cache = &mut self.cir_node_cache;
         let file = &self.shared.file;
         let cir_tree_root = self.shared.cir_tree_root;
 
@@ -373,16 +393,24 @@ impl BigWigReader {
         self.remaining_buf.clear();
         self.remaining_buf.push_front(cir_tree_root);
 
+        // Local stat accumulators to avoid borrow conflicts with split fields.
+        let mut cir_hits: u64 = 0;
+        let mut cir_misses: u64 = 0;
+        let mut cir_clears: u64 = 0;
+
         while let Some(node_offset) = self.remaining_buf.pop_front() {
-            let node = if let Some(cached) = cache.get(&node_offset) {
+            let node = if let Some(cached) = self.cir_node_cache.get(&node_offset) {
+                cir_hits += 1;
                 Arc::clone(cached)
             } else {
+                cir_misses += 1;
                 let parsed = SharedBigWigReader::read_cir_node_raw(file, node_offset)?;
                 let arc_parsed = Arc::new(parsed);
-                if cache.len() >= MAX_CIR_CACHE_ENTRIES {
-                    cache.clear();
+                if self.cir_node_cache.len() >= MAX_CIR_CACHE_ENTRIES {
+                    self.cir_node_cache.clear();
+                    cir_clears += 1;
                 }
-                cache.insert(node_offset, Arc::clone(&arc_parsed));
+                self.cir_node_cache.insert(node_offset, Arc::clone(&arc_parsed));
                 arc_parsed
             };
 
@@ -410,6 +438,10 @@ impl BigWigReader {
             }
         }
 
+        self.stats.cir_cache_hits += cir_hits;
+        self.stats.cir_cache_misses += cir_misses;
+        self.stats.cir_cache_clears += cir_clears;
+
         Ok(())
     }
 
@@ -420,9 +452,11 @@ impl BigWigReader {
     ) -> io::Result<Arc<[u8]>> {
         let key = (offset, size);
         if let Some(data) = self.block_cache.get(&key) {
+            self.stats.block_cache_hits += 1;
             return Ok(Arc::clone(data));
         }
 
+        self.stats.block_cache_misses += 1;
         let raw = read_and_decompress(
             &self.shared.file,
             offset,
@@ -430,11 +464,13 @@ impl BigWigReader {
             &mut self.work_buf,
             &mut self.decode_buf,
         )?;
+        self.stats.decoded_bytes += raw.len() as u64;
         let data: Arc<[u8]> = Arc::from(raw);
 
         if !data.is_empty() {
             if self.block_cache.len() >= MAX_BLOCK_CACHE_ENTRIES {
                 self.block_cache.clear();
+                self.stats.block_cache_clears += 1;
             }
             self.block_cache.insert(key, Arc::clone(&data));
         }
