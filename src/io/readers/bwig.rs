@@ -42,6 +42,7 @@ struct Block {
 }
 
 const MAX_BLOCK_CACHE_ENTRIES: usize = 200;
+const MAX_CIR_CACHE_ENTRIES: usize = 1000;
 
 #[derive(Debug, Clone)]
 struct CirNodeItem {
@@ -294,7 +295,7 @@ impl SharedBigWigReader {
 pub struct BigWigReader {
     shared: Arc<SharedBigWigReader>,
     cir_node_cache: HashMap<u64, Arc<CachedCirNode>>,
-    block_cache: HashMap<(u64, u64), Vec<u8>>,
+    block_cache: HashMap<(u64, u64), Arc<[u8]>>,
 }
 
 impl BigWigReader {
@@ -367,6 +368,9 @@ impl BigWigReader {
             } else {
                 let parsed = SharedBigWigReader::read_cir_node_raw(file, node_offset)?;
                 let arc_parsed = Arc::new(parsed);
+                if cache.len() >= MAX_CIR_CACHE_ENTRIES {
+                    cache.clear();
+                }
                 cache.insert(node_offset, Arc::clone(&arc_parsed));
                 arc_parsed
             };
@@ -403,20 +407,20 @@ impl BigWigReader {
         offset: u64,
         size: u64,
         work_buf: &mut Vec<u8>,
-    ) -> io::Result<Vec<u8>> {
+    ) -> io::Result<Arc<[u8]>> {
         let key = (offset, size);
         if let Some(data) = self.block_cache.get(&key) {
-            return Ok(data.clone());
+            return Ok(Arc::clone(data));
         }
 
         let raw = read_and_decompress(&self.shared.file, offset, size, work_buf)?;
-        let data = raw.to_vec();
+        let data: Arc<[u8]> = Arc::from(raw.to_vec().into_boxed_slice());
 
         if !data.is_empty() {
             if self.block_cache.len() >= MAX_BLOCK_CACHE_ENTRIES {
                 self.block_cache.clear();
             }
-            self.block_cache.insert(key, data.clone());
+            self.block_cache.insert(key, Arc::clone(&data));
         }
 
         Ok(data)
