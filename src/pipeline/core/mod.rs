@@ -3,7 +3,7 @@ use std::fmt;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 
 use anyhow::{Context, Result, anyhow, bail};
 use rayon::ThreadPoolBuilder;
@@ -812,6 +812,8 @@ impl RowCollector for FileCollector {
     }
 }
 
+type BatchResult = (usize, usize, Option<MatrixRow>);
+
 /// Internal work item carrying the original index and I/O sort key.
 struct WorkItem {
     orig_idx: usize,
@@ -1212,7 +1214,42 @@ where
         batches.len() as f64 / task_count as f64
     );
 
-    // ── Phase 4: Parallel processing over batches ──────────────────────
+    // ── Phase 4: Spawn writer thread ────────────────────────────────────
+    // Channel buffers up to 256 results between compute workers and the
+    // writer.  The writer reorders via a BTreeMap so rows are emitted in
+    // the same order as the original input (orig_idx).
+    let (tx, rx) = mpsc::sync_channel::<BatchResult>(256);
+
+    let writer_handle = std::thread::Builder::new()
+        .name("matrix-writer".into())
+        .spawn(move || {
+            let mut next_idx: usize = 0;
+            let mut pending: std::collections::BTreeMap<usize, (usize, Option<MatrixRow>)> =
+                std::collections::BTreeMap::new();
+            let mut collector = collector;
+            let mut group_counts = vec![0usize; group_count];
+
+            for (orig_idx, group_index, row) in rx {
+                pending.insert(orig_idx, (group_index, row));
+                while let Some(entry) = pending.remove(&next_idx) {
+                    let (grp, row_opt) = entry;
+                    if let Some(row) = row_opt {
+                        collector.on_row(row)?;
+                    }
+                    group_counts[grp] += 1;
+                    next_idx += 1;
+                }
+            }
+            let header = header_builder(group_counts)?;
+            collector.finalize(header)
+        })
+        .context("Failed to spawn writer thread")?;
+
+    // ── Phase 5: Parallel processing ────────────────────────────────────
+    // Compute workers process batches in parallel and stream results to
+    // the writer thread via the sync channel.  This avoids buffering all
+    // results in a result_slots Vec, reducing peak RSS and letting the
+    // writer start I/O while compute is still in progress.
     let pool = ThreadPoolBuilder::new()
         .num_threads(thread_count)
         .build()
@@ -1222,7 +1259,7 @@ where
     let shared_for_workers = Arc::clone(&shared_readers);
     let metadata_ref = metadata.as_ref();
 
-    let computed: Vec<Result<Vec<(usize, usize, Option<MatrixRow>)>>> = pool.install(|| {
+    let batch_errors: Vec<Result<()>> = pool.install(|| {
         batches
             .into_par_iter()
             .map_init(
@@ -1234,46 +1271,38 @@ where
                 },
                 |worker_samples, batch| {
                     let samples = worker_samples.samples()?;
-                    process_batch(
+                    let results = process_batch(
                         samples.as_mut_slice(),
                         batch,
                         mode,
                         general,
                         metadata_ref,
-                    )
+                    )?;
+                    for result in results {
+                        if tx.send(result).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(())
                 },
             )
             .collect()
     });
 
-    // shared_for_workers was moved into the closure and dropped inside
-    // pool.install().  Drop the original Arc here to close file handles
-    // before the thread-pool goes out of scope.
+    drop(tx);
     drop(shared_readers);
 
-    // ── Phase 5: Scatter results by orig_idx ──────────────────────────────
-    let mut result_slots: Vec<(usize, Option<MatrixRow>)> = Vec::with_capacity(task_count);
-    result_slots.resize_with(task_count, || (0, None));
-
-    for batch_results in computed {
-        for (orig_idx, group_index, row) in batch_results? {
-            result_slots[orig_idx] = (group_index, row);
-        }
+    // Propagate any batch processing errors
+    for result in batch_errors {
+        result?;
     }
 
-    // ── Phase 6: Write results in original input order ────────────────────
-    let mut collector = collector;
-    let mut group_counts = vec![0usize; group_count];
-    for (group_index, row) in result_slots.into_iter() {
-        if let Some(row) = row {
-            collector.on_row(row)?;
-            group_counts[group_index] += 1;
-        }
+    // ── Phase 6: Join writer thread ─────────────────────────────────────
+    match writer_handle.join() {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(e)) => Err(e),
+        Err(panic) => std::panic::resume_unwind(panic),
     }
-
-    // ── Phase 7: Finalize ─────────────────────────────────────────────────
-    let header = header_builder(group_counts)?;
-    collector.finalize(header)
 }
 
 #[cfg(test)]
