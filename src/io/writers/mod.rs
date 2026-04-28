@@ -504,31 +504,40 @@ fn write_matrix_value<W: Write>(writer: &mut W, value: f32) -> io::Result<()> {
         };
     }
 
-    let sign_negative = value.is_sign_negative();
-    let scaled = (value as f64 * 1_000_000.0).round_ties_even();
+    // Fast path: for values whose scaled integer fits in i64 (abs < ~9e12),
+    // avoid the expensive 128-bit division. Genomic data values are almost
+    // always in this range.
+    if value.is_finite() && value > -1e7 && value < 1e7 {
+        let scaled = (value as f64 * 1_000_000.0).round_ties_even();
+        return write_scaled_i64(writer, scaled as i64);
+    }
 
+    // Slow path: fallback for extreme values that need i128 range
+    let scaled = (value as f64 * 1_000_000.0).round_ties_even();
     if !scaled.is_finite() || scaled.abs() > i128::MAX as f64 {
         let fallback = format!("{value:.6}");
         return writer.write_all(fallback.as_bytes());
     }
 
-    let mut scaled_int = scaled as i128;
+    write_scaled_i128(writer, scaled as i128)
+}
 
-    if scaled_int == 0 {
-        if sign_negative {
-            writer.write_all(b"-")?;
-        }
-    } else if scaled_int < 0 {
-        writer.write_all(b"-")?;
-        scaled_int = -scaled_int;
+#[inline]
+fn write_scaled_i64<W: Write>(writer: &mut W, scaled: i64) -> io::Result<()> {
+    let mut buffer = itoa::Buffer::new();
+
+    if scaled == 0 {
+        return writer.write_all(b"0.000000");
     }
 
-    let integer_part = (scaled_int / 1_000_000) as u128;
-    let fractional_part = (scaled_int % 1_000_000) as u32;
+    if scaled < 0 {
+        writer.write_all(b"-")?;
+    }
+    let abs = scaled.unsigned_abs();
+    let integer_part = abs / 1_000_000;
+    let fractional_part = (abs % 1_000_000) as u32;
 
-    let mut int_buffer = Buffer::new();
-    let int_bytes = int_buffer.format(integer_part);
-    writer.write_all(int_bytes.as_bytes())?;
+    writer.write_all(buffer.format(integer_part).as_bytes())?;
     writer.write_all(b".")?;
 
     let mut frac_digits = [b'0'; 6];
@@ -537,9 +546,38 @@ fn write_matrix_value<W: Write>(writer: &mut W, value: f32) -> io::Result<()> {
         *slot = b'0' + (remainder % 10) as u8;
         remainder /= 10;
     }
+    writer.write_all(&frac_digits)
+}
 
-    writer.write_all(&frac_digits)?;
-    Ok(())
+#[inline]
+fn write_scaled_i128<W: Write>(writer: &mut W, scaled: i128) -> io::Result<()> {
+    let mut buffer = itoa::Buffer::new();
+    let sign_negative = scaled < 0;
+
+    if scaled == 0 {
+        if sign_negative {
+            writer.write_all(b"-")?;
+        }
+        return writer.write_all(b"0.000000");
+    }
+
+    let abs = if sign_negative { -scaled } else { scaled };
+    let integer_part = (abs / 1_000_000) as u128;
+    let fractional_part = (abs % 1_000_000) as u32;
+
+    if sign_negative {
+        writer.write_all(b"-")?;
+    }
+    writer.write_all(buffer.format(integer_part).as_bytes())?;
+    writer.write_all(b".")?;
+
+    let mut frac_digits = [b'0'; 6];
+    let mut remainder = fractional_part;
+    for slot in frac_digits.iter_mut().rev() {
+        *slot = b'0' + (remainder % 10) as u8;
+        remainder /= 10;
+    }
+    writer.write_all(&frac_digits)
 }
 
 fn format_plain_value(value: f32) -> String {
@@ -547,5 +585,76 @@ fn format_plain_value(value: f32) -> String {
         "nan".to_string()
     } else {
         format!("{value:.4}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fmt_value(value: f32) -> String {
+        let mut buf = Vec::new();
+        write_matrix_value(&mut buf, value).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn nan_and_infinity() {
+        assert_eq!(fmt_value(f32::NAN), "nan");
+        assert_eq!(fmt_value(f32::INFINITY), "inf");
+        assert_eq!(fmt_value(f32::NEG_INFINITY), "-inf");
+    }
+
+    #[test]
+    fn zero() {
+        assert_eq!(fmt_value(0.0), "0.000000");
+    }
+
+    #[test]
+    fn small_positive() {
+        assert_eq!(fmt_value(0.5), "0.500000");
+        assert_eq!(fmt_value(1.0), "1.000000");
+        assert_eq!(fmt_value(1.5), "1.500000");
+        assert_eq!(fmt_value(0.001), "0.001000");
+    }
+
+    #[test]
+    fn small_negative() {
+        assert_eq!(fmt_value(-0.5), "-0.500000");
+        assert_eq!(fmt_value(-1.0), "-1.000000");
+        assert_eq!(fmt_value(-1.5), "-1.500000");
+    }
+
+    #[test]
+    fn large_still_in_i64_range() {
+        // 9_999_999 * 1_000_000 = 9_999_999_000_000, fits in i64
+        let v = 9_999_999.0f32;
+        let result = fmt_value(v);
+        assert!(result.starts_with("9999999"));
+        assert!(result.ends_with("000000"));
+    }
+
+    #[test]
+    fn very_large_falls_back_to_i128() {
+        // 1e8 * 1e6 = 1e14, still in i128 range but exceeds fast path threshold
+        let v = 1e8f32;
+        let result = fmt_value(v);
+        assert!(!result.contains("nan") && !result.contains("inf"));
+    }
+
+    #[test]
+    fn rounding_ties_to_even() {
+        // 0.0000005 * 1e6 = 0.5, round_ties_even -> 0.0
+        assert_eq!(fmt_value(0.0000005), "0.000000");
+        // 0.0000015 * 1e6 = 1.5, round_ties_even -> 2.0
+        assert_eq!(fmt_value(0.0000015), "0.000002");
+    }
+
+    #[test]
+    fn max_precision_values() {
+        // Check that 6 decimal places are preserved
+        assert_eq!(fmt_value(0.123456), "0.123456");
+        assert_eq!(fmt_value(0.000001), "0.000001");
+        assert_eq!(fmt_value(0.999999), "0.999999");
     }
 }
