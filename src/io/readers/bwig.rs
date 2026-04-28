@@ -8,6 +8,8 @@ use std::sync::Arc;
 use thiserror::Error;
 use flate2::Decompress;
 
+use super::block_cache::SharedBlockCache;
+
 const BIGWIG_MAGIC: u32 = 0x888F_FC26;
 
 #[derive(Debug, Default)]
@@ -20,7 +22,6 @@ pub struct BigWigReaderStats {
     pub cir_cache_clears: u64,
     pub block_cache_hits: u64,
     pub block_cache_misses: u64,
-    pub block_cache_clears: u64,
     pub decoded_bytes: u64,
 }
 
@@ -55,7 +56,6 @@ struct Block {
     size: u64,
 }
 
-const MAX_BLOCK_CACHE_ENTRIES: usize = 200;
 const MAX_CIR_CACHE_ENTRIES: usize = 1000;
 
 #[derive(Debug, Clone)]
@@ -112,10 +112,20 @@ pub struct SharedBigWigReader {
     chroms: Vec<ChromInfo>,
     chrom_id_by_name: Vec<(String, u32)>,
     cir_tree_root: u64,
+    block_cache: Arc<SharedBlockCache>,
 }
 
 impl SharedBigWigReader {
+    /// Open a bigWig file with a private block cache (not shared with other files).
     pub fn open(path: impl AsRef<Path>) -> Result<Self, BigWigReadError> {
+        Self::open_with_cache(path, Arc::new(SharedBlockCache::new()))
+    }
+
+    /// Open a bigWig file using the provided shared block cache.
+    pub fn open_with_cache(
+        path: impl AsRef<Path>,
+        block_cache: Arc<SharedBlockCache>,
+    ) -> Result<Self, BigWigReadError> {
         let file = File::open(path)?;
 
         // BBI header (64 bytes)
@@ -150,7 +160,12 @@ impl SharedBigWigReader {
             chroms,
             chrom_id_by_name,
             cir_tree_root,
+            block_cache,
         })
+    }
+
+    pub fn block_cache(&self) -> &Arc<SharedBlockCache> {
+        &self.block_cache
     }
 
     pub fn chroms(&self) -> &[ChromInfo] {
@@ -309,7 +324,6 @@ impl SharedBigWigReader {
 pub struct BigWigReader {
     shared: Arc<SharedBigWigReader>,
     cir_node_cache: HashMap<u64, Arc<CachedCirNode>>,
-    block_cache: HashMap<(u64, u64), Arc<[u8]>>,
     work_buf: Vec<u8>,
     decode_buf: Vec<u8>,
     values_buf: Vec<BigWigValue>,
@@ -333,7 +347,6 @@ impl BigWigReader {
         Self {
             shared,
             cir_node_cache: HashMap::new(),
-            block_cache: HashMap::new(),
             work_buf: Vec::with_capacity(uncompress_buf_size),
             decode_buf: Vec::new(),
             values_buf: Vec::new(),
@@ -451,9 +464,9 @@ impl BigWigReader {
         size: u64,
     ) -> io::Result<Arc<[u8]>> {
         let key = (offset, size);
-        if let Some(data) = self.block_cache.get(&key) {
+        if let Some(data) = self.shared.block_cache.get(&key) {
             self.stats.block_cache_hits += 1;
-            return Ok(Arc::clone(data));
+            return Ok(data);
         }
 
         self.stats.block_cache_misses += 1;
@@ -468,11 +481,7 @@ impl BigWigReader {
         let data: Arc<[u8]> = Arc::from(raw);
 
         if !data.is_empty() {
-            if self.block_cache.len() >= MAX_BLOCK_CACHE_ENTRIES {
-                self.block_cache.clear();
-                self.stats.block_cache_clears += 1;
-            }
-            self.block_cache.insert(key, Arc::clone(&data));
+            self.shared.block_cache.insert(key, Arc::clone(&data));
         }
 
         Ok(data)
