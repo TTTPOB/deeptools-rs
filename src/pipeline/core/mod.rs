@@ -540,13 +540,15 @@ where
         SortRegions::Ascend | SortRegions::Descend => OutputStrategy::InMemoryGroupBucket,
     };
 
-    work_items.sort_by(|a, b| {
-        a.record
-            .chrom
-            .cmp(&b.record.chrom)
-            .then(a.query_start.cmp(&b.query_start))
-            .then(a.query_end.cmp(&b.query_end))
-    });
+    if !already_sorted {
+        work_items.sort_by(|a, b| {
+            a.record
+                .chrom
+                .cmp(&b.record.chrom)
+                .then(a.query_start.cmp(&b.query_start))
+                .then(a.query_end.cmp(&b.query_end))
+        });
+    }
 
     // Empty input: build an empty header and return.
     if task_count == 0 {
@@ -645,7 +647,6 @@ where
                 }
             }
 
-            drop(shared_readers);
             let header = header_builder(group_counts)?;
             collector.finalize(header)
         }
@@ -687,8 +688,6 @@ where
                 }
             }
 
-            drop(shared_readers);
-
             // Restore original input order
             all_results.sort_by_key(|r| r.0);
 
@@ -706,10 +705,10 @@ where
         }
 
         OutputStrategy::InMemoryGroupBucket => {
-            // Use GroupBucketCollector to bucket rows by group; downstream
-            // sort (Ascend/Descend) is applied by the caller on the
-            // returned MatrixData.
-            let mut all_results: Vec<BatchResult> = Vec::with_capacity(task_count);
+            let total_bins = mode.total_bins(metadata_ref);
+            let sample_count = sample_paths.len();
+            let mut bucket_collector =
+                GroupBucketCollector::new(group_count, sample_count, total_bins);
 
             for chunk in chunks {
                 let sample_paths_c = Arc::clone(&sample_paths);
@@ -740,30 +739,20 @@ where
                 });
 
                 for batch_result in chunk_results {
-                    let rows = batch_result?;
-                    all_results.extend(rows);
+                    for (_orig_idx, group_index, row) in batch_result? {
+                        if let Some(row) = row {
+                            bucket_collector.on_row_with_group(group_index, row)?;
+                        }
+                    }
                 }
             }
 
-            drop(shared_readers);
-
-            // Feed results through the generic collector interface.
-            // For Ascend/Descend, the caller passes an InMemoryCollector
-            // and handles sorting on the returned MatrixData, so we just
-            // need to emit rows in a reasonable order.  Sort by orig_idx
-            // so the per-group order is deterministic.
-            all_results.sort_by_key(|r| r.0);
-
+            let matrix_data = bucket_collector.finalize_grouped(header_builder)?;
             let mut collector = collector;
-            let mut group_counts = vec![0usize; group_count];
-            for (_orig_idx, group_index, row) in all_results {
-                if let Some(row) = row {
-                    collector.on_row(row)?;
-                    group_counts[group_index] += 1;
-                }
+            let header = matrix_data.header;
+            for row in matrix_data.rows {
+                collector.on_row(row)?;
             }
-
-            let header = header_builder(group_counts)?;
             collector.finalize(header)
         }
     }
