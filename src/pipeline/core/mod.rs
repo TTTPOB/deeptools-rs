@@ -447,95 +447,83 @@ fn compute_sample_bins<P: RegionPlan>(
 }
 
 fn aggregate_slice(slice: &[f32], average_type: AverageTypeBins) -> Option<f32> {
+    let len = slice.len();
+    if len == 0 {
+        return None;
+    }
+
     match average_type {
         AverageTypeBins::Mean => {
-            let mut sum = 0.0f64;
-            let mut count = 0usize;
+            let mut sum = 0.0f32;
+            let mut count = 0u32;
             for &value in slice {
                 if !value.is_nan() {
-                    sum += value as f64;
+                    sum += value;
                     count += 1;
                 }
             }
-            if count == 0 {
-                None
-            } else {
-                Some((sum / count as f64) as f32)
-            }
+            if count == 0 { None } else { Some(sum / count as f32) }
         }
         AverageTypeBins::Sum => {
-            let mut sum = 0.0f64;
+            let mut sum = 0.0f32;
             let mut found = false;
             for &value in slice {
                 if !value.is_nan() {
-                    sum += value as f64;
+                    sum += value;
                     found = true;
                 }
             }
-            if found {
-                Some(sum as f32)
-            } else {
-                None
-            }
+            if found { Some(sum) } else { None }
         }
         AverageTypeBins::Min => {
-            let mut min = f64::INFINITY;
+            let mut min = f32::INFINITY;
             let mut found = false;
             for &value in slice {
                 if !value.is_nan() {
-                    min = min.min(value as f64);
+                    min = min.min(value);
                     found = true;
                 }
             }
-            if found {
-                Some(min as f32)
-            } else {
-                None
-            }
+            if found { Some(min) } else { None }
         }
         AverageTypeBins::Max => {
-            let mut max = f64::NEG_INFINITY;
+            let mut max = f32::NEG_INFINITY;
             let mut found = false;
             for &value in slice {
                 if !value.is_nan() {
-                    max = max.max(value as f64);
+                    max = max.max(value);
                     found = true;
                 }
             }
-            if found {
-                Some(max as f32)
-            } else {
-                None
-            }
+            if found { Some(max) } else { None }
         }
         AverageTypeBins::Std => {
-            let mut sum = 0.0f64;
-            let mut count = 0usize;
+            let mut sum = 0.0f32;
+            let mut count = 0u32;
             for &value in slice {
                 if !value.is_nan() {
-                    sum += value as f64;
+                    sum += value;
                     count += 1;
                 }
             }
             if count == 0 {
                 return None;
             }
-            let mean = sum / count as f64;
+            let mean = sum / count as f32;
             let mut variance_sum = 0.0f64;
             for &value in slice {
                 if !value.is_nan() {
-                    let delta = value as f64 - mean;
+                    let delta = value as f64 - mean as f64;
                     variance_sum += delta * delta;
                 }
             }
             Some((variance_sum / count as f64).sqrt() as f32)
         }
         AverageTypeBins::Median => {
-            let mut values: Vec<f64> = slice
+            let mut values: Vec<f32> = slice
                 .iter()
                 .copied()
                 .filter(|v| !v.is_nan())
-                .map(|v| v as f64)
                 .collect();
             if values.is_empty() {
                 return None;
@@ -543,9 +531,9 @@ fn aggregate_slice(slice: &[f32], average_type: AverageTypeBins) -> Option<f32> 
             values.sort_by(|a, b| a.partial_cmp(b).unwrap());
             let mid = values.len() / 2;
             if values.len() % 2 == 0 {
-                Some(((values[mid - 1] + values[mid]) / 2.0) as f32)
+                Some((values[mid - 1] + values[mid]) / 2.0)
             } else {
-                Some(values[mid] as f32)
+                Some(values[mid])
             }
         }
     }
