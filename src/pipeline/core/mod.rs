@@ -463,6 +463,15 @@ pub(crate) struct WorkItem {
     query_end: i64,
 }
 
+fn input_order_is_compute_sorted(items: &[WorkItem]) -> bool {
+    items.windows(2).all(|pair| {
+        let a = &pair[0];
+        let b = &pair[1];
+        (a.record.chrom.as_ref(), a.query_start, a.query_end)
+            <= (b.record.chrom.as_ref(), b.query_start, b.query_end)
+    })
+}
+
 pub fn execute_mode<M, C, F>(
     tasks: Vec<RegionTask>,
     general: &GeneralOptions,
@@ -651,6 +660,58 @@ mod tests {
     use super::*;
     use super::worker::{aggregate_slice, index_from_coordinate};
     use crate::config::AverageTypeBins;
+    use crate::io::readers::bed::Strand;
+
+    fn work_item(idx: usize, chrom: &str, start: i64, end: i64) -> WorkItem {
+        WorkItem {
+            orig_idx: idx,
+            group_index: 0,
+            record: Arc::new(BedRecord {
+                chrom: Arc::from(chrom),
+                start: start as u32,
+                end: end as u32,
+                name: None,
+                score: None,
+                score_raw: None,
+                strand: Strand::Unstranded,
+                strand_raw: None,
+                extra_fields: vec![],
+            }),
+            query_start: start,
+            query_end: end,
+        }
+    }
+
+    #[test]
+    fn test_input_is_compute_sorted_true() {
+        let items = vec![
+            work_item(0, "chr1", 100, 200),
+            work_item(1, "chr1", 300, 400),
+            work_item(2, "chr2", 50, 150),
+        ];
+        assert!(input_order_is_compute_sorted(&items));
+    }
+
+    #[test]
+    fn test_input_is_compute_sorted_false() {
+        let items = vec![
+            work_item(0, "chr2", 100, 200),
+            work_item(1, "chr1", 300, 400),
+        ];
+        assert!(!input_order_is_compute_sorted(&items));
+    }
+
+    #[test]
+    fn test_input_is_compute_sorted_empty() {
+        let items: Vec<WorkItem> = vec![];
+        assert!(input_order_is_compute_sorted(&items));
+    }
+
+    #[test]
+    fn test_input_is_compute_sorted_single() {
+        let items = vec![work_item(0, "chr1", 100, 200)];
+        assert!(input_order_is_compute_sorted(&items));
+    }
 
     #[derive(Clone)]
     struct TestBin {
