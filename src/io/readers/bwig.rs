@@ -297,6 +297,7 @@ pub struct BigWigReader {
     cir_node_cache: HashMap<u64, Arc<CachedCirNode>>,
     block_cache: HashMap<(u64, u64), Arc<[u8]>>,
     work_buf: Vec<u8>,
+    decode_buf: Vec<u8>,
     values_buf: Vec<BigWigValue>,
     blocks_buf: Vec<Block>,
     remaining_buf: VecDeque<u64>,
@@ -319,6 +320,7 @@ impl BigWigReader {
             cir_node_cache: HashMap::new(),
             block_cache: HashMap::new(),
             work_buf: Vec::with_capacity(uncompress_buf_size),
+            decode_buf: Vec::new(),
             values_buf: Vec::new(),
             blocks_buf: Vec::new(),
             remaining_buf: VecDeque::new(),
@@ -421,8 +423,14 @@ impl BigWigReader {
             return Ok(Arc::clone(data));
         }
 
-        let raw = read_and_decompress(&self.shared.file, offset, size, &mut self.work_buf)?;
-        let data: Arc<[u8]> = Arc::from(raw.to_vec().into_boxed_slice());
+        let raw = read_and_decompress(
+            &self.shared.file,
+            offset,
+            size,
+            &mut self.work_buf,
+            &mut self.decode_buf,
+        )?;
+        let data: Arc<[u8]> = Arc::from(raw);
 
         if !data.is_empty() {
             if self.block_cache.len() >= MAX_BLOCK_CACHE_ENTRIES {
@@ -439,42 +447,41 @@ fn read_and_decompress<'a>(
     file: &File,
     offset: u64,
     size: u64,
-    work_buf: &'a mut Vec<u8>,
+    read_buf: &mut Vec<u8>,
+    decode_buf: &'a mut Vec<u8>,
 ) -> io::Result<&'a [u8]> {
     if size == 0 {
         return Ok(&[]);
     }
 
     let buf_len = size as usize;
-    if buf_len > work_buf.len() {
-        work_buf.resize(buf_len, 0);
+    if buf_len > read_buf.len() {
+        read_buf.resize(buf_len, 0);
     }
-    // Read the compressed block into work_buf via pread
-    file.read_exact_at(&mut work_buf[..buf_len], offset)?;
+    file.read_exact_at(&mut read_buf[..buf_len], offset)?;
 
-    let block = &work_buf[..buf_len];
-
+    let block = &read_buf[..buf_len];
     if block.is_empty() {
         return Ok(&[]);
     }
 
     if block[0] == 0x78 {
-        // zlib compressed — use zlib-rs via flate2
-        let mut decoder = Decompress::new(true); // true = zlib wrapper
-        let mut decoded = Vec::with_capacity(buf_len * 4);
-        decoder
-            .decompress_vec(block, &mut decoded, flate2::FlushDecompress::Finish)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-
-        let len = decoded.len();
-        if len > work_buf.len() {
-            work_buf.resize(len, 0);
+        // zlib compressed — decompress into reusable decode_buf
+        decode_buf.clear();
+        let capacity_hint = buf_len * 4;
+        if decode_buf.capacity() < capacity_hint {
+            decode_buf.reserve(capacity_hint - decode_buf.capacity());
         }
-        work_buf[..len].copy_from_slice(&decoded);
-        Ok(&work_buf[..len])
+        let mut decoder = Decompress::new(true);
+        decoder
+            .decompress_vec(block, decode_buf, flate2::FlushDecompress::Finish)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        Ok(decode_buf.as_slice())
     } else {
-        // Uncompressed — already in work_buf
-        Ok(&work_buf[..buf_len])
+        // Uncompressed — copy into decode_buf so we can return a consistent lifetime
+        decode_buf.clear();
+        decode_buf.extend_from_slice(&read_buf[..buf_len]);
+        Ok(decode_buf.as_slice())
     }
 }
 
