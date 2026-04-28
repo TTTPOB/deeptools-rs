@@ -306,101 +306,112 @@ fn compute_sample_bins<P: RegionPlan>(
         f32::NAN
     };
 
-    let mut coverage = vec![default_fill; window_len];
-    if let Some(allowed) = plan.included_intervals() {
-        let base_offset = plan.window_start();
-        for (seg_start, seg_end) in allowed {
-            let fetch_start = clamp_coordinate(*seg_start, chrom_length);
-            let fetch_end = clamp_coordinate(*seg_end, chrom_length);
-            if fetch_start >= fetch_end {
-                continue;
-            }
+    thread_local! {
+        static COVERAGE_BUF: std::cell::RefCell<Vec<f32>> = std::cell::RefCell::new(Vec::new());
+    }
 
-            let intervals = sample
-                .reader_mut()
-                .values(&record.chrom, fetch_start, fetch_end)
-                .map_err(anyhow::Error::new)
-                .with_context(|| {
-                    format!(
-                        "Failed to read bigWig intervals for '{}' in '{}'",
-                        record.chrom,
-                        sample.path().display()
-                    )
-                })?;
+    let bins = COVERAGE_BUF.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        buf.clear();
+        buf.resize(window_len, default_fill);
 
-            for interval in intervals {
-                let overlap_start = i64::from(interval.start).max(i64::from(fetch_start));
-                let overlap_end = i64::from(interval.end).min(i64::from(fetch_end));
-                if overlap_start >= overlap_end {
-                    continue;
-                }
-                let rel_start = usize::try_from(overlap_start - base_offset)
-                    .expect("relative start offset exceeded usize");
-                let rel_end = usize::try_from(overlap_end - base_offset)
-                    .expect("relative end offset exceeded usize");
-                coverage[rel_start..rel_end].fill(interval.value);
-            }
-        }
-    } else {
-        let fetch_start = clamp_coordinate(plan.window_start(), chrom_length);
-        let fetch_end = clamp_coordinate(plan.window_end(), chrom_length);
-
-        if fetch_start < fetch_end {
-            let intervals = sample
-                .reader_mut()
-                .values(&record.chrom, fetch_start, fetch_end)
-                .map_err(anyhow::Error::new)
-                .with_context(|| {
-                    format!(
-                        "Failed to read bigWig intervals for '{}' in '{}'",
-                        record.chrom,
-                        sample.path().display()
-                    )
-                })?;
-
+        if let Some(allowed) = plan.included_intervals() {
             let base_offset = plan.window_start();
-            for interval in intervals {
-                let overlap_start = i64::from(interval.start).max(i64::from(fetch_start));
-                let overlap_end = i64::from(interval.end).min(i64::from(fetch_end));
-                if overlap_start >= overlap_end {
+            for (seg_start, seg_end) in allowed {
+                let fetch_start = clamp_coordinate(*seg_start, chrom_length);
+                let fetch_end = clamp_coordinate(*seg_end, chrom_length);
+                if fetch_start >= fetch_end {
                     continue;
                 }
-                let rel_start = usize::try_from(overlap_start - base_offset)
-                    .expect("relative start offset exceeded usize");
-                let rel_end = usize::try_from(overlap_end - base_offset)
-                    .expect("relative end offset exceeded usize");
-                coverage[rel_start..rel_end].fill(interval.value);
+
+                let intervals = sample
+                    .reader_mut()
+                    .values(&record.chrom, fetch_start, fetch_end)
+                    .map_err(anyhow::Error::new)
+                    .with_context(|| {
+                        format!(
+                            "Failed to read bigWig intervals for '{}' in '{}'",
+                            record.chrom,
+                            sample.path().display()
+                        )
+                    })?;
+
+                for interval in intervals {
+                    let overlap_start = i64::from(interval.start).max(i64::from(fetch_start));
+                    let overlap_end = i64::from(interval.end).min(i64::from(fetch_end));
+                    if overlap_start >= overlap_end {
+                        continue;
+                    }
+                    let rel_start = usize::try_from(overlap_start - base_offset)
+                        .expect("relative start offset exceeded usize");
+                    let rel_end = usize::try_from(overlap_end - base_offset)
+                        .expect("relative end offset exceeded usize");
+                    buf[rel_start..rel_end].fill(interval.value);
+                }
+            }
+        } else {
+            let fetch_start = clamp_coordinate(plan.window_start(), chrom_length);
+            let fetch_end = clamp_coordinate(plan.window_end(), chrom_length);
+
+            if fetch_start < fetch_end {
+                let intervals = sample
+                    .reader_mut()
+                    .values(&record.chrom, fetch_start, fetch_end)
+                    .map_err(anyhow::Error::new)
+                    .with_context(|| {
+                        format!(
+                            "Failed to read bigWig intervals for '{}' in '{}'",
+                            record.chrom,
+                            sample.path().display()
+                        )
+                    })?;
+
+                let base_offset = plan.window_start();
+                for interval in intervals {
+                    let overlap_start = i64::from(interval.start).max(i64::from(fetch_start));
+                    let overlap_end = i64::from(interval.end).min(i64::from(fetch_end));
+                    if overlap_start >= overlap_end {
+                        continue;
+                    }
+                    let rel_start = usize::try_from(overlap_start - base_offset)
+                        .expect("relative start offset exceeded usize");
+                    let rel_end = usize::try_from(overlap_end - base_offset)
+                        .expect("relative end offset exceeded usize");
+                    buf[rel_start..rel_end].fill(interval.value);
+                }
             }
         }
-    }
 
-    let mut bins = Vec::with_capacity(bin_count);
-    for bin in plan.bins() {
-        let start_idx = index_from_coordinate(bin.start(), plan.window_start(), window_len);
-        let end_idx = index_from_coordinate(bin.end(), plan.window_start(), window_len);
+        let mut bins = Vec::with_capacity(bin_count);
+        for bin in plan.bins() {
+            let start_idx = index_from_coordinate(bin.start(), plan.window_start(), window_len);
+            let end_idx = index_from_coordinate(bin.end(), plan.window_start(), window_len);
 
-        let mut value = if start_idx < end_idx {
-            aggregate_slice(&coverage[start_idx..end_idx], general.average_type_bins)
-        } else {
-            None
-        };
+            let mut value = if start_idx < end_idx {
+                aggregate_slice(&buf[start_idx..end_idx], general.average_type_bins)
+            } else {
+                None
+            };
 
-        if value.is_none() && general.missing_data_as_zero {
-            value = Some(0.0);
+            if value.is_none() && general.missing_data_as_zero {
+                value = Some(0.0);
+            }
+
+            let mut value = value.unwrap_or(f32::NAN);
+
+            if nan_after_end && bin.beyond_region() {
+                value = f32::NAN;
+            }
+
+            if value.is_finite() {
+                value *= general.scale_factor as f32;
+            }
+
+            bins.push(value);
         }
 
-        let mut value = value.unwrap_or(f32::NAN);
-
-        if nan_after_end && bin.beyond_region() {
-            value = f32::NAN;
-        }
-
-        if value.is_finite() {
-            value *= general.scale_factor as f32;
-        }
-
-        bins.push(value);
-    }
+        Ok::<Vec<f32>, anyhow::Error>(bins)
+    })?;
 
     Ok(bins)
 }
