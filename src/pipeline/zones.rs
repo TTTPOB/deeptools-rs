@@ -1,3 +1,6 @@
+#[allow(unused_imports)]
+use std::sync::Arc;
+
 use crate::config::{ReferencePoint, ScaleRegionsOptions};
 use crate::io::BedRecord;
 use crate::io::Strand;
@@ -1121,7 +1124,7 @@ mod tests {
 
     fn build_record(strand: Strand, start: u32, end: u32) -> BedRecord {
         BedRecord {
-            chrom: "chr1".to_string(),
+            chrom: Arc::from("chr1"),
             start,
             end,
             name: None,
@@ -1250,7 +1253,7 @@ mod tests {
         };
 
         BedRecord {
-            chrom: "chr1".to_string(),
+            chrom: Arc::from("chr1"),
             start,
             end,
             name: None,

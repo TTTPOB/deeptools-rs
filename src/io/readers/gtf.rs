@@ -5,7 +5,7 @@ use anyhow::{Context, Result, anyhow};
 use bio::io::gff::{GffType, Reader};
 
 use crate::config::GtfOptions;
-use crate::io::readers::bed::{BedRecord, Strand as BedStrand};
+use crate::io::readers::bed::{BedRecord, Strand as BedStrand, intern_chrom};
 
 #[derive(Debug, Clone)]
 struct Transcript {
@@ -163,7 +163,7 @@ fn transcript_to_bed(transcript: Transcript) -> Result<BedRecord> {
     }
 
     Ok(BedRecord {
-        chrom: transcript.chrom,
+        chrom: intern_chrom(transcript.chrom),
         start: transcript.start,
         end: transcript.end,
         name: Some(transcript.id),

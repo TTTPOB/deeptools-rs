@@ -895,7 +895,7 @@ struct CoalescedBatch {
 /// and move records into [`CoalescedBatch`]es.  `work_items` is consumed.
 fn create_batches(work_items: Vec<WorkItem>, coalesce_gap: i64) -> Vec<CoalescedBatch> {
     let mut batches = Vec::new();
-    let mut current_chrom = String::new();
+    let mut current_chrom: Arc<str> = Arc::from("");
     let mut current_items: Vec<(usize, usize, BedRecord)> = Vec::new();
     let mut batch_start: i64 = 0;
     let mut batch_end: i64 = 0;

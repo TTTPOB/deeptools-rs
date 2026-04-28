@@ -1,8 +1,28 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::path::Path;
+use std::sync::Arc;
 
 use thiserror::Error;
+
+thread_local! {
+    static CHROM_INTERNER: RefCell<HashMap<String, Arc<str>>> = RefCell::new(HashMap::new());
+}
+
+pub(crate) fn intern_chrom(s: String) -> Arc<str> {
+    CHROM_INTERNER.with(|map| {
+        let mut map = map.borrow_mut();
+        if let Some(existing) = map.get(&s) {
+            Arc::clone(existing)
+        } else {
+            let arc: Arc<str> = Arc::from(s.as_str());
+            map.insert(s, arc.clone());
+            arc
+        }
+    })
+}
 
 fn parse_comma_separated_u32(value: &str, expected: usize) -> Option<Vec<u32>> {
     let mut numbers = Vec::with_capacity(expected);
@@ -47,7 +67,7 @@ impl Strand {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BedRecord {
-    pub chrom: String,
+    pub chrom: Arc<str>,
     pub start: u32,
     pub end: u32,
     pub name: Option<String>,
@@ -77,7 +97,7 @@ impl BedRecord {
             return Err("BED line requires at least 3 columns".to_string());
         }
 
-        let chrom = fields[0].to_string();
+        let chrom = intern_chrom(fields[0].to_string());
         let start = fields[1]
             .parse::<u32>()
             .map_err(|_| "BED start column must be an unsigned integer".to_string())?;
@@ -254,7 +274,7 @@ mod tests {
     #[test]
     fn parses_basic_bed_line() {
         let record = BedRecord::parse("chr1\t10\t20\tname\t5.0\t+").expect("should parse");
-        assert_eq!(record.chrom, "chr1");
+        assert_eq!(&*record.chrom, "chr1");
         assert_eq!(record.start, 10);
         assert_eq!(record.end, 20);
         assert_eq!(record.name.as_deref(), Some("name"));
@@ -271,7 +291,7 @@ mod tests {
         let reader = BedReader::new(BufReader::new(Cursor::new(&data[..])));
         let records: Vec<_> = reader.collect::<Result<_, _>>().expect("valid records");
         assert_eq!(records.len(), 1);
-        assert_eq!(records[0].chrom, "chr2");
+        assert_eq!(&*records[0].chrom, "chr2");
     }
 
     #[test]
