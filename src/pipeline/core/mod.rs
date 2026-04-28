@@ -406,23 +406,99 @@ fn compute_sample_bins<P: RegionPlan>(
 }
 
 fn aggregate_slice(slice: &[f32], average_type: AverageTypeBins) -> Option<f32> {
-    let mut values: Vec<f64> = slice
-        .iter()
-        .copied()
-        .filter(|value| !value.is_nan())
-        .map(|value| value as f64)
-        .collect();
-
-    if values.is_empty() {
-        return None;
-    }
-
     match average_type {
         AverageTypeBins::Mean => {
-            let mean = values.iter().sum::<f64>() / values.len() as f64;
-            Some(mean as f32)
+            let mut sum = 0.0f64;
+            let mut count = 0usize;
+            for &value in slice {
+                if !value.is_nan() {
+                    sum += value as f64;
+                    count += 1;
+                }
+            }
+            if count == 0 {
+                None
+            } else {
+                Some((sum / count as f64) as f32)
+            }
+        }
+        AverageTypeBins::Sum => {
+            let mut sum = 0.0f64;
+            let mut found = false;
+            for &value in slice {
+                if !value.is_nan() {
+                    sum += value as f64;
+                    found = true;
+                }
+            }
+            if found {
+                Some(sum as f32)
+            } else {
+                None
+            }
+        }
+        AverageTypeBins::Min => {
+            let mut min = f64::INFINITY;
+            let mut found = false;
+            for &value in slice {
+                if !value.is_nan() {
+                    min = min.min(value as f64);
+                    found = true;
+                }
+            }
+            if found {
+                Some(min as f32)
+            } else {
+                None
+            }
+        }
+        AverageTypeBins::Max => {
+            let mut max = f64::NEG_INFINITY;
+            let mut found = false;
+            for &value in slice {
+                if !value.is_nan() {
+                    max = max.max(value as f64);
+                    found = true;
+                }
+            }
+            if found {
+                Some(max as f32)
+            } else {
+                None
+            }
+        }
+        AverageTypeBins::Std => {
+            let mut sum = 0.0f64;
+            let mut count = 0usize;
+            for &value in slice {
+                if !value.is_nan() {
+                    sum += value as f64;
+                    count += 1;
+                }
+            }
+            if count == 0 {
+                return None;
+            }
+            let mean = sum / count as f64;
+            let mut variance_sum = 0.0f64;
+            for &value in slice {
+                if !value.is_nan() {
+                    let delta = value as f64 - mean;
+                    variance_sum += delta * delta;
+                }
+            }
+            Some((variance_sum / count as f64).sqrt() as f32)
         }
         AverageTypeBins::Median => {
+            let mut values: Vec<f64> = slice
+                .iter()
+                .copied()
+                .filter(|v| !v.is_nan())
+                .map(|v| v as f64)
+                .collect();
+            if values.is_empty() {
+                return None;
+            }
             values.sort_by(|a, b| a.partial_cmp(b).unwrap());
             let mid = values.len() / 2;
             if values.len() % 2 == 0 {
@@ -430,27 +506,6 @@ fn aggregate_slice(slice: &[f32], average_type: AverageTypeBins) -> Option<f32> 
             } else {
                 Some(values[mid] as f32)
             }
-        }
-        AverageTypeBins::Min => values
-            .into_iter()
-            .reduce(f64::min)
-            .map(|value| value as f32),
-        AverageTypeBins::Max => values
-            .into_iter()
-            .reduce(f64::max)
-            .map(|value| value as f32),
-        AverageTypeBins::Sum => Some(values.into_iter().sum::<f64>() as f32),
-        AverageTypeBins::Std => {
-            let mean = values.iter().sum::<f64>() / values.len() as f64;
-            let variance = values
-                .iter()
-                .map(|value| {
-                    let delta = value - mean;
-                    delta * delta
-                })
-                .sum::<f64>()
-                / values.len() as f64;
-            Some(variance.sqrt() as f32)
         }
     }
 }

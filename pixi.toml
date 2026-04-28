@@ -8,3 +8,6 @@ platforms = ["linux-64", "osx-64", "osx-arm64"]
 [dependencies]
 python = "3.11.*"
 deeptools = "==3.5.6"
+
+[pypi-dependencies]
+pyyaml = ">=6.0.3, <7"
