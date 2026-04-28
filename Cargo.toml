@@ -5,7 +5,6 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0"
-bigtools = { version = "0.5.6"}
 clap = { version = "4.5", features = ["derive"] }
 flate2 = { version = "1.0", features = ["zlib-rs"], default-features = true }
 num_cpus = "1.16"
@@ -16,7 +15,6 @@ thiserror = "1.0"
 tempfile = "3.10"
 itoa = "1.0"
 zune-inflate = "0.2"
-crossbeam-channel = "0.5"
 bio = "3.0.0"
 
 [profile.release]
