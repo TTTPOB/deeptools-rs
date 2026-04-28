@@ -35,7 +35,7 @@ pub enum BigWigReadError {
     ChromNotFound(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct Block {
     offset: u64,
     size: u64,
@@ -297,6 +297,9 @@ pub struct BigWigReader {
     cir_node_cache: HashMap<u64, Arc<CachedCirNode>>,
     block_cache: HashMap<(u64, u64), Arc<[u8]>>,
     work_buf: Vec<u8>,
+    values_buf: Vec<BigWigValue>,
+    blocks_buf: Vec<Block>,
+    remaining_buf: VecDeque<u64>,
 }
 
 impl BigWigReader {
@@ -316,6 +319,9 @@ impl BigWigReader {
             cir_node_cache: HashMap::new(),
             block_cache: HashMap::new(),
             work_buf: Vec::with_capacity(uncompress_buf_size),
+            values_buf: Vec::new(),
+            blocks_buf: Vec::new(),
+            remaining_buf: VecDeque::new(),
         }
     }
 
@@ -328,26 +334,27 @@ impl BigWigReader {
         chrom: &str,
         start: u32,
         end: u32,
-    ) -> Result<Vec<BigWigValue>, BigWigReadError> {
-        let chrom_id = {
-            self.shared
-                .find_chrom_id(chrom)
-                .ok_or_else(|| BigWigReadError::ChromNotFound(chrom.to_string()))?
-        };
+    ) -> Result<&[BigWigValue], BigWigReadError> {
+        let chrom_id = self
+            .shared
+            .find_chrom_id(chrom)
+            .ok_or_else(|| BigWigReadError::ChromNotFound(chrom.to_string()))?;
 
-        let blocks = self.search_cir_tree(chrom_id, start, end)?;
+        self.values_buf.clear();
+        self.search_cir_tree(chrom_id, start, end)?;
 
-        let mut values = Vec::new();
-
-        for block in &blocks {
-            let data = self.get_or_cache_block(block.offset, block.size)?;
+        // Index-based iteration because `self.get_or_cache_block()` borrows
+        // &mut self, conflicting with &self.blocks_buf.
+        for i in 0..self.blocks_buf.len() {
+            let (offset, size) = (self.blocks_buf[i].offset, self.blocks_buf[i].size);
+            let data = self.get_or_cache_block(offset, size)?;
             if data.is_empty() {
                 continue;
             }
-            parse_block_values(&data, start, end, &mut values);
+            parse_block_values(&data, start, end, &mut self.values_buf);
         }
 
-        Ok(values)
+        Ok(&self.values_buf)
     }
 
     fn search_cir_tree(
@@ -355,16 +362,16 @@ impl BigWigReader {
         chrom_ix: u32,
         start: u32,
         end: u32,
-    ) -> io::Result<Vec<Block>> {
+    ) -> io::Result<()> {
         let cache = &mut self.cir_node_cache;
         let file = &self.shared.file;
         let cir_tree_root = self.shared.cir_tree_root;
 
-        let mut blocks = Vec::new();
-        let mut remaining: VecDeque<u64> = VecDeque::with_capacity(2048);
-        remaining.push_front(cir_tree_root);
+        self.blocks_buf.clear();
+        self.remaining_buf.clear();
+        self.remaining_buf.push_front(cir_tree_root);
 
-        while let Some(node_offset) = remaining.pop_front() {
+        while let Some(node_offset) = self.remaining_buf.pop_front() {
             let node = if let Some(cached) = cache.get(&node_offset) {
                 Arc::clone(cached)
             } else {
@@ -391,17 +398,17 @@ impl BigWigReader {
                 }
 
                 if node.is_leaf {
-                    blocks.push(Block {
+                    self.blocks_buf.push(Block {
                         offset: item.data_offset,
                         size: item.data_size,
                     });
                 } else {
-                    remaining.push_front(item.data_offset);
+                    self.remaining_buf.push_front(item.data_offset);
                 }
             }
         }
 
-        Ok(blocks)
+        Ok(())
     }
 
     fn get_or_cache_block(

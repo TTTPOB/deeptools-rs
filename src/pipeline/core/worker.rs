@@ -189,6 +189,7 @@ fn compute_sample_bins<P: RegionPlan>(
     general: &GeneralOptions,
     nan_after_end: bool,
 ) -> Result<Vec<f32>> {
+    let sample_path = sample.path().to_path_buf();
     let bin_count = plan.bins().len();
     let chrom_length = match sample.chrom_length(&record.chrom) {
         Some(length) => length,
@@ -235,7 +236,7 @@ fn compute_sample_bins<P: RegionPlan>(
                         format!(
                             "Failed to read bigWig intervals for '{}' in '{}'",
                             record.chrom,
-                            sample.path().display()
+                            sample_path.display()
                         )
                     })?;
 
@@ -265,7 +266,7 @@ fn compute_sample_bins<P: RegionPlan>(
                         format!(
                             "Failed to read bigWig intervals for '{}' in '{}'",
                             record.chrom,
-                            sample.path().display()
+                            sample_path.display()
                         )
                     })?;
 
@@ -392,6 +393,7 @@ pub(super) fn process_batch<M: PipelineMode>(
     let chrom = &batch.items[0].2.chrom;
 
     // ── ONE bigWig read per sample for the entire merged window ────────
+    let sample_paths: Vec<_> = samples.iter().map(|s| s.path().to_path_buf()).collect();
     let mut sample_coverages = take_coverage_buffers(sample_count, window_len, default_fill);
     for (si, sample) in samples.iter_mut().enumerate() {
         let chrom_length = match sample.chrom_length(chrom) {
@@ -416,7 +418,7 @@ pub(super) fn process_batch<M: PipelineMode>(
                 format!(
                     "Failed to read bigWig intervals for '{}' in '{}'",
                     chrom,
-                    sample.path().display()
+                    sample_paths[si].display()
                 )
             })?;
 
