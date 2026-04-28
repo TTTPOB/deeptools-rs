@@ -1,7 +1,7 @@
 pub mod bed;
-pub mod bigwig;
+pub mod bwig;
 pub mod gtf;
 
 pub use bed::{BedReadError, BedReader, BedRecord, Strand};
-pub use bigwig::{BigWigReadError, BigWigReader, BigWigValue};
+pub use bwig::{BigWigReadError, BigWigReader, BigWigValue, ChromInfo};
 pub use gtf::load_gtf_records;
