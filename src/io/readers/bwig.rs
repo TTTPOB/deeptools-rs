@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
@@ -40,12 +40,32 @@ struct Block {
     size: u64,
 }
 
+const MAX_BLOCK_CACHE_ENTRIES: usize = 5000;
+
+#[derive(Debug, Clone)]
+struct CirNodeItem {
+    start_chrom_id: u32,
+    start_base: u32,
+    end_chrom_id: u32,
+    end_base: u32,
+    data_offset: u64,
+    data_size: u64,
+}
+
+#[derive(Debug, Clone)]
+struct CachedCirNode {
+    is_leaf: bool,
+    items: Vec<CirNodeItem>,
+}
+
 pub struct BigWigReader {
     file: File,
     uncompress_buf_size: usize,
     chroms: Vec<ChromInfo>,
     chrom_id_by_name: Vec<(String, u32)>,
     cir_tree_root: u64,
+    cir_node_cache: HashMap<u64, CachedCirNode>,
+    block_cache: HashMap<(u64, u64), Vec<u8>>,
 }
 
 // Little-endian readers from &[u8]
@@ -109,6 +129,8 @@ impl BigWigReader {
             chroms,
             chrom_id_by_name,
             cir_tree_root,
+            cir_node_cache: HashMap::new(),
+            block_cache: HashMap::new(),
         })
     }
 
@@ -125,7 +147,6 @@ impl BigWigReader {
         let chrom_id = self.find_chrom_id(chrom)
             .ok_or_else(|| BigWigReadError::ChromNotFound(chrom.to_string()))?;
 
-        // Lazy CIR tree traversal — same algorithm as bigtools' search_cir_tree_inner
         let blocks = self.search_cir_tree(chrom_id, start, end)?;
 
         let mut values = Vec::new();
@@ -133,9 +154,9 @@ impl BigWigReader {
         let mut work_buf = vec![0u8; self.uncompress_buf_size];
 
         for block in &blocks {
-            let raw = read_and_decompress(&mut self.file, block.offset, &mut comp_buf, &mut work_buf)?;
-            if raw.is_empty() { continue; }
-            parse_block_values(raw, start, end, &mut values);
+            let data = self.get_or_cache_block(block.offset, block.size, &mut comp_buf, &mut work_buf)?;
+            if data.is_empty() { continue; }
+            parse_block_values(&data, start, end, &mut values);
         }
 
         Ok(values)
@@ -154,39 +175,48 @@ impl BigWigReader {
         remaining.push_front(self.cir_tree_root);
 
         while let Some(node_offset) = remaining.pop_front() {
-            let (child_offsets, node_blocks) =
-                Self::process_cir_node(&mut self.file, node_offset, chrom_ix, start, end)?;
+            let node = if let Some(cached) = self.cir_node_cache.get(&node_offset) {
+                cached.clone()
+            } else {
+                let parsed = Self::read_cir_node_raw(&mut self.file, node_offset)?;
+                self.cir_node_cache.insert(node_offset, parsed.clone());
+                parsed
+            };
 
-            for child in child_offsets.into_iter().rev() {
-                remaining.push_front(child);
+            for item in &node.items {
+                // Overlap check (same as original)
+                if item.end_chrom_id < chrom_ix || item.start_chrom_id > chrom_ix {
+                    continue;
+                }
+                if item.start_chrom_id == item.end_chrom_id {
+                    if item.end_base <= start || item.start_base >= end {
+                        if item.start_chrom_id == chrom_ix { continue; }
+                    }
+                }
+
+                if node.is_leaf {
+                    blocks.push(Block { offset: item.data_offset, size: item.data_size });
+                } else {
+                    remaining.push_front(item.data_offset);
+                }
             }
-            blocks.extend(node_blocks);
         }
 
         Ok(blocks)
     }
 
-    fn process_cir_node(
-        file: &mut File,
-        offset: u64,
-        chrom_ix: u32,
-        start: u32,
-        end: u32,
-    ) -> io::Result<(Vec<u64>, Vec<Block>)> {
+    fn read_cir_node_raw(file: &mut File, offset: u64) -> io::Result<CachedCirNode> {
         let mut hdr = [0u8; 4];
         read_exact_at(file, offset, &mut hdr)?;
         let is_leaf = hdr[0];
         let count = u16::from_le_bytes([hdr[2], hdr[3]]) as usize;
 
-        // CIR tree: key=16 bytes (id,start,id,end), val=16 bytes (offset,size)
-        let item_size = if is_leaf == 0 { 16 + 8 } else { 16 + 16 };
+        let item_size = if is_leaf == 0 { 24 } else { 32 };
         let total = 4 + count * item_size;
         let mut node_data = vec![0u8; total];
         read_exact_at(file, offset, &mut node_data)?;
 
-        let mut child_offsets = Vec::new();
-        let mut blocks = Vec::new();
-
+        let mut items = Vec::with_capacity(count);
         for i in 0..count {
             let item_start = 4 + i * item_size;
             let key = &node_data[item_start..item_start + 16];
@@ -196,44 +226,60 @@ impl BigWigReader {
             let end_chrom_id = u32::from_le_bytes([key[8], key[9], key[10], key[11]]);
             let end_base = u32::from_le_bytes([key[12], key[13], key[14], key[15]]);
 
-            // Overlap check
-            if end_chrom_id < chrom_ix || start_chrom_id > chrom_ix {
-                continue;
-            }
-            if start_chrom_id == end_chrom_id {
-                if end_base <= start || start_base >= end {
-                    if start_chrom_id == chrom_ix { continue; }
-                }
-            }
-
-            if is_leaf == 0 {
-                let child_off_start = item_start + item_size - 8;
-                let child_off = u64::from_le_bytes([
-                    node_data[child_off_start], node_data[child_off_start+1],
-                    node_data[child_off_start+2], node_data[child_off_start+3],
-                    node_data[child_off_start+4], node_data[child_off_start+5],
-                    node_data[child_off_start+6], node_data[child_off_start+7],
-                ]);
-                child_offsets.push(child_off);
+            let val_start = item_start + 16;
+            let data_offset = u64::from_le_bytes([
+                node_data[val_start], node_data[val_start+1],
+                node_data[val_start+2], node_data[val_start+3],
+                node_data[val_start+4], node_data[val_start+5],
+                node_data[val_start+6], node_data[val_start+7],
+            ]);
+            let data_size = if is_leaf == 0 {
+                0
             } else {
-                let val_start = item_start + 16;
-                let data_offset = u64::from_le_bytes([
-                    node_data[val_start], node_data[val_start+1],
-                    node_data[val_start+2], node_data[val_start+3],
-                    node_data[val_start+4], node_data[val_start+5],
-                    node_data[val_start+6], node_data[val_start+7],
-                ]);
-                let data_size = u64::from_le_bytes([
+                u64::from_le_bytes([
                     node_data[val_start+8], node_data[val_start+9],
                     node_data[val_start+10], node_data[val_start+11],
                     node_data[val_start+12], node_data[val_start+13],
                     node_data[val_start+14], node_data[val_start+15],
-                ]);
-                blocks.push(Block { offset: data_offset, size: data_size });
-            }
+                ])
+            };
+
+            items.push(CirNodeItem {
+                start_chrom_id,
+                start_base,
+                end_chrom_id,
+                end_base,
+                data_offset,
+                data_size,
+            });
         }
 
-        Ok((child_offsets, blocks))
+        Ok(CachedCirNode { is_leaf: is_leaf != 0, items })
+    }
+
+    fn get_or_cache_block(
+        &mut self,
+        offset: u64,
+        size: u64,
+        comp_buf: &mut Vec<u8>,
+        work_buf: &mut Vec<u8>,
+    ) -> io::Result<Vec<u8>> {
+        let key = (offset, size);
+        if let Some(data) = self.block_cache.get(&key) {
+            return Ok(data.clone());
+        }
+
+        let raw = read_and_decompress(&mut self.file, offset, comp_buf, work_buf)?;
+        let data = raw.to_vec();
+
+        if !data.is_empty() {
+            if self.block_cache.len() >= MAX_BLOCK_CACHE_ENTRIES {
+                self.block_cache.clear();
+            }
+            self.block_cache.insert(key, data.clone());
+        }
+
+        Ok(data)
     }
 
     fn parse_chrom_tree(
