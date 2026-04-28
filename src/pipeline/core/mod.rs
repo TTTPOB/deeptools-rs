@@ -834,15 +834,53 @@ struct WorkItem {
 }
 
 // ── Query coalescing ──────────────────────────────────────────────────────
-/// Maximum genomic gap (in bp) between two adjacent query windows for them to
-/// be coalesced into a single bigWig read. A single merged read replaces many
-/// tiny reads and drastically reduces kernel round-trips.
-const COALESCE_GAP: i64 = 500;
+
+/// Estimate a coalescing gap threshold from the actual distribution of gaps
+/// between consecutive same-chromosome items in the sorted work list.
+///
+/// Returns a threshold in `[100, 2000]` based on the 75th percentile of
+/// observed gaps.  Falls back to 500 bp when there are too few gaps (< 10).
+fn estimate_coalesce_gap(work_items: &[WorkItem]) -> i64 {
+    if work_items.len() < 2 {
+        return 500;
+    }
+
+    let mut gaps: Vec<i64> = Vec::new();
+    for w in work_items.windows(2) {
+        if w[0].record.chrom == w[1].record.chrom {
+            let gap = w[1].query_start - w[0].query_end;
+            if gap > 0 {
+                gaps.push(gap);
+            }
+        }
+    }
+
+    if gaps.len() < 10 {
+        eprintln!(
+            "[coalesce-gap] {} gaps (< 10), using default threshold: 500",
+            gaps.len()
+        );
+        return 500;
+    }
+
+    gaps.sort_unstable();
+
+    let n = gaps.len();
+    let p50 = gaps[n / 2];
+    let p75 = gaps[(n * 3) / 4];
+    let threshold = p75.clamp(100, 2000);
+
+    eprintln!(
+        "[coalesce-gap] n_gaps={} p50={} p75={} threshold={}",
+        n, p50, p75, threshold
+    );
+    threshold
+}
 
 /// A batch of consecutive work items on the same chromosome whose query
-/// windows overlap or are separated by at most [`COALESCE_GAP`] bases.
-/// Records are **moved** (not cloned) from `WorkItem`s, and `work_items`
-/// is consumed.
+/// windows overlap or are separated by at most the caller-supplied
+/// `coalesce_gap` threshold.  Records are **moved** (not cloned) from
+/// `WorkItem`s, and `work_items` is consumed.
 struct CoalescedBatch {
     /// Items in original sorted order: (orig_idx, group_index, record).
     items: Vec<(usize, usize, BedRecord)>,
@@ -853,9 +891,9 @@ struct CoalescedBatch {
 }
 
 /// Scan the sorted `work_items`, group consecutive same-chromosome items
-/// whose query windows overlap or are gapped by at most [`COALESCE_GAP`],
+/// whose query windows overlap or are gapped by at most `coalesce_gap`,
 /// and move records into [`CoalescedBatch`]es.  `work_items` is consumed.
-fn create_batches(work_items: Vec<WorkItem>) -> Vec<CoalescedBatch> {
+fn create_batches(work_items: Vec<WorkItem>, coalesce_gap: i64) -> Vec<CoalescedBatch> {
     let mut batches = Vec::new();
     let mut current_chrom = String::new();
     let mut current_items: Vec<(usize, usize, BedRecord)> = Vec::new();
@@ -869,7 +907,7 @@ fn create_batches(work_items: Vec<WorkItem>) -> Vec<CoalescedBatch> {
             batch_end = item.query_end;
             current_items.push((item.orig_idx, item.group_index, item.record));
         } else if item.record.chrom != current_chrom
-            || item.query_start > batch_end.saturating_add(COALESCE_GAP)
+            || item.query_start > batch_end.saturating_add(coalesce_gap)
         {
             batches.push(CoalescedBatch {
                 items: std::mem::take(&mut current_items),
@@ -1134,10 +1172,18 @@ where
     );
 
     // ── Phase 3.5: Create coalesced batches ─────────────────────────────
-    // Group consecutive same-chromosome items whose query windows overlap
-    // or are separated by at most COALESCE_GAP.  Records are moved (not
+    // Estimate a coalescing gap from the actual gap distribution, then
+    // group consecutive same-chromosome items whose query windows overlap
+    // or are separated by at most that threshold.  Records are moved (not
     // cloned) from work_items, so work_items is consumed here.
-    let batches = create_batches(work_items);
+    let coalesce_gap = estimate_coalesce_gap(&work_items);
+    let batches = create_batches(work_items, coalesce_gap);
+    eprintln!(
+        "[coalesce-gap] batches={} items={} ratio={:.2}",
+        batches.len(),
+        task_count,
+        batches.len() as f64 / task_count as f64
+    );
 
     // ── Phase 4: Parallel processing over batches ──────────────────────
     let pool = ThreadPoolBuilder::new()
