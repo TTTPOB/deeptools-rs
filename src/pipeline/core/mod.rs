@@ -823,6 +823,13 @@ struct WorkItem {
 
 // ── Query coalescing ──────────────────────────────────────────────────────
 
+const COALESCE_CLAMP_MAX: i64 = 2000;
+
+enum CoalesceStrategy {
+    Coalesce(i64),
+    NoCoalesce,
+}
+
 /// Estimate a coalescing gap threshold from the actual distribution of gaps
 /// between consecutive same-chromosome items in the sorted work list.
 ///
@@ -878,10 +885,31 @@ struct CoalescedBatch {
     query_end: i64,
 }
 
+/// Create batches according to the chosen strategy.
+fn create_batches(work_items: Vec<WorkItem>, strategy: &CoalesceStrategy) -> Vec<CoalescedBatch> {
+    match strategy {
+        CoalesceStrategy::Coalesce(coalesce_gap) => {
+            create_coalesced_batches(work_items, *coalesce_gap)
+        }
+        CoalesceStrategy::NoCoalesce => create_per_item_batches(work_items),
+    }
+}
+
+fn create_per_item_batches(work_items: Vec<WorkItem>) -> Vec<CoalescedBatch> {
+    work_items
+        .into_iter()
+        .map(|item| CoalescedBatch {
+            query_start: item.query_start,
+            query_end: item.query_end,
+            items: vec![(item.orig_idx, item.group_index, item.record)],
+        })
+        .collect()
+}
+
 /// Scan the sorted `work_items`, group consecutive same-chromosome items
 /// whose query windows overlap or are gapped by at most `coalesce_gap`,
 /// and move records into [`CoalescedBatch`]es.  `work_items` is consumed.
-fn create_batches(work_items: Vec<WorkItem>, coalesce_gap: i64) -> Vec<CoalescedBatch> {
+fn create_coalesced_batches(work_items: Vec<WorkItem>, coalesce_gap: i64) -> Vec<CoalescedBatch> {
     let mut batches = Vec::new();
     let mut current_chrom: Arc<str> = Arc::from("");
     let mut current_items: Vec<(usize, usize, Arc<BedRecord>)> = Vec::new();
@@ -1161,13 +1189,24 @@ where
 
     // ── Phase 3.5: Create coalesced batches ─────────────────────────────
     // Estimate a coalescing gap from the actual gap distribution, then
-    // group consecutive same-chromosome items whose query windows overlap
-    // or are separated by at most that threshold.  Records are moved (not
-    // cloned) from work_items, so work_items is consumed here.
+    // decide whether to coalesce or skip it for sparse datasets.  When
+    // the estimated gap exceeds COALESCE_CLAMP_MAX the data is sparse
+    // enough that coalescing would not merge many items, so we skip it.
+    // Records are moved (not cloned) from work_items, so work_items is
+    // consumed here.
     let coalesce_gap = estimate_coalesce_gap(&work_items);
-    let batches = create_batches(work_items, coalesce_gap);
+    let strategy = if coalesce_gap >= COALESCE_CLAMP_MAX {
+        CoalesceStrategy::NoCoalesce
+    } else {
+        CoalesceStrategy::Coalesce(coalesce_gap)
+    };
+    let batches = create_batches(work_items, &strategy);
     eprintln!(
-        "[coalesce-gap] batches={} items={} ratio={:.2}",
+        "[coalesce-gap] strategy={:?} batches={} items={} ratio={:.2}",
+        match &strategy {
+            CoalesceStrategy::Coalesce(g) => format!("coalesce({g})"),
+            CoalesceStrategy::NoCoalesce => "no-coalesce".into(),
+        },
         batches.len(),
         task_count,
         batches.len() as f64 / task_count as f64

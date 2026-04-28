@@ -187,7 +187,7 @@ pub fn run(
         row_count,
         sample_count,
         total_bins,
-        matches!(general.sort_regions, SortRegions::Keep),
+        matches!(general.sort_regions, SortRegions::Keep | SortRegions::No),
         io,
     );
 
