@@ -11,7 +11,7 @@ use rayon::prelude::*;
 
 use crate::config::{AverageTypeBins, GeneralOptions, GtfOptions};
 use crate::io::writers::StreamingMatrixWriter;
-use crate::io::{BedReadError, BedRecord, BigWigReader, load_gtf_records};
+use crate::io::{BedReadError, BedRecord, BigWigReader, SharedBigWigReader, load_gtf_records};
 use crate::pipeline::matrix::{MatrixData, MatrixHeader, MatrixRow};
 
 pub trait SignalBin {
@@ -100,6 +100,22 @@ impl Sample {
         &mut self.reader
     }
 
+    /// Create a Sample from an already-opened shared reader.  The underlying
+    /// mmap and metadata are shared via Arc; only the per-worker caches are
+    /// fresh.
+    pub fn from_shared(path: PathBuf, shared: Arc<SharedBigWigReader>) -> Self {
+        let chrom_lengths = shared
+            .chroms()
+            .iter()
+            .map(|chrom| (chrom.name.clone(), chrom.length))
+            .collect::<HashMap<_, _>>();
+        Self {
+            path,
+            reader: BigWigReader::from_shared(shared),
+            chrom_lengths,
+        }
+    }
+
     pub fn chrom_length(&self, chrom: &str) -> Option<u32> {
         self.chrom_lengths.get(chrom).copied()
     }
@@ -113,6 +129,21 @@ impl WorkerSamples {
     pub fn new(paths: Arc<Vec<PathBuf>>) -> Self {
         let samples = open_samples(paths.as_ref()).map_err(|err| err.to_string());
         Self { samples }
+    }
+
+    /// Create per-worker Sample instances from pre-opened shared readers.
+    /// Each worker gets its own caches but shares the mmap-backed immutable
+    /// state, avoiding redundant mmap entries per thread.
+    pub fn from_shared(
+        paths: Arc<Vec<PathBuf>>,
+        shared_readers: Arc<Vec<Arc<SharedBigWigReader>>>,
+    ) -> Self {
+        let samples = paths
+            .iter()
+            .zip(shared_readers.iter())
+            .map(|(path, shared)| Sample::from_shared(path.clone(), Arc::clone(shared)))
+            .collect();
+        Self { samples: Ok(samples) }
     }
 
     pub fn samples(&mut self) -> Result<&mut Vec<Sample>> {
@@ -850,20 +881,45 @@ where
         return collector.finalize(header);
     }
 
-    // ── Phase 3: Parallel processing (sorted order) ──────────────────────
+    // ── Phase 3: Open shared bigWig readers once ────────────────────────
+    // Open one set of readers per file and share them across rayon workers
+    // via Arc.  The shared readers use pread-based I/O (not mmap) so RSS
+    // stays low — file pages live in the kernel page cache, not in the
+    // process address space.  We still drop the Arc before the thread-pool
+    // exits for clean resource management.
+    let shared_readers = Arc::new(
+        sample_paths
+            .iter()
+            .map(|path| {
+                SharedBigWigReader::open(path)
+                    .map(Arc::new)
+                    .with_context(|| {
+                        format!("Failed to open bigWig file '{}'", path.display())
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?,
+    );
+
+    // ── Phase 4: Parallel processing (sorted order) ──────────────────────
     let pool = ThreadPoolBuilder::new()
         .num_threads(thread_count)
         .build()
         .context("Failed to initialise rayon thread pool for pipeline scheduling")?;
 
     let sample_paths_for_workers = Arc::clone(&sample_paths);
+    let shared_for_workers = Arc::clone(&shared_readers);
     let metadata_for_workers = Arc::clone(&metadata);
 
     let computed: Vec<Result<(usize, usize, Option<MatrixRow>)>> = pool.install(|| {
         work_items
             .into_par_iter()
             .map_init(
-                move || WorkerSamples::new(Arc::clone(&sample_paths_for_workers)),
+                move || {
+                    WorkerSamples::from_shared(
+                        Arc::clone(&sample_paths_for_workers),
+                        Arc::clone(&shared_for_workers),
+                    )
+                },
                 |worker_samples, item| {
                     let metadata_ref = metadata_for_workers.as_ref();
                     let samples = worker_samples.samples()?;
@@ -894,7 +950,12 @@ where
             .collect()
     });
 
-    // ── Phase 4: Scatter results by orig_idx ──────────────────────────────
+    // shared_for_workers was moved into the closure and dropped inside
+    // pool.install().  Drop the original Arc here to close file handles
+    // before the thread-pool goes out of scope.
+    drop(shared_readers);
+
+    // ── Phase 5: Scatter results by orig_idx ──────────────────────────────
     let mut result_slots: Vec<(usize, Option<MatrixRow>)> = Vec::with_capacity(task_count);
     result_slots.resize_with(task_count, || (0, None));
 
@@ -903,7 +964,7 @@ where
         result_slots[orig_idx] = (group_index, row);
     }
 
-    // ── Phase 5: Write results in original input order ────────────────────
+    // ── Phase 6: Write results in original input order ────────────────────
     let mut collector = collector;
     let mut group_counts = vec![0usize; group_count];
     for (group_index, row) in result_slots.into_iter() {
@@ -913,7 +974,7 @@ where
         }
     }
 
-    // ── Phase 6: Finalize ─────────────────────────────────────────────────
+    // ── Phase 7: Finalize ─────────────────────────────────────────────────
     let header = header_builder(group_counts)?;
     collector.finalize(header)
 }
