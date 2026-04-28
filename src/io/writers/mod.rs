@@ -17,7 +17,7 @@ const RESERVED_HEADER_COMPRESSED: usize = 8192;
 const RESERVED_HEADER_PAYLOAD: usize = RESERVED_HEADER_COMPRESSED - 23;
 
 thread_local! {
-    static ROW_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(8192));
+    static ROW_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(32768));
 }
 
 /// Persist all requested outputs derived from the matrix computation.
@@ -79,7 +79,10 @@ pub fn should_use_streaming_for_plan(
 fn write_matrix_gz(path: &Path, matrix: &MatrixData) -> Result<()> {
     let file = File::create(path)
         .with_context(|| format!("Failed to create matrix file '{}'", path.display()))?;
-    let mut encoder = GzEncoder::new(BufWriter::new(file), Compression::default());
+    let mut encoder = GzEncoder::new(
+        BufWriter::with_capacity(131_072, file),
+        Compression::fast(),
+    );
 
     write_header_line(&mut encoder, &matrix.header)?;
 
@@ -131,7 +134,10 @@ fn write_matrix_gz_streaming(path: &Path, matrix: &mut MatrixData) -> Result<()>
             .context("Failed to reopen temporary matrix stream")?;
         let mut reader = BufReader::new(spool_file);
         let builder = GzBuilder::new().mtime(0);
-        let mut encoder = builder.write(BufWriter::new(file), Compression::default());
+        let mut encoder = builder.write(
+            BufWriter::with_capacity(131_072, file),
+            Compression::fast(),
+        );
         io::copy(&mut reader, &mut encoder)
             .context("Failed to stream matrix rows into gzip writer")?;
         let writer = encoder
@@ -255,7 +261,10 @@ impl StreamingMatrixWriter {
         file = write_header_member(file, &placeholder_payload)?;
 
         let builder = GzBuilder::new().mtime(0);
-        let encoder = builder.write(BufWriter::new(file), Compression::default());
+        let encoder = builder.write(
+            BufWriter::with_capacity(131_072, file),
+            Compression::fast(),
+        );
 
         Ok(Self { encoder })
     }
