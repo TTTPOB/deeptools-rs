@@ -288,6 +288,13 @@ impl StreamingMatrixWriter {
         let _ = rewrite_header_member(file, &final_payload)?;
         Ok(())
     }
+
+    /// Discard the in-progress writer without finalising.  The output file is
+    /// left in a corrupt/partial state; callers are responsible for removing it
+    /// if desired.  Dropping the encoder closes the underlying file handle.
+    pub fn abort(self) {
+        drop(self.encoder);
+    }
 }
 
 fn spool_rows(rows: Vec<MatrixRow>) -> Result<TempPath> {

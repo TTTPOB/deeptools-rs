@@ -8,6 +8,11 @@ pub trait RowCollector: Send {
 
     fn on_row(&mut self, row: MatrixRow) -> Result<()>;
     fn finalize(self, header: MatrixHeader) -> Result<Self::Output>;
+
+    /// Discard this collector without finalising.  The default implementation
+    /// simply drops `self`, which is appropriate for in-memory collectors.
+    /// File-backed collectors should override this to release I/O resources.
+    fn abort(self) where Self: Sized {}
 }
 
 pub struct InMemoryCollector {
@@ -52,6 +57,11 @@ impl FileCollector {
     pub fn new(writer: StreamingMatrixWriter) -> Self {
         Self { writer }
     }
+
+    /// Discard the underlying writer without finalising the gzip stream.
+    pub fn abort(self) {
+        self.writer.abort();
+    }
 }
 
 impl RowCollector for FileCollector {
@@ -63,6 +73,10 @@ impl RowCollector for FileCollector {
 
     fn finalize(self, header: MatrixHeader) -> Result<Self::Output> {
         self.writer.finish(&header)
+    }
+
+    fn abort(self) {
+        self.writer.abort();
     }
 }
 

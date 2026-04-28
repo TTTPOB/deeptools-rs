@@ -609,48 +609,59 @@ where
             let mut collector = collector;
             let mut group_counts = vec![0usize; group_count];
 
-            for chunk in chunks {
-                let sample_paths_c = Arc::clone(&sample_paths);
-                let shared_c = Arc::clone(&shared_readers);
+            let compute_result: Result<()> = (|| {
+                for chunk in chunks {
+                    let sample_paths_c = Arc::clone(&sample_paths);
+                    let shared_c = Arc::clone(&shared_readers);
 
-                let chunk_results: Vec<Result<Vec<BatchResult>>> = pool.install(|| {
-                    chunk
-                        .into_par_iter()
-                        .map_init(
-                            move || {
-                                WorkerSamples::from_shared(
-                                    Arc::clone(&sample_paths_c),
-                                    Arc::clone(&shared_c),
-                                )
-                            },
-                            |worker_samples, batch| {
-                                let samples = worker_samples.samples()?;
-                                process_batch(
-                                    samples.as_mut_slice(),
-                                    batch,
-                                    mode,
-                                    general,
-                                    metadata_ref,
-                                )
-                            },
-                        )
-                        .collect()
-                });
+                    let chunk_results: Vec<Result<Vec<BatchResult>>> = pool.install(|| {
+                        chunk
+                            .into_par_iter()
+                            .map_init(
+                                move || {
+                                    WorkerSamples::from_shared(
+                                        Arc::clone(&sample_paths_c),
+                                        Arc::clone(&shared_c),
+                                    )
+                                },
+                                |worker_samples, batch| {
+                                    let samples = worker_samples.samples()?;
+                                    process_batch(
+                                        samples.as_mut_slice(),
+                                        batch,
+                                        mode,
+                                        general,
+                                        metadata_ref,
+                                    )
+                                },
+                            )
+                            .collect()
+                    });
 
-                // Emit results in order — par_iter preserves input order
-                for batch_result in chunk_results {
-                    let rows = batch_result?;
-                    for (_orig_idx, group_index, row) in rows {
-                        if let Some(row) = row {
-                            collector.on_row(row)?;
-                            group_counts[group_index] += 1;
+                    // Emit results in order — par_iter preserves input order
+                    for batch_result in chunk_results {
+                        let rows = batch_result?;
+                        for (_orig_idx, group_index, row) in rows {
+                            if let Some(row) = row {
+                                collector.on_row(row)?;
+                                group_counts[group_index] += 1;
+                            }
                         }
                     }
                 }
-            }
+                Ok(())
+            })();
 
-            let header = header_builder(group_counts)?;
-            collector.finalize(header)
+            match compute_result {
+                Ok(()) => {
+                    let header = header_builder(group_counts)?;
+                    collector.finalize(header)
+                }
+                Err(e) => {
+                    collector.abort();
+                    Err(e)
+                }
+            }
         }
 
         OutputStrategy::InMemoryKeep => {
