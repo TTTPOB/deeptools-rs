@@ -1,0 +1,509 @@
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+
+use crate::config::{AverageTypeBins, GeneralOptions};
+use crate::io::BedRecord;
+use crate::pipeline::matrix::MatrixRow;
+
+use super::{PipelineMode, RegionPlan, Sample, SignalBin};
+use super::coalesce::CoalescedBatch;
+
+thread_local! {
+    static COVERAGE_POOL: std::cell::RefCell<Vec<Vec<f32>>> =
+        std::cell::RefCell::new(Vec::new());
+}
+
+fn take_coverage_buffers(sample_count: usize, window_len: usize, default_fill: f32) -> Vec<Vec<f32>> {
+    COVERAGE_POOL.with(|pool| {
+        let mut bufs = pool.borrow_mut();
+        bufs.resize_with(sample_count, Vec::new);
+        for buf in bufs.iter_mut() {
+            buf.clear();
+            buf.resize(window_len, default_fill);
+        }
+        std::mem::take(&mut *bufs)
+    })
+}
+
+fn return_coverage_buffers(bufs: Vec<Vec<f32>>) {
+    COVERAGE_POOL.with(|pool| {
+        *pool.borrow_mut() = bufs;
+    });
+}
+
+fn clamp_coordinate(value: i64, chrom_length: u32) -> u32 {
+    value
+        .max(0)
+        .min(chrom_length as i64)
+        .try_into()
+        .unwrap_or(0)
+}
+
+pub(super) fn index_from_coordinate(value: i64, base: i64, window_len: usize) -> usize {
+    if value <= base {
+        return 0;
+    }
+    let diff = value - base;
+    let idx = usize::try_from(diff).unwrap_or(window_len);
+    idx.min(window_len)
+}
+
+pub(super) fn aggregate_slice(slice: &[f32], average_type: AverageTypeBins) -> Option<f32> {
+    let len = slice.len();
+    if len == 0 {
+        return None;
+    }
+
+    match average_type {
+        AverageTypeBins::Mean => {
+            let mut sum = 0.0f32;
+            let mut count = 0u32;
+            for &value in slice {
+                if !value.is_nan() {
+                    sum += value;
+                    count += 1;
+                }
+            }
+            if count == 0 { None } else { Some(sum / count as f32) }
+        }
+        AverageTypeBins::Sum => {
+            let mut sum = 0.0f32;
+            let mut found = false;
+            for &value in slice {
+                if !value.is_nan() {
+                    sum += value;
+                    found = true;
+                }
+            }
+            if found { Some(sum) } else { None }
+        }
+        AverageTypeBins::Min => {
+            let mut min = f32::INFINITY;
+            let mut found = false;
+            for &value in slice {
+                if !value.is_nan() {
+                    min = min.min(value);
+                    found = true;
+                }
+            }
+            if found { Some(min) } else { None }
+        }
+        AverageTypeBins::Max => {
+            let mut max = f32::NEG_INFINITY;
+            let mut found = false;
+            for &value in slice {
+                if !value.is_nan() {
+                    max = max.max(value);
+                    found = true;
+                }
+            }
+            if found { Some(max) } else { None }
+        }
+        AverageTypeBins::Std => {
+            let mut sum = 0.0f32;
+            let mut count = 0u32;
+            for &value in slice {
+                if !value.is_nan() {
+                    sum += value;
+                    count += 1;
+                }
+            }
+            if count == 0 {
+                return None;
+            }
+            let mean = sum / count as f32;
+            let mut variance_sum = 0.0f64;
+            for &value in slice {
+                if !value.is_nan() {
+                    let delta = value as f64 - mean as f64;
+                    variance_sum += delta * delta;
+                }
+            }
+            Some((variance_sum / count as f64).sqrt() as f32)
+        }
+        AverageTypeBins::Median => {
+            let mut values: Vec<f32> = slice
+                .iter()
+                .copied()
+                .filter(|v| !v.is_nan())
+                .collect();
+            if values.is_empty() {
+                return None;
+            }
+            values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let mid = values.len() / 2;
+            if values.len() % 2 == 0 {
+                Some((values[mid - 1] + values[mid]) / 2.0)
+            } else {
+                Some(values[mid])
+            }
+        }
+    }
+}
+
+fn should_skip_row_flat(values: &[f32], general: &GeneralOptions) -> bool {
+    if general.skip_zeros {
+        let mut all_zero = true;
+        for &value in values {
+            if value.is_nan() {
+                continue;
+            }
+            if value != 0.0 {
+                all_zero = false;
+                break;
+            }
+        }
+        if all_zero {
+            return true;
+        }
+    }
+
+    if let Some(min_threshold) = general.min_threshold {
+        if values
+            .iter()
+            .filter(|value| !value.is_nan())
+            .any(|value| (*value as f64) <= min_threshold)
+        {
+            return true;
+        }
+    }
+
+    if let Some(max_threshold) = general.max_threshold {
+        if values
+            .iter()
+            .filter(|value| !value.is_nan())
+            .any(|value| (*value as f64) >= max_threshold)
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn compute_sample_bins<P: RegionPlan>(
+    sample: &mut Sample,
+    record: &BedRecord,
+    plan: &P,
+    general: &GeneralOptions,
+    nan_after_end: bool,
+) -> Result<Vec<f32>> {
+    let bin_count = plan.bins().len();
+    let chrom_length = match sample.chrom_length(&record.chrom) {
+        Some(length) => length,
+        None => {
+            return Ok(vec![f32::NAN; bin_count]);
+        }
+    };
+
+    let window_span = plan.window_end() - plan.window_start();
+    if window_span <= 0 {
+        return Ok(vec![f32::NAN; bin_count]);
+    }
+
+    let window_len = usize::try_from(window_span).expect("region plan window span exceeds usize");
+    let default_fill = if general.missing_data_as_zero {
+        0.0f32
+    } else {
+        f32::NAN
+    };
+
+    thread_local! {
+        static COVERAGE_BUF: std::cell::RefCell<Vec<f32>> = std::cell::RefCell::new(Vec::new());
+    }
+
+    let bins = COVERAGE_BUF.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        buf.clear();
+        buf.resize(window_len, default_fill);
+
+        if let Some(allowed) = plan.included_intervals() {
+            let base_offset = plan.window_start();
+            for (seg_start, seg_end) in allowed {
+                let fetch_start = clamp_coordinate(*seg_start, chrom_length);
+                let fetch_end = clamp_coordinate(*seg_end, chrom_length);
+                if fetch_start >= fetch_end {
+                    continue;
+                }
+
+                let intervals = sample
+                    .reader_mut()
+                    .values(&record.chrom, fetch_start, fetch_end)
+                    .map_err(anyhow::Error::new)
+                    .with_context(|| {
+                        format!(
+                            "Failed to read bigWig intervals for '{}' in '{}'",
+                            record.chrom,
+                            sample.path().display()
+                        )
+                    })?;
+
+                for interval in intervals {
+                    let overlap_start = i64::from(interval.start).max(i64::from(fetch_start));
+                    let overlap_end = i64::from(interval.end).min(i64::from(fetch_end));
+                    if overlap_start >= overlap_end {
+                        continue;
+                    }
+                    let rel_start = usize::try_from(overlap_start - base_offset)
+                        .expect("relative start offset exceeded usize");
+                    let rel_end = usize::try_from(overlap_end - base_offset)
+                        .expect("relative end offset exceeded usize");
+                    buf[rel_start..rel_end].fill(interval.value);
+                }
+            }
+        } else {
+            let fetch_start = clamp_coordinate(plan.window_start(), chrom_length);
+            let fetch_end = clamp_coordinate(plan.window_end(), chrom_length);
+
+            if fetch_start < fetch_end {
+                let intervals = sample
+                    .reader_mut()
+                    .values(&record.chrom, fetch_start, fetch_end)
+                    .map_err(anyhow::Error::new)
+                    .with_context(|| {
+                        format!(
+                            "Failed to read bigWig intervals for '{}' in '{}'",
+                            record.chrom,
+                            sample.path().display()
+                        )
+                    })?;
+
+                let base_offset = plan.window_start();
+                for interval in intervals {
+                    let overlap_start = i64::from(interval.start).max(i64::from(fetch_start));
+                    let overlap_end = i64::from(interval.end).min(i64::from(fetch_end));
+                    if overlap_start >= overlap_end {
+                        continue;
+                    }
+                    let rel_start = usize::try_from(overlap_start - base_offset)
+                        .expect("relative start offset exceeded usize");
+                    let rel_end = usize::try_from(overlap_end - base_offset)
+                        .expect("relative end offset exceeded usize");
+                    buf[rel_start..rel_end].fill(interval.value);
+                }
+            }
+        }
+
+        let mut bins = Vec::with_capacity(bin_count);
+        for bin in plan.bins() {
+            let start_idx = index_from_coordinate(bin.start(), plan.window_start(), window_len);
+            let end_idx = index_from_coordinate(bin.end(), plan.window_start(), window_len);
+
+            let mut value = if start_idx < end_idx {
+                aggregate_slice(&buf[start_idx..end_idx], general.average_type_bins)
+            } else {
+                None
+            };
+
+            if value.is_none() && general.missing_data_as_zero {
+                value = Some(0.0);
+            }
+
+            let mut value = value.unwrap_or(f32::NAN);
+
+            if nan_after_end && bin.beyond_region() {
+                value = f32::NAN;
+            }
+
+            if value.is_finite() {
+                value *= general.scale_factor as f32;
+            }
+
+            bins.push(value);
+        }
+
+        Ok::<Vec<f32>, anyhow::Error>(bins)
+    })?;
+
+    Ok(bins)
+}
+
+pub fn compute_row<P: RegionPlan>(
+    samples: &mut [Sample],
+    record: &BedRecord,
+    plan: &P,
+    general: &GeneralOptions,
+    nan_after_end: bool,
+) -> Result<Option<(Vec<f32>, usize, usize)>> {
+    let sample_count = samples.len();
+    let bin_count = plan.bins().len();
+    let mut all_values = Vec::with_capacity(sample_count * bin_count);
+    for sample in samples.iter_mut() {
+        let values = compute_sample_bins(sample, record, plan, general, nan_after_end)?;
+        all_values.extend(values);
+    }
+
+    if should_skip_row_flat(&all_values, general) {
+        return Ok(None);
+    }
+
+    Ok(Some((all_values, sample_count, bin_count)))
+}
+
+/// Process a single coalesced batch.
+///
+/// Performs one bigWig read per sample for the batch's merged query window,
+/// then extracts per-region bins from the pre-read coverage buffers.
+/// Items in metagene mode (where `included_intervals()` returns `Some`) fall
+/// back to the original per-item `compute_row` path for correctness.
+///
+/// Records are **moved** (not cloned) out of the batch items, so once a
+/// batch is processed its records are transferred into the result rows.
+pub(super) fn process_batch<M: PipelineMode>(
+    samples: &mut [Sample],
+    batch: CoalescedBatch,
+    mode: &M,
+    general: &GeneralOptions,
+    metadata: &M::Metadata,
+) -> Result<Vec<(usize, usize, Option<MatrixRow>)>> {
+    if batch.items.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let item_count = batch.items.len();
+    let window_span = batch.query_end - batch.query_start;
+    let sample_count = samples.len();
+
+    // Zero or negative window span — delegate to per-item path.
+    if window_span <= 0 {
+        let nan_after_end = mode.nan_after_end(metadata);
+        let mut results = Vec::with_capacity(item_count);
+        for (orig_idx, group_index, record) in batch.items {
+            let plan = mode.plan_for(&record, metadata);
+            let maybe_values =
+                compute_row(samples, &record, &plan, general, nan_after_end)?;
+            let row = maybe_values
+                .map(|(flat, sc, bc)| mode.postprocess_row(Arc::unwrap_or_clone(record), flat, sc, bc, metadata));
+            results.push((orig_idx, group_index, row));
+        }
+        return Ok(results);
+    }
+
+    let window_len =
+        usize::try_from(window_span).context("batch window span exceeds usize")?;
+
+    let default_fill = if general.missing_data_as_zero {
+        0.0f32
+    } else {
+        f32::NAN
+    };
+
+    let chrom = &batch.items[0].2.chrom;
+
+    // ── ONE bigWig read per sample for the entire merged window ────────
+    let mut sample_coverages = take_coverage_buffers(sample_count, window_len, default_fill);
+    for (si, sample) in samples.iter_mut().enumerate() {
+        let chrom_length = match sample.chrom_length(chrom) {
+            Some(l) => l,
+            None => {
+                continue;
+            }
+        };
+
+        let fetch_start = clamp_coordinate(batch.query_start, chrom_length);
+        let fetch_end = clamp_coordinate(batch.query_end, chrom_length);
+
+        if fetch_start >= fetch_end {
+            continue;
+        }
+
+        let intervals = sample
+            .reader_mut()
+            .values(chrom, fetch_start, fetch_end)
+            .map_err(anyhow::Error::new)
+            .with_context(|| {
+                format!(
+                    "Failed to read bigWig intervals for '{}' in '{}'",
+                    chrom,
+                    sample.path().display()
+                )
+            })?;
+
+        let cov = &mut sample_coverages[si];
+        for v in intervals {
+            let rs = i64::from(v.start)
+                .saturating_sub(batch.query_start)
+                .max(0);
+            let re = i64::from(v.end)
+                .saturating_sub(batch.query_start)
+                .min(window_span)
+                .max(0);
+            if rs < re {
+                cov[rs as usize..re as usize].fill(v.value);
+            }
+        }
+    }
+
+    // ── Extract per-region bins from the pre-read coverage buffers ─────
+    let nan_after_end = mode.nan_after_end(metadata);
+    let mut results = Vec::with_capacity(item_count);
+
+    for (orig_idx, group_index, record) in batch.items {
+        let plan = mode.plan_for(&record, metadata);
+
+        // Metagene fallback: items with explicit included_intervals
+        // (intron-skipping) must read individual exon intervals; we
+        // delegate to the original per-item compute_row path.
+        if plan.included_intervals().is_some() {
+            let maybe_values =
+                compute_row(samples, &record, &plan, general, nan_after_end)?;
+            let row = maybe_values
+                .map(|(flat, sc, bc)| mode.postprocess_row(Arc::unwrap_or_clone(record), flat, sc, bc, metadata));
+            results.push((orig_idx, group_index, row));
+            continue;
+        }
+
+        let bins = plan.bins();
+        let bin_count = bins.len();
+        let mut all_values = Vec::with_capacity(sample_count * bin_count);
+
+        for si in 0..sample_count {
+            let cov = &sample_coverages[si];
+            for bin in bins {
+                let bs =
+                    ((bin.start() - batch.query_start).max(0) as usize).min(window_len);
+                let be =
+                    ((bin.end() - batch.query_start).max(0) as usize).min(window_len);
+
+                let mut value = if bs < be {
+                    aggregate_slice(&cov[bs..be], general.average_type_bins)
+                } else {
+                    None
+                };
+
+                if value.is_none() && general.missing_data_as_zero {
+                    value = Some(0.0);
+                }
+
+                let mut value = value.unwrap_or(f32::NAN);
+
+                if nan_after_end && bin.beyond_region() {
+                    value = f32::NAN;
+                }
+
+                if value.is_finite() {
+                    value *= general.scale_factor as f32;
+                }
+
+                all_values.push(value);
+            }
+        }
+
+        let row = if should_skip_row_flat(&all_values, general) {
+            None
+        } else {
+            Some(mode.postprocess_row(
+                Arc::unwrap_or_clone(record),
+                all_values,
+                sample_count,
+                bin_count,
+                metadata,
+            ))
+        };
+        results.push((orig_idx, group_index, row));
+    }
+
+    return_coverage_buffers(sample_coverages);
+    Ok(results)
+}
