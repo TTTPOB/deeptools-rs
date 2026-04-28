@@ -833,6 +833,239 @@ struct WorkItem {
     query_end: i64,
 }
 
+// ── Query coalescing ──────────────────────────────────────────────────────
+/// Maximum genomic gap (in bp) between two adjacent query windows for them to
+/// be coalesced into a single bigWig read. A single merged read replaces many
+/// tiny reads and drastically reduces kernel round-trips.
+const COALESCE_GAP: i64 = 500;
+
+/// A batch of consecutive work items on the same chromosome whose query
+/// windows overlap or are separated by at most [`COALESCE_GAP`] bases.
+/// Records are **moved** (not cloned) from `WorkItem`s, and `work_items`
+/// is consumed.
+struct CoalescedBatch {
+    /// Items in original sorted order: (orig_idx, group_index, record).
+    items: Vec<(usize, usize, BedRecord)>,
+    /// Start of the merged query window (minimum of all item windows).
+    query_start: i64,
+    /// End of the merged query window (maximum of all item windows).
+    query_end: i64,
+}
+
+/// Scan the sorted `work_items`, group consecutive same-chromosome items
+/// whose query windows overlap or are gapped by at most [`COALESCE_GAP`],
+/// and move records into [`CoalescedBatch`]es.  `work_items` is consumed.
+fn create_batches(work_items: Vec<WorkItem>) -> Vec<CoalescedBatch> {
+    let mut batches = Vec::new();
+    let mut current_chrom = String::new();
+    let mut current_items: Vec<(usize, usize, BedRecord)> = Vec::new();
+    let mut batch_start: i64 = 0;
+    let mut batch_end: i64 = 0;
+
+    for item in work_items {
+        if current_items.is_empty() {
+            current_chrom = item.record.chrom.clone();
+            batch_start = item.query_start;
+            batch_end = item.query_end;
+            current_items.push((item.orig_idx, item.group_index, item.record));
+        } else if item.record.chrom != current_chrom
+            || item.query_start > batch_end.saturating_add(COALESCE_GAP)
+        {
+            batches.push(CoalescedBatch {
+                items: std::mem::take(&mut current_items),
+                query_start: batch_start,
+                query_end: batch_end,
+            });
+            current_chrom = item.record.chrom.clone();
+            batch_start = item.query_start;
+            batch_end = item.query_end;
+            current_items.push((item.orig_idx, item.group_index, item.record));
+        } else {
+            batch_end = batch_end.max(item.query_end);
+            current_items.push((item.orig_idx, item.group_index, item.record));
+        }
+    }
+
+    if !current_items.is_empty() {
+        batches.push(CoalescedBatch {
+            items: current_items,
+            query_start: batch_start,
+            query_end: batch_end,
+        });
+    }
+
+    batches
+}
+
+/// Process a single coalesced batch.
+///
+/// Performs one bigWig read per sample for the batch's merged query window,
+/// then extracts per-region bins from the pre-read coverage buffers.
+/// Items in metagene mode (where `included_intervals()` returns `Some`) fall
+/// back to the original per-item `compute_row` path for correctness.
+///
+/// Records are **moved** (not cloned) out of the batch items, so once a
+/// batch is processed its records are transferred into the result rows.
+fn process_batch<M: PipelineMode>(
+    samples: &mut [Sample],
+    batch: CoalescedBatch,
+    mode: &M,
+    general: &GeneralOptions,
+    metadata: &M::Metadata,
+) -> Result<Vec<(usize, usize, Option<MatrixRow>)>> {
+    if batch.items.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let item_count = batch.items.len();
+    let window_span = batch.query_end - batch.query_start;
+    let sample_count = samples.len();
+
+    // Zero or negative window span — delegate to per-item path.
+    if window_span <= 0 {
+        let nan_after_end = mode.nan_after_end(metadata);
+        let mut results = Vec::with_capacity(item_count);
+        for (orig_idx, group_index, record) in batch.items {
+            let plan = mode.plan_for(&record, metadata);
+            let maybe_values =
+                compute_row(samples, &record, &plan, general, nan_after_end)?;
+            let row = maybe_values
+                .map(|(flat, sc, bc)| mode.postprocess_row(record, flat, sc, bc, metadata));
+            results.push((orig_idx, group_index, row));
+        }
+        return Ok(results);
+    }
+
+    let window_len =
+        usize::try_from(window_span).context("batch window span exceeds usize")?;
+
+    let default_fill = if general.missing_data_as_zero {
+        0.0f32
+    } else {
+        f32::NAN
+    };
+
+    let chrom = &batch.items[0].2.chrom;
+
+    // ── ONE bigWig read per sample for the entire merged window ────────
+    let mut sample_coverages: Vec<Vec<f32>> = Vec::with_capacity(sample_count);
+    for sample in samples.iter_mut() {
+        let chrom_length = match sample.chrom_length(chrom) {
+            Some(l) => l,
+            None => {
+                sample_coverages.push(vec![default_fill; window_len]);
+                continue;
+            }
+        };
+
+        let fetch_start = clamp_coordinate(batch.query_start, chrom_length);
+        let fetch_end = clamp_coordinate(batch.query_end, chrom_length);
+
+        if fetch_start >= fetch_end {
+            sample_coverages.push(vec![default_fill; window_len]);
+            continue;
+        }
+
+        let intervals = sample
+            .reader_mut()
+            .values(chrom, fetch_start, fetch_end)
+            .map_err(anyhow::Error::new)
+            .with_context(|| {
+                format!(
+                    "Failed to read bigWig intervals for '{}' in '{}'",
+                    chrom,
+                    sample.path().display()
+                )
+            })?;
+
+        let mut cov = vec![default_fill; window_len];
+        for v in intervals {
+            let rs = i64::from(v.start)
+                .saturating_sub(batch.query_start)
+                .max(0);
+            let re = i64::from(v.end)
+                .saturating_sub(batch.query_start)
+                .min(window_span)
+                .max(0);
+            if rs < re {
+                cov[rs as usize..re as usize].fill(v.value);
+            }
+        }
+        sample_coverages.push(cov);
+    }
+
+    // ── Extract per-region bins from the pre-read coverage buffers ─────
+    let nan_after_end = mode.nan_after_end(metadata);
+    let mut results = Vec::with_capacity(item_count);
+
+    for (orig_idx, group_index, record) in batch.items {
+        let plan = mode.plan_for(&record, metadata);
+
+        // Metagene fallback: items with explicit included_intervals
+        // (intron-skipping) must read individual exon intervals; we
+        // delegate to the original per-item compute_row path.
+        if plan.included_intervals().is_some() {
+            let maybe_values =
+                compute_row(samples, &record, &plan, general, nan_after_end)?;
+            let row = maybe_values
+                .map(|(flat, sc, bc)| mode.postprocess_row(record, flat, sc, bc, metadata));
+            results.push((orig_idx, group_index, row));
+            continue;
+        }
+
+        let bins = plan.bins();
+        let bin_count = bins.len();
+        let mut all_values = Vec::with_capacity(sample_count * bin_count);
+
+        for si in 0..sample_count {
+            let cov = &sample_coverages[si];
+            for bin in bins {
+                let bs =
+                    ((bin.start() - batch.query_start).max(0) as usize).min(window_len);
+                let be =
+                    ((bin.end() - batch.query_start).max(0) as usize).min(window_len);
+
+                let mut value = if bs < be {
+                    aggregate_slice(&cov[bs..be], general.average_type_bins)
+                } else {
+                    None
+                };
+
+                if value.is_none() && general.missing_data_as_zero {
+                    value = Some(0.0);
+                }
+
+                let mut value = value.unwrap_or(f32::NAN);
+
+                if nan_after_end && bin.beyond_region() {
+                    value = f32::NAN;
+                }
+
+                if value.is_finite() {
+                    value *= general.scale_factor as f32;
+                }
+
+                all_values.push(value);
+            }
+        }
+
+        let row = if should_skip_row_flat(&all_values, general) {
+            None
+        } else {
+            Some(mode.postprocess_row(
+                record,
+                all_values,
+                sample_count,
+                bin_count,
+                metadata,
+            ))
+        };
+        results.push((orig_idx, group_index, row));
+    }
+
+    Ok(results)
+}
+
 pub fn execute_mode<M, C, F>(
     tasks: Vec<RegionTask>,
     general: &GeneralOptions,
@@ -900,7 +1133,13 @@ where
             .collect::<Result<Vec<_>>>()?,
     );
 
-    // ── Phase 4: Parallel processing (sorted order) ──────────────────────
+    // ── Phase 3.5: Create coalesced batches ─────────────────────────────
+    // Group consecutive same-chromosome items whose query windows overlap
+    // or are separated by at most COALESCE_GAP.  Records are moved (not
+    // cloned) from work_items, so work_items is consumed here.
+    let batches = create_batches(work_items);
+
+    // ── Phase 4: Parallel processing over batches ──────────────────────
     let pool = ThreadPoolBuilder::new()
         .num_threads(thread_count)
         .build()
@@ -908,10 +1147,10 @@ where
 
     let sample_paths_for_workers = Arc::clone(&sample_paths);
     let shared_for_workers = Arc::clone(&shared_readers);
-    let metadata_for_workers = Arc::clone(&metadata);
+    let metadata_ref = metadata.as_ref();
 
-    let computed: Vec<Result<(usize, usize, Option<MatrixRow>)>> = pool.install(|| {
-        work_items
+    let computed: Vec<Result<Vec<(usize, usize, Option<MatrixRow>)>>> = pool.install(|| {
+        batches
             .into_par_iter()
             .map_init(
                 move || {
@@ -920,31 +1159,15 @@ where
                         Arc::clone(&shared_for_workers),
                     )
                 },
-                |worker_samples, item| {
-                    let metadata_ref = metadata_for_workers.as_ref();
+                |worker_samples, batch| {
                     let samples = worker_samples.samples()?;
-                    let plan = mode.plan_for(&item.record, metadata_ref);
-                    let maybe_values = compute_row(
+                    process_batch(
                         samples.as_mut_slice(),
-                        &item.record,
-                        &plan,
+                        batch,
+                        mode,
                         general,
-                        mode.nan_after_end(metadata_ref),
-                    )?;
-                    let row = maybe_values.map(|(flat_values, sample_count, bin_count)| {
-                        mode.postprocess_row(
-                            item.record,
-                            flat_values,
-                            sample_count,
-                            bin_count,
-                            metadata_ref,
-                        )
-                    });
-                    Ok::<(usize, usize, Option<MatrixRow>), anyhow::Error>((
-                        item.orig_idx,
-                        item.group_index,
-                        row,
-                    ))
+                        metadata_ref,
+                    )
                 },
             )
             .collect()
@@ -959,9 +1182,10 @@ where
     let mut result_slots: Vec<(usize, Option<MatrixRow>)> = Vec::with_capacity(task_count);
     result_slots.resize_with(task_count, || (0, None));
 
-    for result in computed {
-        let (orig_idx, group_index, row) = result?;
-        result_slots[orig_idx] = (group_index, row);
+    for batch_results in computed {
+        for (orig_idx, group_index, row) in batch_results? {
+            result_slots[orig_idx] = (group_index, row);
+        }
     }
 
     // ── Phase 6: Write results in original input order ────────────────────
