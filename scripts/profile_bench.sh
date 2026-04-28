@@ -77,9 +77,10 @@ heaptrack -o "$HEAPTRACK_PREFIX" "$@" 2>/dev/null
 echo "" >> "$REPORT"
 echo "## heaptrack summary" >> "$REPORT"
 echo '```' >> "$REPORT"
-# Find the actual heaptrack output file
-HEAPTRACK_FILE=$(ls -1t "${HEAPTRACK_PREFIX}"*.zst "${HEAPTRACK_PREFIX}"*.gz 2>/dev/null | head -1)
+# Find the actual heaptrack output file (ls glob fails under set -euo pipefail when no .zst exists)
+HEAPTRACK_FILE=$(find "$(dirname "$HEAPTRACK_PREFIX")" -maxdepth 1 -name 'heaptrack*' \( -name '*.zst' -o -name '*.gz' \) -print -quit 2>/dev/null || true)
 if [ -n "$HEAPTRACK_FILE" ]; then
+    echo "  heaptrack data: $HEAPTRACK_FILE" >&2
     heaptrack_print -f "$HEAPTRACK_FILE" 2>/dev/null \
         | grep -E '^(peak heap|total memory|calls to|temporary)' \
         >> "$REPORT" || true
