@@ -308,7 +308,15 @@ pub(super) fn process_batch<M: PipelineMode>(
 
     // ── ONE bigWig read per sample for the entire merged window ────────
     let sample_paths: Vec<_> = samples.iter().map(|s| s.path().to_path_buf()).collect();
-    let mut sample_coverages = take_coverage_buffers(sample_count, window_len, default_fill);
+
+    // Only allocate coverage buffers when NOT using the direct path;
+    // the direct path works from raw intervals and never needs per-base expansion.
+    let mut sample_coverages = if use_direct {
+        Vec::new()
+    } else {
+        take_coverage_buffers(sample_count, window_len, default_fill)
+    };
+
     for (si, sample) in samples.iter_mut().enumerate() {
         let chrom_length = match sample.chrom_length(chrom) {
             Some(l) => l,
@@ -336,25 +344,27 @@ pub(super) fn process_batch<M: PipelineMode>(
                 )
             })?;
 
-        // Collect raw intervals for direct aggregation path
         if use_direct {
+            // Collect raw intervals for direct aggregation path;
+            // no per-base coverage buffer fill needed.
             sample_raw_intervals[si] = intervals
                 .iter()
                 .map(|v| (i64::from(v.start), i64::from(v.end), f64::from(v.value)))
                 .collect();
-        }
-
-        let cov = &mut sample_coverages[si];
-        for v in intervals {
-            let rs = i64::from(v.start)
-                .saturating_sub(batch.query_start)
-                .max(0);
-            let re = i64::from(v.end)
-                .saturating_sub(batch.query_start)
-                .min(window_span)
-                .max(0);
-            if rs < re {
-                cov[rs as usize..re as usize].fill(f64::from(v.value));
+        } else {
+            // Fill per-base coverage buffer for non-direct aggregation types.
+            let cov = &mut sample_coverages[si];
+            for v in intervals {
+                let rs = i64::from(v.start)
+                    .saturating_sub(batch.query_start)
+                    .max(0);
+                let re = i64::from(v.end)
+                    .saturating_sub(batch.query_start)
+                    .min(window_span)
+                    .max(0);
+                if rs < re {
+                    cov[rs as usize..re as usize].fill(f64::from(v.value));
+                }
             }
         }
     }
@@ -362,6 +372,9 @@ pub(super) fn process_batch<M: PipelineMode>(
     // ── Extract per-region bins from the pre-read coverage buffers ─────
     let nan_after_end = mode.nan_after_end(metadata);
     let mut results = Vec::with_capacity(item_count);
+
+    // Pre-allocate bin_coords outside the loop to avoid per-item allocation
+    let mut bin_coords: Vec<(i64, i64)> = Vec::new();
 
     for (orig_idx, group_index, record) in batch.items {
         let plan = mode.plan_for(&record, metadata);
@@ -385,9 +398,8 @@ pub(super) fn process_batch<M: PipelineMode>(
         if use_direct {
             // Direct aggregation path: compute mean/sum directly from
             // raw intervals without expanding per-base coverage buffer.
-            let bin_coords: Vec<(i64, i64)> = bins.iter()
-                .map(|bin| (bin.start(), bin.end()))
-                .collect();
+            bin_coords.clear();
+            bin_coords.extend(bins.iter().map(|bin| (bin.start(), bin.end())));
 
             for si in 0..sample_count {
                 let direct_values = match general.average_type_bins {
@@ -468,7 +480,9 @@ pub(super) fn process_batch<M: PipelineMode>(
         results.push((orig_idx, group_index, row));
     }
 
-    return_coverage_buffers(sample_coverages);
+    if !use_direct {
+        return_coverage_buffers(sample_coverages);
+    }
     Ok(results)
 }
 

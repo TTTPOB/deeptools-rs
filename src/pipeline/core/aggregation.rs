@@ -152,6 +152,10 @@ pub(super) fn direct_sum_bins(
 ) -> Vec<Option<f64>> {
     bins.iter()
         .map(|&(bin_start, bin_end)| {
+            if bin_start >= bin_end {
+                return if missing_data_as_zero { Some(0.0) } else { None };
+            }
+
             let mut sum = 0.0;
             let mut found = false;
             for &(start, end, value) in intervals {
