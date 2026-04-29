@@ -6,7 +6,11 @@ use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
 
 use crate::config::{GeneralOptions, SortRegions};
-use crate::io::{BedRecord, SharedBigWigReader, SharedBlockCache};
+use crate::io::{BedRecord, SharedBigWigReader};
+use crate::io::readers::block_cache::{
+    DEFAULT_TOTAL_BLOCK_CACHE_ENTRIES,
+    split_block_cache_capacity,
+};
 use crate::pipeline::matrix::{MatrixHeader, compute_sort_metric};
 
 use super::collector::{FileCollector, RowCollector};
@@ -156,12 +160,20 @@ where
     }
 
     // ── Phase 3: Open shared bigWig readers once ────────────────────────
-    let block_cache = Arc::new(SharedBlockCache::new());
+    // Each file gets its own block cache whose capacity is a fair share of
+    // the global budget, preventing cross-sample block collisions.
+    let sample_count_for_cache = sample_paths.len();
     let shared_readers = Arc::new(
         sample_paths
             .iter()
-            .map(|path| {
-                SharedBigWigReader::open_with_cache(path, Arc::clone(&block_cache))
+            .enumerate()
+            .map(|(sample_index, path)| {
+                let cache_capacity = split_block_cache_capacity(
+                    DEFAULT_TOTAL_BLOCK_CACHE_ENTRIES,
+                    sample_count_for_cache,
+                    sample_index,
+                );
+                SharedBigWigReader::open_with_block_cache_capacity(path, cache_capacity)
                     .map(Arc::new)
                     .with_context(|| {
                         format!("Failed to open bigWig file '{}'", path.display())

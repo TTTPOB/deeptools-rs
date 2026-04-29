@@ -202,6 +202,9 @@ All 5 tasks from `docs/superpowers/plans/2026-04-29-next-stages.md` are done:
   - reference-point (center, ±100 bp): Python 171.35s vs Rust 17.90s → **9.57× faster**.
   - scale-regions (body 200, ±100 bp, unscaled 50/50): Python 346.56s vs Rust 18.64s → **18.59× faster**.
 
+### Recent Changes (2026-04-29)
+- ✅ **2026-04-29**: Changed bigWig block caching to per-file caches with a strict total entry cap, preventing cross-sample block collisions while keeping multi-sample cache usage bounded.
+
 ### Recent Fixes (2025-12-21)
 - ✅ **2025-12-21**: Made BED parsing tolerant of non-standard score/strand strings by preserving raw values and defaulting invalid strands to unstranded (processed as plus strand) instead of erroring.
 - ✅ **2025-12-05**: Added `Rust CI & Release` GitHub Actions workflow to build, package, and upload release artifacts; regression harness integration into CI remains pending.

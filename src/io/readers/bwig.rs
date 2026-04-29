@@ -116,9 +116,23 @@ pub struct SharedBigWigReader {
 }
 
 impl SharedBigWigReader {
-    /// Open a bigWig file with a private block cache (not shared with other files).
+    /// Open a bigWig file with a private block cache using the default total capacity.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, BigWigReadError> {
-        Self::open_with_cache(path, Arc::new(SharedBlockCache::new()))
+        Self::open_with_block_cache_capacity(
+            path,
+            super::block_cache::DEFAULT_TOTAL_BLOCK_CACHE_ENTRIES,
+        )
+    }
+
+    /// Open a bigWig file with a per-file block cache of the given capacity.
+    pub fn open_with_block_cache_capacity(
+        path: impl AsRef<Path>,
+        block_cache_capacity: usize,
+    ) -> Result<Self, BigWigReadError> {
+        Self::open_with_cache(
+            path,
+            Arc::new(SharedBlockCache::with_capacity(block_cache_capacity)),
+        )
     }
 
     /// Open a bigWig file using the provided shared block cache.
