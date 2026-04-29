@@ -15,6 +15,8 @@ Quick Start
   `pixi run python scripts/custom_compare.py --mode python-compatibility`
 - Ad-hoc regression/perf run (reference-point example):
   `pixi run python scripts/custom_compare.py --mode reference-point --reference-point center --upstream 100 --downstream 100 --bin-size 10`
+- Local performance smoke run:
+  `scripts/perf_smoke.sh`
 
 Latest Compatibility & Performance (2025-12-01)
 - Command: `pixi run python scripts/custom_compare.py --mode python-compatibility`

@@ -204,6 +204,7 @@ All 5 tasks from `docs/superpowers/plans/2026-04-29-next-stages.md` are done:
 
 ### Recent Changes (2026-04-29)
 - ✅ **2026-04-29**: Changed bigWig block caching to per-file caches with a strict total entry cap, preventing cross-sample block collisions while keeping multi-sample cache usage bounded.
+- ✅ **2026-04-29**: Added `scripts/perf_smoke.sh` for repeatable local performance smoke timing of reference-point and scale-regions cases.
 
 ### Recent Fixes (2025-12-21)
 - ✅ **2025-12-21**: Made BED parsing tolerant of non-standard score/strand strings by preserving raw values and defaulting invalid strands to unstranded (processed as plus strand) instead of erroring.
