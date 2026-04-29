@@ -1,11 +1,11 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 
 use crate::config::{GeneralOptions, GtfOptions};
-use crate::io::{BedReadError, BedRecord, Group, GroupedBedReader, load_gtf_records};
+use crate::io::{BedReadError, BedRecord, BigWigFile, Group, GroupedBedReader, load_gtf_records};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RegionFormat {
@@ -102,6 +102,142 @@ pub fn normalize_sort_sample_indices(
     }
 
     Ok(Some(normalized))
+}
+
+// ── chromosome name normalization ──────────────────────────────────────────
+
+/// Return both the original name and a chr-prefix-toggled variant so that
+/// names like `chr1` and `1` can be matched against each other.  The first
+/// element is the raw name; the second is the toggled version.
+fn normalize_chrom_name(name: &str) -> [String; 2] {
+    if name.starts_with("chr") {
+        [name.to_string(), name[3..].to_string()]
+    } else {
+        [name.to_string(), format!("chr{}", name)]
+    }
+}
+
+// ── blacklist helpers ──────────────────────────────────────────────────────
+
+/// Load a blacklist BED file, flatten all groups, sort by (chrom, start), and
+/// merge overlapping/adjacent intervals.
+pub(crate) fn load_blacklist(path: &Path) -> Result<Vec<(Arc<str>, u32, u32)>> {
+    let reader = GroupedBedReader::open(path, "blacklist".to_string())?;
+    let mut intervals: Vec<(Arc<str>, u32, u32)> = Vec::new();
+    for group in reader {
+        let group = group?;
+        for record in group.records {
+            intervals.push((record.chrom, record.start, record.end));
+        }
+    }
+    if intervals.is_empty() {
+        return Ok(Vec::new());
+    }
+    intervals.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    let mut merged: Vec<(Arc<str>, u32, u32)> = Vec::new();
+    for (chrom, start, end) in intervals {
+        if let Some(last) = merged.last_mut() {
+            if last.0 == chrom && start <= last.2 {
+                last.2 = last.2.max(end);
+                continue;
+            }
+        }
+        merged.push((chrom, start, end));
+    }
+    Ok(merged)
+}
+
+/// Load chromosome sizes from bigWig score files, normalizing chr-prefix
+/// names to the non-prefixed canonical form.
+pub(crate) fn load_chrom_sizes(scores: &[PathBuf]) -> Result<HashMap<String, u32>> {
+    let mut sizes: HashMap<String, u32> = HashMap::new();
+    for path in scores {
+        let bw = BigWigFile::open_with_block_cache_capacity(path, 0).map_err(|e| {
+            anyhow::anyhow!("Failed to open bigWig file '{}': {}", path.display(), e)
+        })?;
+        for info in bw.chroms() {
+            let [canonical_name, _] = normalize_chrom_name(&info.name);
+            sizes.entry(canonical_name).or_insert(info.length);
+        }
+    }
+    Ok(sizes)
+}
+
+/// Return blacklist intervals for `chrom`, matching both original and
+/// chr-prefix-toggled chromosome names.
+fn blacklist_intervals_for_chrom(
+    blacklist: &[(Arc<str>, u32, u32)],
+    chrom: &str,
+) -> Vec<(u32, u32)> {
+    let [name_a, name_b] = normalize_chrom_name(chrom);
+    blacklist
+        .iter()
+        .filter(|(c, _, _)| c.as_ref() == name_a || c.as_ref() == name_b)
+        .map(|(_, s, e)| (*s, *e))
+        .collect()
+}
+
+/// Subtract sorted, non-overlapping blacklist intervals from a genomic span.
+/// Returns the resulting allowed intervals.
+///
+/// Edge cases (matching Python `blSubtract()`):
+/// - No overlap: blacklist intervals before or after the span leave it intact.
+/// - Partial overlap: start/end portions are trimmed.
+/// - Enclosed: blacklist interval inside the span splits it in two.
+/// - Adjacent: back-to-back blacklist intervals are handled correctly.
+/// - Empty blacklist: the full span is returned.
+pub fn subtract_blacklist(span: (u32, u32), blacklist: &[(u32, u32)]) -> Vec<(u32, u32)> {
+    let mut result = Vec::new();
+    let mut cursor = span.0;
+    for &(bl_start, bl_end) in blacklist {
+        if bl_end <= cursor {
+            continue;
+        }
+        if bl_start > cursor {
+            result.push((cursor, bl_start.min(span.1)));
+        }
+        cursor = bl_end;
+        if cursor >= span.1 {
+            break;
+        }
+    }
+    if cursor < span.1 {
+        result.push((cursor, span.1));
+    }
+    result
+}
+
+/// Determine whether a BED record should be dispatched given the blacklist.
+///
+/// Keep deepTools compatibility: Python subtracts blacklist intervals from
+/// mapReduce genome chunks before region dispatch
+/// (deeptools/mapReduce.py:87-104,239-263), then computes signal without a
+/// blacklist mask (deeptools/heatmapper.py:531-538). This is not the cleanest
+/// design, but output parity depends on it.
+pub(crate) fn record_passes_blacklist(
+    record: &BedRecord,
+    blacklist: &[(Arc<str>, u32, u32)],
+    chrom_sizes: &HashMap<String, u32>,
+) -> bool {
+    let [canonical_name, _] = normalize_chrom_name(&record.chrom);
+    let chrom_size = match chrom_sizes.get(&canonical_name) {
+        Some(s) => *s,
+        // Chromosome not in score files: allow dispatch (it will produce NaN
+        // rows downstream, matching Python behavior).
+        None => return true,
+    };
+
+    let bl_intervals = blacklist_intervals_for_chrom(blacklist, &canonical_name);
+    if bl_intervals.is_empty() {
+        return true;
+    }
+
+    let allowed = subtract_blacklist((0, chrom_size), &bl_intervals);
+
+    // A record is dispatched if its interval overlaps any allowed interval.
+    allowed
+        .iter()
+        .any(|&(a_start, a_end)| record.start < a_end && a_start < record.end)
 }
 
 fn parse_grouped_bed(path: &Path, default_label: String) -> Result<Vec<Group>, BedReadError> {
@@ -346,5 +482,90 @@ mod tests {
         let mut seen = HashSet::new();
         let label = next_unique_label("   ", "genes", &mut seen);
         assert_eq!(label, "genes");
+    }
+
+    // ── normalize_chrom_name ───────────────────────────────────────────────
+
+    #[test]
+    fn normalize_chrom_with_prefix() {
+        let [a, b] = normalize_chrom_name("chr1");
+        assert_eq!(a, "chr1");
+        assert_eq!(b, "1");
+    }
+
+    #[test]
+    fn normalize_chrom_without_prefix() {
+        let [a, b] = normalize_chrom_name("1");
+        assert_eq!(a, "1");
+        assert_eq!(b, "chr1");
+    }
+
+    #[test]
+    fn normalize_chrom_empty() {
+        let [a, b] = normalize_chrom_name("");
+        assert_eq!(a, "");
+        assert_eq!(b, "chr");
+    }
+
+    // ── subtract_blacklist ─────────────────────────────────────────────────
+
+    #[test]
+    fn subtract_blacklist_no_overlap_before() {
+        // blacklist entirely before span
+        let result = subtract_blacklist((20, 30), &[(0, 10)]);
+        assert_eq!(result, vec![(20, 30)]);
+    }
+
+    #[test]
+    fn subtract_blacklist_no_overlap_after() {
+        // blacklist entirely after span
+        let result = subtract_blacklist((0, 10), &[(20, 30)]);
+        assert_eq!(result, vec![(0, 10)]);
+    }
+
+    #[test]
+    fn subtract_blacklist_partial_overlap_left() {
+        // blacklist overlaps start of span
+        let result = subtract_blacklist((10, 30), &[(5, 15)]);
+        assert_eq!(result, vec![(15, 30)]);
+    }
+
+    #[test]
+    fn subtract_blacklist_partial_overlap_right() {
+        // blacklist overlaps end of span
+        let result = subtract_blacklist((10, 30), &[(25, 35)]);
+        assert_eq!(result, vec![(10, 25)]);
+    }
+
+    #[test]
+    fn subtract_blacklist_enclosed() {
+        // blacklist fully inside span → splits span in two
+        let result = subtract_blacklist((10, 30), &[(15, 20)]);
+        assert_eq!(result, vec![(10, 15), (20, 30)]);
+    }
+
+    #[test]
+    fn subtract_blacklist_adjacent() {
+        let result = subtract_blacklist((0, 30), &[(0, 10), (10, 20)]);
+        assert_eq!(result, vec![(20, 30)]);
+    }
+
+    #[test]
+    fn subtract_blacklist_empty() {
+        let result = subtract_blacklist((0, 10), &[]);
+        assert_eq!(result, vec![(0, 10)]);
+    }
+
+    #[test]
+    fn subtract_blacklist_span_fully_covered() {
+        // blacklist covers entire span
+        let result = subtract_blacklist((10, 20), &[(0, 30)]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn subtract_blacklist_multiple_intervals() {
+        let result = subtract_blacklist((0, 100), &[(10, 20), (40, 60), (90, 95)]);
+        assert_eq!(result, vec![(0, 10), (20, 40), (60, 90), (95, 100)]);
     }
 }

@@ -26,9 +26,38 @@ where
     let group_labels: Vec<String> = groups.iter().map(|g| g.label.clone()).collect();
     let group_capacity: Vec<usize> = groups.iter().map(|g| g.records.len()).collect();
 
+    // ── Load blacklist & chromosome sizes ───────────────────────────────
+    // Keep deepTools compatibility: Python subtracts blacklist intervals
+    // from mapReduce genome chunks before region dispatch
+    // (deeptools/mapReduce.py:87-104,239-263), then computes signal without
+    // a blacklist mask (deeptools/heatmapper.py:531-538). This is not the
+    // cleanest design, but output parity depends on it.
+    let blacklist: Option<Vec<(std::sync::Arc<str>, u32, u32)>> =
+        if let Some(ref bl_path) = general.blacklist {
+            Some(core::regions::load_blacklist(bl_path)?)
+        } else {
+            None
+        };
+
+    let chrom_sizes: Option<std::collections::HashMap<String, u32>> = if blacklist.is_some() {
+        Some(core::regions::load_chrom_sizes(&io.scores)?)
+    } else {
+        None
+    };
+
+    // ── Generate tasks (with blacklist filtering) ───────────────────────
     let mut tasks = Vec::new();
     for (group_index, group) in groups.into_iter().enumerate() {
         for record in group.records {
+            if let Some(ref bl) = blacklist {
+                if !core::regions::record_passes_blacklist(
+                    &record,
+                    bl,
+                    chrom_sizes.as_ref().unwrap(),
+                ) {
+                    continue;
+                }
+            }
             let index = tasks.len();
             tasks.push(RegionTask {
                 index,

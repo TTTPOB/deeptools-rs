@@ -288,6 +288,118 @@ fn gtf_input() {
     );
 }
 
+// ── blacklist parity tests ──────────────────────────────────────────────────
+
+#[test]
+fn reference_point_blacklist() {
+    let dr = data_root();
+    run_compute_and_compare(
+        "master_blacklist.mat",
+        &[
+            "reference-point",
+            "-R",
+            dr.join("test2.bed").to_str().unwrap(),
+            "-S",
+            dr.join("test.bw").to_str().unwrap(),
+            "-b",
+            "100",
+            "-a",
+            "100",
+            "--bs",
+            "1",
+            "-p",
+            "1",
+            "--blackListFileName",
+            dr.join("test_blacklist.bed").to_str().unwrap(),
+        ],
+        5e-6,
+    );
+}
+
+#[test]
+fn reference_point_blacklist_missing_data_as_zero() {
+    let dr = data_root();
+    run_compute_and_compare(
+        "master_blacklist_nan_to_zero.mat",
+        &[
+            "reference-point",
+            "-R",
+            dr.join("test2.bed").to_str().unwrap(),
+            "-S",
+            dr.join("test.bw").to_str().unwrap(),
+            "-b",
+            "100",
+            "-a",
+            "100",
+            "--bs",
+            "1",
+            "-p",
+            "1",
+            "--missingDataAsZero",
+            "--blackListFileName",
+            dr.join("test_blacklist.bed").to_str().unwrap(),
+        ],
+        5e-6,
+    );
+}
+
+#[test]
+fn scale_regions_blacklist() {
+    let dr = data_root();
+    run_compute_and_compare(
+        "master_scale_reg_blacklist.mat",
+        &[
+            "scale-regions",
+            "-R",
+            dr.join("test2.bed").to_str().unwrap(),
+            "-S",
+            dr.join("test.bw").to_str().unwrap(),
+            "-b",
+            "100",
+            "-a",
+            "100",
+            "-m",
+            "100",
+            "--bs",
+            "1",
+            "-p",
+            "1",
+            "--blackListFileName",
+            dr.join("test_blacklist.bed").to_str().unwrap(),
+        ],
+        5e-6,
+    );
+}
+
+#[test]
+fn scale_regions_blacklist_missing_data_as_zero() {
+    let dr = data_root();
+    run_compute_and_compare(
+        "master_scale_reg_blacklist_nan_to_zero.mat",
+        &[
+            "scale-regions",
+            "-R",
+            dr.join("test2.bed").to_str().unwrap(),
+            "-S",
+            dr.join("test.bw").to_str().unwrap(),
+            "-b",
+            "100",
+            "-a",
+            "100",
+            "-m",
+            "100",
+            "--bs",
+            "1",
+            "-p",
+            "1",
+            "--missingDataAsZero",
+            "--blackListFileName",
+            dr.join("test_blacklist.bed").to_str().unwrap(),
+        ],
+        5e-6,
+    );
+}
+
 #[test]
 fn metagene() {
     let tdr = test_data_root();
