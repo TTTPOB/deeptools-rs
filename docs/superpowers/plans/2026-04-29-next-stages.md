@@ -13,7 +13,7 @@
 Each HybridBucket accumulates rows in memory up to ~1 GB (default, injectable for testing), then flushes the chunk to a temp file via `std::thread::spawn` + move. A double-buffer scheme reuses the flushed Vec's capacity; back-pressure (join oldest flush handle) prevents unbounded memory growth on slow I/O (HDD). At finalize, temp files are mmap'd (`memmap2`) for zero-copy sorted readback.
 
 Auxiliary outputs (`--outFileNameMatrix`, `--outFileSortedRegions`) are handled by `FileCollector`:
-- **`outFileSortedRegions`**: Static BED header written first, then row-by-row. Group label is **passed explicitly** alongside each row — the emit interface is `emit_row(group_index, row)` (not derived from boundaries, because emit order is NOT always group-contiguous: sort=No + I/O coalescing can interleave groups).
+- **`outFileSortedRegions`**: Static BED header written first, then row-by-row. Group label is **passed explicitly** alongside each row — the emit interface is `on_row(group_index, row)`. Although all paths now produce group-contiguous output (sort=No uses per-group I/O sort, keep/ascend/descend restore group order), explicit group_index is more robust than deriving from boundaries and simplifies the code.
 - **`outFileNameMatrix`**: Three-line header format. Only line 1 (`#Group1:N\tGroup2:M`) depends on final group counts. Lines 2-3 are parameter-derived and fixed. Placeholder trick:
   1. At creation: compute line 1 using `group_capacity` counts, record its byte length as `reserved_line1_len`. Write line 1 + lines 2-3. **Flush the BufWriter** before writing any data rows.
   2. Data rows are appended after the header.
@@ -42,7 +42,7 @@ The HybridBucketCollector must replicate this exactly. Each row gets an `inserti
 The HybridBucket path computes sort_key via `compute_sort_metric`. The 1-based `--sortUsingSamples` indices must be normalized to 0-based via `normalize_sort_sample_indices()` in the executor before computing sort keys.
 
 ### group_index travels with each row
-The emit interface is `emit_row(group_index, row)` — not derived from boundaries. This is required because emit order is NOT always group-contiguous: sort=No with I/O coalescing reorders work items by chrom/query, interleaving groups. The group_index is available from the executor's batch result tuple `(orig_idx, group_index, Option<MatrixRow>)` throughout the pipeline.
+The emit interface is `on_row(group_index, row)` — not derived from boundaries. All paths now produce group-contiguous output (sort=No uses per-group I/O sort; keep/ascend/descend restore group order via HybridBucket). Explicit group_index is still used because it's more robust and simpler than deriving from boundaries. The group_index is available from the executor's batch result tuple `(orig_idx, group_index, Option<MatrixRow>)` throughout the pipeline.
 
 ### sort=No must preserve group-contiguous output
 The current executor globally sorts all work_items by chrom/query for I/O locality, even for sort=No. This interleaves groups and makes `group_boundaries` inaccurate — breaking plotHeatmap/plotProfile.
@@ -393,7 +393,7 @@ git commit -m "feat: add finalize_sorted/keep_order with mmap readback and stabl
 - Modify: `src/io/writers/mod.rs` (remove auxiliary guard, remove `write_outputs()`, re-export `STREAMING_CELL_THRESHOLD`)
 - Modify: `src/io/writers/auxiliary.rs` (add per-row streaming functions)
 - Modify: `src/pipeline/core/collector.rs` (remove `InMemoryCollector` + `GroupBucketCollector`; extend `FileCollector`; change `RowCollector::on_row` signature)
-- Modify: `src/pipeline/matrix.rs` (remove `sort_groups()`, `prune_zero_rows()`)
+- Modify: `src/pipeline/matrix.rs` (remove `MatrixData`, `GroupStats`, `sort_groups()`, `prune_zero_rows()`)
 
 - [ ] **Step 1: Simplify executor to two strategies**
 
@@ -499,7 +499,7 @@ Ok(RunOutcome::Streamed)
 
 - `InMemoryCollector` from `collector.rs`
 - `GroupBucketCollector` from `collector.rs`
-- `sort_groups()`, `prune_zero_rows()` from `matrix.rs`
+- `MatrixData`, `GroupStats`, `sort_groups()`, `prune_zero_rows()` from `matrix.rs`
 - `write_outputs()`, `should_use_streaming()` from `io/writers/mod.rs`
 - `RunOutcome::Matrix`, `spawn_writer_thread` from `pipeline/mod.rs`
 - Auxiliary streaming guard from `should_use_streaming_for_plan`
@@ -771,7 +771,7 @@ Tasks 1, 5, 3 can be parallelized. Task 2 subtasks are sequential. Task 4 should
 | 19 | Per-bucket threshold may OOM with many groups | Default lowered to 1 GB; future: global memory budget |
 | 20 | Spill temp file leak on abort | HybridBucketCollector Drop impl cleans up |
 | 21 | compare_matrix built in production | Not gated — shares deps, no overhead, simplifies `cargo test` |
-| 22 | group label derived from boundaries + row_index is wrong | emit interface passes `group_index` explicitly: `emit_row(group_index, row)` |
+| 22 | group label derived from boundaries + row_index is wrong | emit interface passes `group_index` explicitly: `on_row(group_index, row)` |
 | 23 | "emit order always group-contiguous" is false for sort=No | Confirmed: I/O coalescing interleaves groups. Group label must come from explicit group_index, not boundaries. |
 | 24 | outFileNameMatrix placeholder header format unclear | Only line 1 has variable counts. Initial counts (group_capacity) ≥ final counts → space-pad final to match. Lines 2-3 are fixed. |
 | 25 | write_outputs() early return skips auxiliary | `write_outputs()` removed entirely; all output through FileCollector |
