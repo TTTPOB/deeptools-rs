@@ -4,16 +4,19 @@
 
 **Goal:** Five improvements: remove `num_cpus` dep, add file-spilling for large sorted matrices, build a matrix comparison dev binary, migrate Python regression tests to Rust integration tests, and improve the profiling bench script.
 
-**Architecture:** File spilling introduces a third execution path in `run.rs`:
-1. **StreamOrdered** (existing): small/large matrix + no reordering → `FileCollector` streams directly.
-2. **InMemory** (existing): small matrix + any sort → `InMemoryCollector` → `MatrixData` → `sort_groups()` → `write_outputs()`.
-3. **Spilling** (new): large matrix + reordering needed (keep+coalesced / ascend / descend) → `HybridBucketCollector` accumulates rows with chunked 4 GB flush to temp files via writer threads. At finalize, sorted rows are emitted **directly to output writers** (main gzip + optional auxiliary), bypassing `MatrixData` entirely.
+**Architecture:** Two execution paths in `run.rs`:
+1. **StreamOrdered** (existing): sort=no, or sort=keep + already compute-sorted → `FileCollector` streams rows directly to output.
+2. **HybridBucket** (new, replaces InMemory + GroupBucket): any reordering needed (keep+coalesced / ascend / descend), any matrix size → `HybridBucketCollector` accumulates rows with chunked 4 GB flush to temp files via writer threads. Small matrices stay entirely in memory (never trigger spill). At finalize, sorted rows are emitted **directly to output writers** (main gzip + optional auxiliary), bypassing `MatrixData` entirely. `InMemoryCollector`, `GroupBucketCollector`, `MatrixData.sort_groups()`, `MatrixData.prune_zero_rows()`, and `write_outputs()` become dead code and are removed.
 
 Each spilling bucket accumulates rows in memory up to ~4 GB, then flushes the chunk to a temp file via `std::thread::spawn` + move. A double-buffer scheme reuses the flushed Vec's capacity; back-pressure (join oldest flush handle) prevents unbounded memory growth on slow I/O (HDD). At finalize, temp files are mmap'd (`memmap2`) for zero-copy sorted readback.
 
 Auxiliary outputs (`--outFileNameMatrix`, `--outFileSortedRegions`) are supported in StreamOrdered, Spilling, and InMemory paths:
 - **`outFileSortedRegions`**: Static BED header written first, then row-by-row. Group label is **passed explicitly** alongside each row — the emit interface is `emit_row(group_index, row)` (not derived from boundaries, because emit order is NOT always group-contiguous: sort=No + I/O coalescing can interleave groups).
-- **`outFileNameMatrix`**: Three-line header format. Only line 1 (`#Group1:N\tGroup2:M`) depends on final group counts. Lines 2-3 are parameter-derived and fixed. Placeholder trick: write line 1 using `group_capacity` (pre-filter counts) at creation, then seek to offset 0 and overwrite with actual counts at `finish()`. **Initial counts are always ≥ final counts** (filtering only removes rows), so the initial string is always ≥ the final string in byte length — pad the final string with trailing spaces before `\n` to match. Lines 2-3 are written once and never change.
+- **`outFileNameMatrix`**: Three-line header format. Only line 1 (`#Group1:N\tGroup2:M`) depends on final group counts. Lines 2-3 are parameter-derived and fixed. Placeholder trick:
+  1. At creation: compute line 1 using `group_capacity` counts, record its byte length as `reserved_line1_len`. Write line 1 + lines 2-3. **Flush the BufWriter** before writing any data rows.
+  2. Data rows are appended after the header.
+  3. At `finish()`: **flush the BufWriter first**. Compute final line 1 with actual group counts. Assert `final_len <= reserved_line1_len` (initial counts ≥ final counts since filtering only removes rows). Pad final line 1 with trailing spaces before `\n` to exactly `reserved_line1_len` bytes. **Seek to offset 0**, write the padded line 1. If `final_len > reserved_line1_len`, bail with error (should never happen, but safety check prevents overwriting line 2).
+  4. Lines 2-3 are never rewritten.
 - **StreamOrdered path**: `FileCollector` is extended with optional auxiliary writers. `on_row(group_index, row)` writes to all active writers.
 - **Spilling path**: `SpillingOutputWriter` wraps the same set of writers. `emit_row(group_index, row)` writes to all.
 
@@ -29,14 +32,18 @@ The spilling path's `finalize_sorted`/`finalize_keep_order` emits rows directly 
 ### orig_idx is task index, not row index
 `orig_idx` is assigned as `task.index` in `run.rs` (0..task_count). Filtered rows (skipZeros, threshold) produce `None` from the worker — no MatrixRow is emitted for them. For `finalize_keep_order`, the placement array must be sized by `task_count` (not `group_counts.sum()`), with empty slots for filtered rows.
 
-### Spilling sort must exactly replicate MatrixData::sort_groups()
-Current `sort_groups()` does: stable `sort_by(ascending)`, then `indices.reverse()` for descend. This means equal-key rows in descend mode appear in **reverse** insertion order. The spilling path must replicate this exactly: sort all SpillRefs + in-memory rows by `(sort_key ascending, orig_idx ascending)` using stable sort, then `.reverse()` the entire sequence for descend. This avoids subtle test differences between small (InMemory) and large (Spilling) matrices.
+### Sort tie-break uses insertion sequence, not orig_idx
+Current `sort_groups()` does stable `sort_by(ascending)` on rows in their GroupBucket push order (which is compute order — I/O locality sorted, NOT orig_idx order), then `indices.reverse()` for descend. Equal-key rows preserve compute order in ascending, and reverse compute order in descending.
+
+The HybridBucketCollector must replicate this exactly. Each row gets an `insertion_seq: u32` (monotonically increasing counter per bucket) at push time. Sort comparator: `(sort_key ascending, insertion_seq ascending)`, then `.reverse()` the entire sequence for descend. `orig_idx` is only used for `sort=keep` (placement array), not for sort tie-breaking.
 
 ### sortUsingSamples normalization
 The spilling path computes sort_key via `compute_sort_metric`. The 1-based `--sortUsingSamples` indices must be normalized to 0-based via `normalize_sort_sample_indices()` in the executor before computing sort keys, same as `run.rs` does for the InMemory path.
 
 ### group_index travels with each row
 The emit interface is `emit_row(group_index, row)` — not derived from boundaries. This is required because emit order is NOT always group-contiguous: sort=No with I/O coalescing reorders work items by chrom/query, interleaving groups. The group_index is available from the executor's batch result tuple `(orig_idx, group_index, Option<MatrixRow>)` throughout the pipeline.
+
+**Note on sort=No group interleaving in .mat.gz**: The main matrix header's `group_boundaries` assumes group-contiguous rows. When sort=No and I/O coalescing interleaves groups, these boundaries are technically inaccurate. This is **pre-existing behavior** in the current codebase (not introduced by this plan). Fixing it would require either enforcing group-contiguous output for sort=No (performance cost) or changing the header format (compatibility break). Out of scope for this plan.
 
 ### ChromTable per chunk file
 Each flush produces its own `ChromTable`. Deserialization uses the matching chunk's table. Tables are tiny (~25 entries) and stay in memory alongside the mmap.
@@ -60,10 +67,13 @@ Each flush produces its own `ChromTable`. Deserialization uses the matching chun
 - Modify: `src/pipeline/core/mod.rs` (re-export)
 - Modify: `src/pipeline/core/executor.rs` (new `Spilling` output strategy that writes directly to SpillingOutputWriter)
 - Modify: `src/pipeline/matrix.rs` (`compute_sort_metric`, `compare_ascending` → `pub(crate)`)
-- Modify: `src/pipeline/run.rs` (add third Spilling code path, pass `task_count` to executor)
-- Modify: `src/io/writers/mod.rs` (remove auxiliary streaming guard)
+- Modify: `src/pipeline/run.rs` (simplify to two paths: StreamOrdered + HybridBucket; remove InMemory path; pass `task_count` to executor)
+- Modify: `src/pipeline/mod.rs` (remove `RunOutcome::Matrix`, `spawn_writer_thread`, `write_outputs` call)
+- Modify: `src/io/writers/mod.rs` (remove auxiliary streaming guard, re-export `STREAMING_CELL_THRESHOLD`)
 - Modify: `src/io/writers/auxiliary.rs` (add per-row streaming functions with group_label param)
-- Modify: `src/pipeline/core/collector.rs` (remove `GroupBucketCollector`; optionally extend `FileCollector` for auxiliary outputs in StreamOrdered path)
+- Modify: `src/pipeline/core/collector.rs` (remove `InMemoryCollector` + `GroupBucketCollector`; extend `FileCollector` with auxiliary writers + `on_row(group_index, row)`)
+- Modify: `src/io/writers/mod.rs` (remove `write_outputs()` and `should_use_streaming()` — no longer needed)
+- Modify: `src/pipeline/matrix.rs` (remove `sort_groups()` and `prune_zero_rows()` — dead code)
 - Modify: `Cargo.toml` (add `memmap2`)
 
 ### Task 3 (matrix comparison binary)
@@ -174,6 +184,7 @@ pub(crate) struct SpillIndex {
     pub(crate) orig_idx: usize,
     pub(crate) group_index: usize,
     pub(crate) sort_key: f64,
+    pub(crate) insertion_seq: u32,  // per-bucket push order, for stable sort tie-break
     pub(crate) file_offset: u64,
     pub(crate) row_byte_len: u32,
 }
@@ -222,19 +233,19 @@ git commit -m "feat: add spill module with row serialization and chrom interning
 ```rust
 struct FlushResult {
     indices: Vec<SpillIndex>,
-    returned_buf: Vec<(usize, f64, MatrixRow)>,
+    returned_buf: Vec<(usize, f64, u32, MatrixRow)>,
     chrom_table: ChromTable,
     temp_path: PathBuf,
 }
 ```
 
-`flush_chunk(rows, group_index) -> Result<FlushResult>`: runs on spawned thread, serializes all rows to a new temp file, returns indices + cleared-but-capacity-retained Vec.
+`flush_chunk(rows: Vec<(usize, f64, u32, MatrixRow)>, group_index) -> Result<FlushResult>`: runs on spawned thread, serializes all rows to a new temp file. Each row's `(orig_idx, sort_key, insertion_seq)` is recorded in the SpillIndex. Returns indices + cleared-but-capacity-retained Vec.
 
 `CollectorBucket`:
 ```rust
 struct CollectorBucket {
-    active: Vec<(usize, f64, MatrixRow)>,  // (orig_idx, sort_key, row)
-    spare: Option<Vec<(usize, f64, MatrixRow)>>,
+    active: Vec<(usize, f64, u32, MatrixRow)>,  // (orig_idx, sort_key, insertion_seq, row)
+    spare: Option<Vec<(usize, f64, u32, MatrixRow)>>,
     estimated_bytes: usize,
     group_index: usize,
     flush_handles: Vec<JoinHandle<Result<FlushResult>>>,
@@ -299,7 +310,7 @@ pub(crate) struct SpillingOutputWriter {
 }
 ```
 
-`new(io, group_labels, group_capacity)`: opens all required output files. For outFileSortedRegions, writes the static BED header immediately. For outFileNameMatrix, writes line 1 placeholder using group_capacity, then writes lines 2-3 (fixed).
+`new(io, group_labels, group_capacity, header_estimate: &MatrixHeader)`: opens all required output files. For outFileSortedRegions, writes the static BED header immediately. For outFileNameMatrix, writes line 1 placeholder using group_capacity counts, then writes lines 2-3 using `header_estimate` fields (upstream, downstream, body, bin_size, unscaled_5_prime, unscaled_3_prime, sample_labels, sample_boundaries — all known upfront from `mode.build_header()`). The `header_estimate` is the same one already computed in `run.rs` for streaming header capacity checks.
 
 `emit_row(&mut self, group_index: usize, row: &MatrixRow)`: writes to main gzip + optional auxiliary.
 - `outFileSortedRegions`: uses `self.group_labels[group_index]` directly — no boundary derivation needed.
@@ -314,21 +325,22 @@ Joins all handles. For each bucket: mmaps all chunk files, collects `SpillRef` f
 ```rust
 struct SpillRef {
     sort_key: f64,
-    orig_idx: usize,
+    insertion_seq: u32,  // for stable sort tie-break (NOT orig_idx)
     mmap_idx: usize,
     file_offset: u64,
     row_byte_len: u32,
 }
 ```
 
-**Sort replicates `MatrixData::sort_groups()` exactly**: always sort ascending by `(sort_key, orig_idx)`, collect into a Vec, then `.reverse()` for descend:
+**Sort replicates current `sort_groups()` exactly**: always sort ascending by `(sort_key, insertion_seq)`, collect into a Vec, then `.reverse()` for descend:
 
 ```rust
 // Merge all spill_refs + in-memory into one Vec<EmitEntry>
-// (EmitEntry is either SpillRef or owned MatrixRow, with sort_key + orig_idx)
+// (EmitEntry: SpillRef or owned MatrixRow, each carrying sort_key + insertion_seq)
+// In-memory rows carry their insertion_seq from the active buffer tuple.
 all_entries.sort_by(|a, b| {
     compare_ascending(a.sort_key, b.sort_key)
-        .then(a.orig_idx.cmp(&b.orig_idx))
+        .then(a.insertion_seq.cmp(&b.insertion_seq))
 });
 if !sort_ascending {
     all_entries.reverse();
@@ -336,7 +348,7 @@ if !sort_ascending {
 for entry in all_entries { emit(entry)?; }
 ```
 
-This means for descend, equal-key rows appear in reverse orig_idx order — matching the existing `sort_by(ascending)` + `reverse()` behavior.
+This means for descend, equal-key rows appear in reverse insertion order — matching the existing `stable sort_by(ascending)` + `reverse()` behavior exactly.
 
 Note: **`normalize_sort_sample_indices`** must be called before computing sort keys. The executor receives `general.sort_using_samples` (1-based from CLI), normalizes to 0-based, and passes to `compute_sort_metric`.
 
@@ -731,3 +743,9 @@ Tasks 1, 5, 3 can be parallelized. Task 2 subtasks are sequential. Task 4 should
 | 25 | write_outputs() early return skips auxiliary | Remove streaming early-return from write_outputs(); InMemory path always writes all outputs directly. |
 | 26 | Feature gate + cargo test contradiction | Dropped feature gate; binary shares all deps, no overhead. |
 | 27 | needs_spilling() conservatively spills keep+already_sorted | Acceptable: correct but suboptimal. Future: pass already_sorted hint from executor. |
+| 28 | Small matrix InMemory path conflicts with GroupBucketCollector deletion | HybridBucketCollector serves all sizes; InMemoryCollector deleted. Small matrices stay in-memory (never trigger spill). |
+| 29 | Spilling sort tie-break uses orig_idx, doesn't match compute order | Changed to `insertion_seq` (per-bucket push counter) — matches current stable sort behavior exactly. |
+| 30 | AuxValuesWriter can't write lines 2-3 without header info | Receives `header_estimate: &MatrixHeader` (already computed in run.rs) for fixed header fields. |
+| 31 | STREAMING_CELL_THRESHOLD not visible to run.rs | Re-exported from `io::writers::mod.rs`. |
+| 32 | outFileNameMatrix seek/flush sequence unclear | Explicit: flush before rows, flush before seek, assert final_len <= reserved, pad to exact byte length. |
+| 33 | sort=No group interleaving in .mat.gz | Pre-existing behavior, documented as known limitation, out of scope. |
