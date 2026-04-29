@@ -6,8 +6,6 @@ use crate::pipeline::core::{self, ModeTag, PipelineMode};
 use crate::pipeline::matrix::{LayoutVectors, MatrixHeader, MatrixHeaderBuilder, MatrixRow};
 use crate::pipeline::zones::ScaleRegionsPlan;
 
-use super::RunOutcome;
-
 #[derive(Clone)]
 struct ScaleRegionsMode {
     options: ScaleRegionsOptions,
@@ -177,7 +175,7 @@ pub fn run(
     io: &IoOptions,
     gtf: &GtfOptions,
     options: &ScaleRegionsOptions,
-) -> Result<RunOutcome> {
+) -> Result<()> {
     let mode = ScaleRegionsMode::new(options.clone(), gtf.keep_exons);
     super::run_pipeline(mode, general, io, gtf)
 }

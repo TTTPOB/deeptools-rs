@@ -6,8 +6,6 @@ use crate::pipeline::core::{self, ModeTag, PipelineMode};
 use crate::pipeline::matrix::{LayoutVectors, MatrixHeader, MatrixHeaderBuilder, MatrixRow};
 use crate::pipeline::zones::ReferencePointPlan;
 
-use super::RunOutcome;
-
 #[derive(Clone)]
 struct ReferencePointMode {
     options: ReferencePointOptions,
@@ -151,7 +149,7 @@ pub fn run(
     io: &IoOptions,
     gtf: &GtfOptions,
     options: &ReferencePointOptions,
-) -> Result<RunOutcome> {
+) -> Result<()> {
     let mode = ReferencePointMode::new(options.clone(), gtf.keep_exons);
     super::run_pipeline(mode, general, io, gtf)
 }

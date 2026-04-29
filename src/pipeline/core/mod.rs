@@ -13,7 +13,7 @@ pub use traits::{
 };
 pub use samples::{Sample, WorkerSamples};
 pub use regions::{Group, RegionTask, load_groups, derive_sample_labels, normalize_sort_sample_indices};
-pub use collector::{RowCollector, InMemoryCollector, FileCollector, GroupBucketCollector};
+pub use collector::{RowCollector, FileCollector};
 pub use executor::execute_mode;
 pub use worker::compute_row;
 

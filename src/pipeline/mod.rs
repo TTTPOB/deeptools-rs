@@ -1,4 +1,4 @@
-pub use matrix::{MatrixData, MatrixHeader, MatrixRow};
+pub use matrix::{MatrixHeader, MatrixRow};
 pub mod core;
 pub mod matrix;
 mod reference_point;
@@ -8,15 +8,9 @@ pub mod zones;
 
 pub(crate) use run::run_pipeline;
 
-use crate::config::{Config, IoOptions, ModeConfig};
-use crate::io::writers;
+use crate::config::ModeConfig;
 
-pub enum RunOutcome {
-    Matrix(MatrixData),
-    Streamed,
-}
-
-pub fn execute(config: Config) -> anyhow::Result<()> {
+pub fn execute(config: crate::config::Config) -> anyhow::Result<()> {
     let general = &config.general;
     let io = &config.io;
     let gtf = &config.gtf;
@@ -36,32 +30,15 @@ pub fn execute(config: Config) -> anyhow::Result<()> {
     }
 
     match &config.mode {
-        ModeConfig::ScaleRegions(options) => match scale_regions::run(general, io, gtf, options)? {
-            RunOutcome::Matrix(matrix) => spawn_writer_thread(matrix, io)?,
-            RunOutcome::Streamed => {}
-        },
+        ModeConfig::ScaleRegions(options) => {
+            scale_regions::run(general, io, gtf, options)?;
+        }
         ModeConfig::ReferencePoint(options) => {
-            match reference_point::run(general, io, gtf, options)? {
-                RunOutcome::Matrix(matrix) => spawn_writer_thread(matrix, io)?,
-                RunOutcome::Streamed => {}
-            }
+            reference_point::run(general, io, gtf, options)?;
         }
     }
 
     Ok(())
-}
-
-fn spawn_writer_thread(matrix: MatrixData, io: &IoOptions) -> anyhow::Result<()> {
-    let io_clone = io.clone();
-    let handle = std::thread::Builder::new()
-        .name("matrix-writer".into())
-        .spawn(move || writers::write_outputs(matrix, &io_clone))
-        .map_err(|err| anyhow::anyhow!("Failed to spawn matrix writer thread: {err}"))?;
-
-    match handle.join() {
-        Ok(result) => result,
-        Err(err) => std::panic::resume_unwind(err),
-    }
 }
 
 fn describe_mode(mode: &ModeConfig) -> &'static str {

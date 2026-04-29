@@ -31,6 +31,7 @@ pub(crate) struct SpillIndex {
     /// Original input order index (for keep-order emit).
     pub(crate) orig_idx: usize,
     /// Which group bucket this row belongs to.
+    #[allow(dead_code)]
     pub(crate) group_index: usize,
     /// Pre-computed sort key (e.g. mean of values for sort-by-mean).
     pub(crate) sort_key: f64,
@@ -568,7 +569,9 @@ impl CollectorBucket {
 /// buffer is unavailable.
 pub(crate) struct HybridBucketCollector {
     buckets: Vec<CollectorBucket>,
+    #[allow(dead_code)]
     sample_count: usize,
+    #[allow(dead_code)]
     bin_count: usize,
     threshold: usize,
     row_estimated_bytes: usize,
@@ -634,7 +637,7 @@ impl HybridBucketCollector {
     /// Joins all in-flight flushes, then for each bucket (group) emits rows in
     /// sorted order by `(sort_key, insertion_seq)`. When `sort_ascending` is
     /// false the final order is reversed (matching the `sort_by(ascending) +
-    /// reverse()` behaviour of `MatrixData::sort_groups`).
+    /// reverse()` behaviour of the previous in-memory sort).
     ///
     /// The `header_builder` closure receives the final per-group row counts and
     /// returns a `MatrixHeader`. The `emit` closure receives `(group_index, row)`.

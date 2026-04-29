@@ -1,8 +1,6 @@
 use std::cmp::Ordering;
 
-use anyhow::{Result, bail};
-
-use crate::config::{GeneralOptions, SortRegions, SortUsing};
+use crate::config::{GeneralOptions, SortUsing};
 use crate::io::BedRecord;
 use serde::Serialize;
 
@@ -153,7 +151,7 @@ impl<'a> MatrixHeaderBuilder<'a> {
 
     pub fn with_uniform_sample_boundaries(self, bins_per_sample: usize) -> Self {
         let sample_count = self.sample_count;
-        let boundaries = MatrixData::sample_boundaries_uniform(sample_count, bins_per_sample);
+        let boundaries = sample_boundaries_uniform(sample_count, bins_per_sample);
         self.with_sample_boundaries(boundaries)
     }
 
@@ -164,7 +162,7 @@ impl<'a> MatrixHeaderBuilder<'a> {
         let sample_boundaries = self
             .sample_boundaries
             .expect("MatrixHeaderBuilder requires sample boundaries before build");
-        let group_boundaries = MatrixData::group_boundaries_from_counts(self.group_counts);
+        let group_boundaries = group_boundaries_from_counts(self.group_counts);
 
         MatrixHeader {
             verbose: self.general.verbose,
@@ -214,184 +212,37 @@ impl MatrixRow {
     }
 }
 
-/// Summary information for each group to support diagnostics and future features
-/// like clustering or reporting.
-#[derive(Debug, Clone)]
-pub struct GroupStats {
-    pub label: String,
-    pub row_count: usize,
-    pub sample_count: usize,
-    pub start_row: usize,
-    pub end_row: usize,
+/// Compute cumulative group boundaries from per-group row counts.
+pub fn group_boundaries_from_counts(counts: &[usize]) -> Vec<usize> {
+    let mut boundaries = Vec::with_capacity(counts.len() + 1);
+    let mut running = 0usize;
+    boundaries.push(0);
+    for count in counts {
+        running += *count;
+        boundaries.push(running);
+    }
+    boundaries
 }
 
-/// In-memory representation of the computeMatrix result required to serialise
-/// the gzipped matrix as well as auxiliary artifacts such as the plain matrix
-/// table or sorted BED output.
-#[derive(Debug, Clone)]
-pub struct MatrixData {
-    pub header: MatrixHeader,
-    pub rows: Vec<MatrixRow>,
-    pub bin_count: usize,
-    pub sample_count: usize,
+/// Compute cumulative sample boundaries for a uniform number of bins per sample.
+pub fn sample_boundaries_uniform(sample_count: usize, bins_per_sample: usize) -> Vec<usize> {
+    let mut boundaries = Vec::with_capacity(sample_count + 1);
+    for index in 0..=sample_count {
+        boundaries.push(index * bins_per_sample);
+    }
+    boundaries
 }
 
-impl MatrixData {
-    /// Compute cumulative group boundaries from per-group row counts.
-    pub fn group_boundaries_from_counts(counts: &[usize]) -> Vec<usize> {
-        let mut boundaries = Vec::with_capacity(counts.len() + 1);
-        let mut running = 0usize;
-        boundaries.push(0);
-        for count in counts {
-            running += *count;
-            boundaries.push(running);
-        }
-        boundaries
+/// Compute cumulative sample boundaries from per-sample bin counts.
+pub fn sample_boundaries_from_counts(bin_counts: &[usize]) -> Vec<usize> {
+    let mut boundaries = Vec::with_capacity(bin_counts.len() + 1);
+    let mut running = 0usize;
+    boundaries.push(0);
+    for count in bin_counts {
+        running += *count;
+        boundaries.push(running);
     }
-
-    /// Compute cumulative sample boundaries for a uniform number of bins per sample.
-    pub fn sample_boundaries_uniform(sample_count: usize, bins_per_sample: usize) -> Vec<usize> {
-        let mut boundaries = Vec::with_capacity(sample_count + 1);
-        for index in 0..=sample_count {
-            boundaries.push(index * bins_per_sample);
-        }
-        boundaries
-    }
-
-    /// Compute cumulative sample boundaries from per-sample bin counts.
-    pub fn sample_boundaries_from_counts(bin_counts: &[usize]) -> Vec<usize> {
-        let mut boundaries = Vec::with_capacity(bin_counts.len() + 1);
-        let mut running = 0usize;
-        boundaries.push(0);
-        for count in bin_counts {
-            running += *count;
-            boundaries.push(running);
-        }
-        boundaries
-    }
-
-    /// Sort rows within each group according to the configured method, mirroring
-    /// the behaviour of DeepTools' `_matrix.sort_groups`.
-    pub fn sort_groups(
-        &mut self,
-        sort_method: SortRegions,
-        sort_using: SortUsing,
-        sample_list: Option<&[usize]>,
-    ) -> Result<()> {
-        if matches!(sort_method, SortRegions::No | SortRegions::Keep) {
-            return Ok(());
-        }
-
-        if self.rows.is_empty() {
-            return Ok(());
-        }
-
-        let sample_list = sample_list.filter(|indices| !indices.is_empty());
-        if let Some(indices) = sample_list {
-            for &index in indices {
-                if index >= self.sample_count {
-                    bail!(
-                        "The value {} for --sortUsingSamples is not valid. Only values from 1 to {} are allowed.",
-                        index + 1,
-                        self.sample_count
-                    );
-                }
-            }
-        }
-
-        let metrics: Vec<f64> = self
-            .rows
-            .iter()
-            .map(|row| compute_sort_metric(row, sort_using, sample_list))
-            .collect();
-
-        // Move rows out of self and wrap in Option so we can take() individual
-        // entries without cloning any MatrixRow (avoids duplicating ~400 MB for
-        // realistic inputs).
-        let old_rows = std::mem::take(&mut self.rows);
-        let mut takeable: Vec<Option<MatrixRow>> = old_rows.into_iter().map(Some).collect();
-        let old_len = takeable.len();
-        let mut reordered = Vec::with_capacity(old_len);
-
-        for window in self.header.group_boundaries.windows(2) {
-            let start = window[0];
-            let end = window[1];
-            if start >= end {
-                continue;
-            }
-
-            let mut indices: Vec<usize> = (start..end).collect();
-            indices.sort_by(|&left, &right| compare_ascending(metrics[left], metrics[right]));
-            if matches!(sort_method, SortRegions::Descend) {
-                indices.reverse();
-            }
-
-            for index in indices {
-                if let Some(row) = takeable[index].take() {
-                    reordered.push(row);
-                }
-            }
-        }
-
-        self.rows = reordered;
-        Ok(())
-    }
-
-    /// Remove rows containing only zeros (ignoring NaNs) when skip-zero behaviour
-    /// is requested. Updates group boundaries to reflect the filtered matrix.
-    pub fn prune_zero_rows(&mut self) {
-        if !self.header.skip_zeros || self.rows.is_empty() {
-            return;
-        }
-
-        let mut filtered_rows = Vec::with_capacity(self.rows.len());
-        let mut group_counts = Vec::with_capacity(self.header.group_labels.len());
-
-        for window in self.header.group_boundaries.windows(2) {
-            let start = window[0];
-            let end = window[1];
-            if start >= end {
-                group_counts.push(0);
-                continue;
-            }
-
-            let mut retained = 0usize;
-            for row in &self.rows[start..end] {
-                if row_is_all_zero(row) {
-                    continue;
-                }
-                filtered_rows.push(row.clone());
-                retained += 1;
-            }
-            group_counts.push(retained);
-        }
-
-        self.rows = filtered_rows;
-        self.header.group_boundaries = MatrixData::group_boundaries_from_counts(&group_counts);
-    }
-
-    /// Provide high-level statistics per group for diagnostics or logging.
-    pub fn group_stats(&self) -> Vec<GroupStats> {
-        let mut stats = Vec::with_capacity(self.header.group_labels.len());
-        for (idx, window) in self.header.group_boundaries.windows(2).enumerate() {
-            let start = window[0];
-            let end = window[1];
-            let row_count = end.saturating_sub(start);
-            stats.push(GroupStats {
-                label: self
-                    .header
-                    .group_labels
-                    .get(idx)
-                    .cloned()
-                    .unwrap_or_else(|| format!("group {}", idx)),
-                row_count,
-                sample_count: self.sample_count,
-                start_row: start,
-                end_row: end,
-            });
-        }
-        stats
-    }
+    boundaries
 }
 
 pub(crate) fn compute_sort_metric(
@@ -511,16 +362,4 @@ impl MatrixHeader {
             max_threshold: None,
         }
     }
-}
-
-fn row_is_all_zero(row: &MatrixRow) -> bool {
-    for &value in &row.values {
-        if value.is_nan() {
-            continue;
-        }
-        if value != 0.0 {
-            return false;
-        }
-    }
-    true
 }
