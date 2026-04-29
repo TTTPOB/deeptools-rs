@@ -142,3 +142,99 @@ impl StreamingMatrixWriter {
         drop(self.encoder);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pipeline::matrix::MatrixHeader;
+
+    // --- pad_header_payload ---
+
+    #[test]
+    fn pad_header_payload_normal_case() {
+        // Input ends with \n; result must be exactly RESERVED_HEADER_PAYLOAD bytes.
+        let input = b"@{}\n".to_vec();
+        let result = pad_header_payload(input).expect("should succeed");
+        assert_eq!(result.len(), RESERVED_HEADER_PAYLOAD);
+    }
+
+    #[test]
+    fn pad_header_payload_result_ends_with_newline() {
+        let input = b"@{}\n".to_vec();
+        let result = pad_header_payload(input).expect("should succeed");
+        assert_eq!(*result.last().unwrap(), b'\n');
+    }
+
+    #[test]
+    fn pad_header_payload_padding_uses_spaces() {
+        let input = b"@{}\n".to_vec();
+        let result = pad_header_payload(input).expect("should succeed");
+        // All bytes between the content and the trailing newline must be spaces.
+        let content_end = 3; // b"@{}" is 3 bytes
+        let padding = &result[content_end..result.len() - 1];
+        assert!(padding.iter().all(|&b| b == b' '));
+    }
+
+    #[test]
+    fn pad_header_payload_without_trailing_newline_is_error() {
+        let input = b"@{}".to_vec(); // no trailing newline
+        let err = pad_header_payload(input).unwrap_err();
+        assert!(err.to_string().contains("newline"));
+    }
+
+    #[test]
+    fn pad_header_payload_empty_input_is_error() {
+        let input = vec![];
+        let err = pad_header_payload(input).unwrap_err();
+        assert!(err.to_string().contains("newline"));
+    }
+
+    #[test]
+    fn pad_header_payload_oversized_input_is_error() {
+        // Build a payload that is one byte larger than the reserved capacity.
+        let oversized: Vec<u8> = std::iter::repeat(b'x')
+            .take(RESERVED_HEADER_PAYLOAD) // RESERVED_HEADER_PAYLOAD - 1 'x' + '\n' = too big
+            .chain(std::iter::once(b'\n'))
+            .collect();
+        let err = pad_header_payload(oversized).unwrap_err();
+        assert!(err.to_string().contains("exceeds reserved capacity"));
+    }
+
+    // --- placeholder_header_payload ---
+
+    #[test]
+    fn placeholder_header_payload_correct_length() {
+        let result = placeholder_header_payload().expect("should succeed");
+        assert_eq!(result.len(), RESERVED_HEADER_PAYLOAD);
+    }
+
+    #[test]
+    fn placeholder_header_payload_starts_with_at_brace() {
+        let result = placeholder_header_payload().expect("should succeed");
+        assert!(result.starts_with(b"@{}"));
+    }
+
+    // --- build_padded_header_payload ---
+
+    #[test]
+    fn build_padded_header_payload_correct_length() {
+        let header = MatrixHeader::default_for_test(vec![3]);
+        let result = build_padded_header_payload(&header).expect("should succeed");
+        assert_eq!(result.len(), RESERVED_HEADER_PAYLOAD);
+    }
+
+    #[test]
+    fn build_padded_header_payload_ends_with_newline() {
+        let header = MatrixHeader::default_for_test(vec![3]);
+        let result = build_padded_header_payload(&header).expect("should succeed");
+        assert_eq!(*result.last().unwrap(), b'\n');
+    }
+
+    // --- ensure_streaming_header_capacity ---
+
+    #[test]
+    fn ensure_streaming_header_capacity_normal_header_ok() {
+        let header = MatrixHeader::default_for_test(vec![3]);
+        ensure_streaming_header_capacity(&header).expect("normal header should fit");
+    }
+}
