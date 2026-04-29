@@ -200,6 +200,38 @@ where
 
     let metadata_ref = metadata.as_ref();
 
+    // Helper closure: dispatch a single chunk to the thread pool and collect
+    // the per-batch results.  Extracted to eliminate identical code in both
+    // StreamOrdered and HybridBucket arms.
+    let dispatch_chunk =
+        |chunk: Vec<_>| -> Vec<Result<Vec<BatchResult>>> {
+            let sample_paths_c = Arc::clone(&sample_paths);
+            let shared_c = Arc::clone(&shared_readers);
+            pool.install(|| {
+                chunk
+                    .into_par_iter()
+                    .map_init(
+                        move || {
+                            WorkerSamples::from_shared(
+                                Arc::clone(&sample_paths_c),
+                                Arc::clone(&shared_c),
+                            )
+                        },
+                        |worker_samples, batch| {
+                            let samples = worker_samples.samples()?;
+                            process_batch(
+                                samples.as_mut_slice(),
+                                batch,
+                                mode,
+                                general,
+                                metadata_ref,
+                            )
+                        },
+                    )
+                    .collect()
+            })
+        };
+
     // ── Phase 7: Dispatch based on output strategy ──────────────────────
     match output_strategy {
         OutputStrategy::StreamOrdered => {
@@ -208,32 +240,7 @@ where
 
             let compute_result: Result<()> = (|| {
                 for chunk in chunks {
-                    let sample_paths_c = Arc::clone(&sample_paths);
-                    let shared_c = Arc::clone(&shared_readers);
-
-                    let chunk_results: Vec<Result<Vec<BatchResult>>> = pool.install(|| {
-                        chunk
-                            .into_par_iter()
-                            .map_init(
-                                move || {
-                                    WorkerSamples::from_shared(
-                                        Arc::clone(&sample_paths_c),
-                                        Arc::clone(&shared_c),
-                                    )
-                                },
-                                |worker_samples, batch| {
-                                    let samples = worker_samples.samples()?;
-                                    process_batch(
-                                        samples.as_mut_slice(),
-                                        batch,
-                                        mode,
-                                        general,
-                                        metadata_ref,
-                                    )
-                                },
-                            )
-                            .collect()
-                    });
+                    let chunk_results = dispatch_chunk(chunk);
 
                     // Emit results in order — par_iter preserves input order
                     for batch_result in chunk_results {
@@ -273,32 +280,7 @@ where
 
             let compute_result: Result<()> = (|| {
                 for chunk in chunks {
-                    let sample_paths_c = Arc::clone(&sample_paths);
-                    let shared_c = Arc::clone(&shared_readers);
-
-                    let chunk_results: Vec<Result<Vec<BatchResult>>> = pool.install(|| {
-                        chunk
-                            .into_par_iter()
-                            .map_init(
-                                move || {
-                                    WorkerSamples::from_shared(
-                                        Arc::clone(&sample_paths_c),
-                                        Arc::clone(&shared_c),
-                                    )
-                                },
-                                |worker_samples, batch| {
-                                    let samples = worker_samples.samples()?;
-                                    process_batch(
-                                        samples.as_mut_slice(),
-                                        batch,
-                                        mode,
-                                        general,
-                                        metadata_ref,
-                                    )
-                                },
-                            )
-                            .collect()
-                    });
+                    let chunk_results = dispatch_chunk(chunk);
 
                     for batch_result in chunk_results {
                         for (orig_idx, group_index, row) in batch_result? {
