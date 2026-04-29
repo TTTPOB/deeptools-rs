@@ -140,3 +140,198 @@ fn create_coalesced_batches(work_items: Vec<WorkItem>, coalesce_gap: i64) -> Vec
 
     batches
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::io::readers::bed::Strand;
+    use crate::io::BedRecord;
+    use std::sync::Arc;
+
+    use super::super::executor::WorkItem;
+
+    // Helper to build a WorkItem with minimal fields.
+    fn make_item(chrom: &str, query_start: i64, query_end: i64, orig_idx: usize) -> WorkItem {
+        WorkItem {
+            orig_idx,
+            group_index: 0,
+            record: Arc::new(BedRecord {
+                chrom: Arc::from(chrom),
+                start: query_start.max(0) as u32,
+                end: query_end.max(0) as u32,
+                name: None,
+                score: None,
+                score_raw: None,
+                strand: Strand::Unstranded,
+                strand_raw: None,
+                extra_fields: Vec::new(),
+            }),
+            query_start,
+            query_end,
+        }
+    }
+
+    // ── estimate_coalesce_gap ─────────────────────────────────────────────
+
+    #[test]
+    fn test_estimate_gap_empty() {
+        let items: Vec<WorkItem> = vec![];
+        assert_eq!(estimate_coalesce_gap(&items, false), 500);
+    }
+
+    #[test]
+    fn test_estimate_gap_single_item() {
+        let items = vec![make_item("chr1", 0, 100, 0)];
+        assert_eq!(estimate_coalesce_gap(&items, false), 500);
+    }
+
+    #[test]
+    fn test_estimate_gap_fewer_than_10_gaps() {
+        // 5 items on the same chromosome → 4 positive gaps, < 10 → fallback 500
+        let items: Vec<WorkItem> = (0..5)
+            .map(|i| make_item("chr1", i * 200, i * 200 + 100, i as usize))
+            .collect();
+        assert_eq!(estimate_coalesce_gap(&items, false), 500);
+    }
+
+    #[test]
+    fn test_estimate_gap_normal_case() {
+        // 11 items spaced 300 bp apart → 10 gaps of 200 each (end=100, next start=300).
+        // p75 of [200]*10 = 200, clamped to [100,2000] → 200.
+        let items: Vec<WorkItem> = (0..11)
+            .map(|i| make_item("chr1", i * 300, i * 300 + 100, i as usize))
+            .collect();
+        let gap = estimate_coalesce_gap(&items, false);
+        assert!((100..=2000).contains(&gap),
+            "expected gap in [100,2000], got {}", gap);
+        assert_eq!(gap, 200);
+    }
+
+    #[test]
+    fn test_estimate_gap_all_small_clamped_to_100() {
+        // 11 items spaced 1 bp apart → gaps of 1, p75 = 1, clamped to 100.
+        let items: Vec<WorkItem> = (0..11)
+            .map(|i| make_item("chr1", i * 2, i * 2 + 1, i as usize))
+            .collect();
+        assert_eq!(estimate_coalesce_gap(&items, false), 100);
+    }
+
+    #[test]
+    fn test_estimate_gap_all_large_clamped_to_2000() {
+        // 11 items spaced 10_000 bp apart → gaps of 9_900, p75 > 2000, clamped to 2000.
+        let items: Vec<WorkItem> = (0..11)
+            .map(|i| make_item("chr1", i * 10_000, i * 10_000 + 100, i as usize))
+            .collect();
+        assert_eq!(estimate_coalesce_gap(&items, false), 2000);
+    }
+
+    // ── create_batches – NoCoalesce ───────────────────────────────────────
+
+    #[test]
+    fn test_no_coalesce_each_item_own_batch() {
+        let items = vec![
+            make_item("chr1", 0, 100, 0),
+            make_item("chr1", 50, 150, 1),
+            make_item("chr2", 0, 100, 2),
+        ];
+        let batches = create_batches(items, &CoalesceStrategy::NoCoalesce);
+        assert_eq!(batches.len(), 3);
+        for (i, batch) in batches.iter().enumerate() {
+            assert_eq!(batch.items.len(), 1);
+            assert_eq!(batch.items[0].0, i); // orig_idx
+        }
+    }
+
+    #[test]
+    fn test_no_coalesce_empty() {
+        let batches = create_batches(vec![], &CoalesceStrategy::NoCoalesce);
+        assert!(batches.is_empty());
+    }
+
+    // ── create_batches – Coalesce (exercises create_coalesced_batches) ────
+
+    #[test]
+    fn test_coalesce_adjacent_overlapping_merged() {
+        // Items overlap: 0-200 and 100-300 → one batch.
+        let items = vec![
+            make_item("chr1", 0, 200, 0),
+            make_item("chr1", 100, 300, 1),
+        ];
+        let batches = create_batches(items, &CoalesceStrategy::Coalesce(500));
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].items.len(), 2);
+        assert_eq!(batches[0].query_start, 0);
+        assert_eq!(batches[0].query_end, 300);
+    }
+
+    #[test]
+    fn test_coalesce_separated_by_exactly_gap_merged() {
+        // Gap between items == coalesce_gap → merged.
+        // item 0: 0-100, item 1: 600-700, gap = 500 == coalesce_gap 500.
+        let items = vec![
+            make_item("chr1", 0, 100, 0),
+            make_item("chr1", 600, 700, 1),
+        ];
+        let batches = create_batches(items, &CoalesceStrategy::Coalesce(500));
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].query_start, 0);
+        assert_eq!(batches[0].query_end, 700);
+    }
+
+    #[test]
+    fn test_coalesce_separated_more_than_gap_split() {
+        // Gap = 501 > coalesce_gap 500 → two separate batches.
+        let items = vec![
+            make_item("chr1", 0, 100, 0),
+            make_item("chr1", 601, 700, 1),
+        ];
+        let batches = create_batches(items, &CoalesceStrategy::Coalesce(500));
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].query_start, 0);
+        assert_eq!(batches[0].query_end, 100);
+        assert_eq!(batches[1].query_start, 601);
+        assert_eq!(batches[1].query_end, 700);
+    }
+
+    #[test]
+    fn test_coalesce_different_chroms_always_split() {
+        let items = vec![
+            make_item("chr1", 0, 100, 0),
+            make_item("chr2", 0, 100, 1),
+        ];
+        let batches = create_batches(items, &CoalesceStrategy::Coalesce(10_000));
+        assert_eq!(batches.len(), 2);
+        assert_eq!(*batches[0].items[0].2.chrom, *"chr1");
+        assert_eq!(*batches[1].items[0].2.chrom, *"chr2");
+    }
+
+    #[test]
+    fn test_coalesce_single_item() {
+        let items = vec![make_item("chr1", 50, 150, 0)];
+        let batches = create_batches(items, &CoalesceStrategy::Coalesce(500));
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].query_start, 50);
+        assert_eq!(batches[0].query_end, 150);
+    }
+
+    #[test]
+    fn test_coalesce_empty_input() {
+        let batches = create_batches(vec![], &CoalesceStrategy::Coalesce(500));
+        assert!(batches.is_empty());
+    }
+
+    #[test]
+    fn test_coalesce_batch_query_bounds_are_min_max() {
+        // Three items; middle one extends the window furthest right.
+        let items = vec![
+            make_item("chr1", 100, 200, 0),
+            make_item("chr1", 150, 500, 1),
+            make_item("chr1", 300, 400, 2),
+        ];
+        let batches = create_batches(items, &CoalesceStrategy::Coalesce(500));
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].query_start, 100);
+        assert_eq!(batches[0].query_end, 500);
+        assert_eq!(batches[0].items.len(), 3);
+    }
+}
