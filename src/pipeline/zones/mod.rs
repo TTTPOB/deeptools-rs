@@ -1,6 +1,3 @@
-#[allow(unused_imports)]
-use std::sync::Arc;
-
 use crate::config::{ReferencePoint, ScaleRegionsOptions};
 use crate::io::BedRecord;
 use crate::io::Strand;
@@ -449,6 +446,7 @@ pub(crate) fn collect_window_bounds(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     fn build_record(strand: Strand, start: u32, end: u32) -> BedRecord {
         BedRecord {
