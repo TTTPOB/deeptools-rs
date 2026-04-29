@@ -1,5 +1,8 @@
 use std::collections::HashMap;
+use std::io::Write;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::thread::JoinHandle;
 
 use anyhow::{Context, Result};
 
@@ -370,6 +373,269 @@ pub(crate) fn deserialize_row(data: &[u8], chrom_table: &ChromTable) -> Result<M
 }
 
 // ---------------------------------------------------------------------------
+// FlushResult
+// ---------------------------------------------------------------------------
+
+/// Result returned by a background flush thread.
+struct FlushResult {
+    /// Spill indices for the rows written.
+    indices: Vec<SpillIndex>,
+    /// The original Vec with data cleared but capacity retained, for reuse.
+    returned_buf: Vec<(usize, f64, u32, MatrixRow)>,
+    /// Chromosome name <-> id mapping built during serialization.
+    chrom_table: ChromTable,
+    /// Path to the temporary file holding the serialized rows.
+    temp_path: PathBuf,
+}
+
+// ---------------------------------------------------------------------------
+// flush_chunk — runs on a spawned thread
+// ---------------------------------------------------------------------------
+
+/// Serialize all rows to a new temporary file.
+///
+/// Each row's `(orig_idx, sort_key, insertion_seq)` is recorded in the
+/// returned `SpillIndex` vector. The input Vec is cleared but its capacity
+/// is retained so the caller can reuse it as a spare buffer.
+fn flush_chunk(
+    mut rows: Vec<(usize, f64, u32, MatrixRow)>,
+    group_index: usize,
+) -> Result<FlushResult> {
+    let mut chrom_table = ChromTable::new();
+    let mut indices = Vec::with_capacity(rows.len());
+    let mut ser_buf = Vec::with_capacity(SPILL_BUF_CAPACITY);
+
+    // Create a temporary file that persists (we keep the path for later reads).
+    let tmp = tempfile::NamedTempFile::new().context("failed to create spill temp file")?;
+    let temp_path = tmp.path().to_path_buf();
+    let mut writer = std::io::BufWriter::new(tmp);
+
+    let mut file_offset: u64 = 0;
+
+    for &(orig_idx, sort_key, insertion_seq, ref row) in &rows {
+        let row_byte_len = serialize_row(&mut ser_buf, row, &mut chrom_table)?;
+
+        writer
+            .write_all(&ser_buf)
+            .context("failed to write spill data")?;
+
+        indices.push(SpillIndex {
+            orig_idx,
+            group_index,
+            sort_key,
+            insertion_seq,
+            file_offset,
+            row_byte_len,
+        });
+
+        file_offset += row_byte_len as u64;
+    }
+
+    writer.flush().context("failed to flush spill writer")?;
+    // Keep the underlying NamedTempFile alive by persisting it —
+    // into_temp_path() would delete on drop, but persist() keeps the file.
+    // Actually, NamedTempFile deletes on drop, so we need to persist it.
+    let inner = writer.into_inner().context("failed to unwrap BufWriter")?;
+    // persist without a target — keeps the file at the original temp path.
+    inner
+        .persist(&temp_path)
+        .context("failed to persist temp file")?;
+
+    // Clear the Vec but keep its capacity for reuse.
+    rows.clear();
+
+    Ok(FlushResult {
+        indices,
+        returned_buf: rows,
+        chrom_table,
+        temp_path,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// CollectorBucket — per-group bucket with double-buffer spilling
+// ---------------------------------------------------------------------------
+
+/// A per-group bucket that accumulates rows in memory and flushes to disk
+/// when the estimated byte usage exceeds the threshold.
+struct CollectorBucket {
+    /// Rows currently being accumulated.
+    active: Vec<(usize, f64, u32, MatrixRow)>,
+    /// Spare Vec with pre-allocated capacity, returned from a completed flush.
+    spare: Option<Vec<(usize, f64, u32, MatrixRow)>>,
+    /// Approximate memory usage of rows in `active`.
+    estimated_bytes: usize,
+    /// The group index this bucket belongs to.
+    group_index: usize,
+    /// In-flight flush thread handles.
+    flush_handles: Vec<JoinHandle<Result<FlushResult>>>,
+    /// Completed flush results (with returned_buf already drained).
+    completed_flushes: Vec<FlushResult>,
+    /// Per-bucket monotonically incrementing insertion counter.
+    next_insertion_seq: u32,
+}
+
+impl CollectorBucket {
+    fn new(group_index: usize) -> Self {
+        Self {
+            active: Vec::new(),
+            spare: None,
+            estimated_bytes: 0,
+            group_index,
+            flush_handles: Vec::new(),
+            completed_flushes: Vec::new(),
+            next_insertion_seq: 0,
+        }
+    }
+
+    /// Push a row into the active buffer and trigger a flush if the estimated
+    /// byte usage exceeds the threshold.
+    fn push(
+        &mut self,
+        row: MatrixRow,
+        orig_idx: usize,
+        sort_key: f64,
+        row_estimated_bytes: usize,
+        threshold: usize,
+    ) -> Result<()> {
+        let seq = self.next_insertion_seq;
+        self.next_insertion_seq = seq.wrapping_add(1);
+
+        self.active.push((orig_idx, sort_key, seq, row));
+        self.estimated_bytes += row_estimated_bytes;
+
+        if self.estimated_bytes > threshold {
+            self.trigger_flush()?;
+        }
+
+        Ok(())
+    }
+
+    /// Flush the active buffer to disk on a spawned thread.
+    fn trigger_flush(&mut self) -> Result<()> {
+        // Determine the replacement buffer for `active`.
+        let replacement = if let Some(spare) = self.spare.take() {
+            // Best case: reuse spare with pre-allocated capacity.
+            spare
+        } else if !self.flush_handles.is_empty() {
+            // Back-pressure: join the oldest handle to get its returned_buf.
+            let oldest = self.flush_handles.remove(0);
+            let mut result = oldest
+                .join()
+                .map_err(|_| anyhow::anyhow!("flush thread panicked"))?
+                .context("flush thread returned error")?;
+            let spare = std::mem::take(&mut result.returned_buf);
+            self.completed_flushes.push(result);
+            spare
+        } else {
+            // First flush ever — allocate fresh.
+            Vec::new()
+        };
+
+        let full_buf = std::mem::replace(&mut self.active, replacement);
+        self.estimated_bytes = 0;
+
+        let group_index = self.group_index;
+        let handle = std::thread::spawn(move || flush_chunk(full_buf, group_index));
+        self.flush_handles.push(handle);
+
+        Ok(())
+    }
+
+    /// Join all remaining in-flight flush handles and collect their results.
+    fn join_all(&mut self) -> Result<()> {
+        for handle in self.flush_handles.drain(..) {
+            let mut result = handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("flush thread panicked"))?
+                .context("flush thread returned error")?;
+            // Release capacity — data is on disk, we don't need the returned_buf.
+            result.returned_buf = Vec::new();
+            self.completed_flushes.push(result);
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HybridBucketCollector
+// ---------------------------------------------------------------------------
+
+/// Collector that keeps rows in per-group buckets and spills to disk when
+/// memory usage exceeds a configurable threshold. Uses a double-buffer scheme
+/// to reuse Vec capacity across flushes, with back-pressure when the spare
+/// buffer is unavailable.
+pub(crate) struct HybridBucketCollector {
+    buckets: Vec<CollectorBucket>,
+    sample_count: usize,
+    bin_count: usize,
+    threshold: usize,
+    row_estimated_bytes: usize,
+}
+
+impl HybridBucketCollector {
+    /// Create a new collector with the default memory threshold.
+    pub(crate) fn new(group_count: usize, sample_count: usize, bin_count: usize) -> Self {
+        Self::with_threshold(
+            group_count,
+            sample_count,
+            bin_count,
+            DEFAULT_MEMORY_SPILL_THRESHOLD,
+        )
+    }
+
+    /// Create a new collector with a custom memory threshold per bucket.
+    pub(crate) fn with_threshold(
+        group_count: usize,
+        sample_count: usize,
+        bin_count: usize,
+        threshold: usize,
+    ) -> Self {
+        let buckets = (0..group_count)
+            .map(|i| CollectorBucket::new(i))
+            .collect();
+        // Approximate bytes per row: f64 values + overhead for BedRecord, etc.
+        let row_estimated_bytes = sample_count * bin_count * 8 + 100;
+        Self {
+            buckets,
+            sample_count,
+            bin_count,
+            threshold,
+            row_estimated_bytes,
+        }
+    }
+
+    /// Push a row into the appropriate group bucket.
+    pub(crate) fn push(
+        &mut self,
+        row: MatrixRow,
+        orig_idx: usize,
+        group_index: usize,
+        sort_key: f64,
+    ) -> Result<()> {
+        let bucket = self
+            .buckets
+            .get_mut(group_index)
+            .context("group_index out of range")?;
+        bucket.push(row, orig_idx, sort_key, self.row_estimated_bytes, self.threshold)
+    }
+
+    /// Join all in-flight flushes across all buckets.
+    pub(crate) fn join_all(&mut self) -> Result<()> {
+        for bucket in &mut self.buckets {
+            bucket.join_all()?;
+        }
+        Ok(())
+    }
+
+    /// Access the buckets (for reading results after join_all).
+    #[cfg(test)]
+    fn buckets(&self) -> &[CollectorBucket] {
+        &self.buckets
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -535,5 +801,207 @@ mod tests {
         assert_eq!(restored.record.score_raw.as_deref(), Some("abc"));
         assert_eq!(restored.record.strand_raw.as_deref(), Some("strandx"));
         assert_eq!(restored.values, vec![9.9]);
+    }
+
+    // -----------------------------------------------------------------------
+    // HybridBucketCollector tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: create a simple MatrixRow with given chrom/start and N values.
+    fn make_test_row(chrom: &str, start: u32, n_values: usize) -> MatrixRow {
+        let record = BedRecord {
+            chrom: Arc::from(chrom),
+            start,
+            end: start + 100,
+            name: None,
+            score: None,
+            score_raw: None,
+            strand: Strand::Unstranded,
+            strand_raw: None,
+            extra_fields: vec![],
+        };
+        MatrixRow {
+            record,
+            values: vec![1.0; n_values],
+            sample_count: 1,
+            bin_count: n_values,
+            exon_coords: None,
+        }
+    }
+
+    #[test]
+    fn hybrid_collector_small_data_stays_in_memory() {
+        // With a high threshold, small data should never spill.
+        let mut collector = HybridBucketCollector::with_threshold(2, 1, 3, 1_000_000);
+
+        // Push a few rows into group 0 and group 1.
+        for i in 0..5 {
+            let row = make_test_row("chr1", i * 100, 3);
+            collector.push(row, i as usize, 0, i as f64).unwrap();
+        }
+        for i in 0..3 {
+            let row = make_test_row("chr2", i * 200, 3);
+            collector.push(row, (5 + i) as usize, 1, i as f64).unwrap();
+        }
+
+        collector.join_all().unwrap();
+
+        // No flushes should have occurred.
+        assert!(collector.buckets()[0].completed_flushes.is_empty());
+        assert!(collector.buckets()[1].completed_flushes.is_empty());
+
+        // All rows should still be in the active buffer.
+        assert_eq!(collector.buckets()[0].active.len(), 5);
+        assert_eq!(collector.buckets()[1].active.len(), 3);
+
+        // Verify insertion_seq is monotonically incrementing per bucket.
+        for (i, entry) in collector.buckets()[0].active.iter().enumerate() {
+            assert_eq!(entry.2, i as u32); // insertion_seq
+        }
+        for (i, entry) in collector.buckets()[1].active.iter().enumerate() {
+            assert_eq!(entry.2, i as u32);
+        }
+    }
+
+    #[test]
+    fn hybrid_collector_low_threshold_triggers_spill() {
+        // With threshold of 100 bytes and rows that are ~124 bytes each
+        // (1 * 3 * 8 + 100 = 124), even a single row should trigger a flush.
+        // Actually, the first push makes estimated_bytes=124 > 100, so flush
+        // is triggered after the first push.
+        let mut collector = HybridBucketCollector::with_threshold(1, 1, 3, 100);
+
+        let n_rows = 10;
+        for i in 0..n_rows {
+            let row = make_test_row("chr1", i * 100, 3);
+            collector.push(row, i as usize, 0, i as f64).unwrap();
+        }
+
+        collector.join_all().unwrap();
+
+        let bucket = &collector.buckets()[0];
+        // Multiple flushes should have occurred.
+        assert!(
+            !bucket.completed_flushes.is_empty(),
+            "expected at least one flush with low threshold"
+        );
+
+        // Verify that all spill indices have the correct group_index.
+        for flush in &bucket.completed_flushes {
+            for idx in &flush.indices {
+                assert_eq!(idx.group_index, 0);
+            }
+        }
+
+        // Count total rows: flushed + still in active buffer.
+        let flushed_count: usize = bucket
+            .completed_flushes
+            .iter()
+            .map(|f| f.indices.len())
+            .sum();
+        let total = flushed_count + bucket.active.len();
+        assert_eq!(total, n_rows as usize, "all rows must be accounted for");
+
+        // Verify temp files exist on disk.
+        for flush in &bucket.completed_flushes {
+            assert!(
+                flush.temp_path.exists(),
+                "temp file should exist: {:?}",
+                flush.temp_path
+            );
+        }
+
+        // Verify that returned_buf has been cleared (capacity released) in
+        // completed flushes.
+        for flush in &bucket.completed_flushes {
+            assert!(
+                flush.returned_buf.is_empty(),
+                "returned_buf should be empty after join_all"
+            );
+            assert_eq!(
+                flush.returned_buf.capacity(),
+                0,
+                "returned_buf capacity should be 0 after join_all"
+            );
+        }
+
+        // Verify insertion_seq values are unique and correct across all rows.
+        let mut all_seqs: Vec<u32> = bucket
+            .completed_flushes
+            .iter()
+            .flat_map(|f| f.indices.iter().map(|idx| idx.insertion_seq))
+            .chain(bucket.active.iter().map(|entry| entry.2))
+            .collect();
+        all_seqs.sort();
+        let expected: Vec<u32> = (0..n_rows as u32).collect();
+        assert_eq!(all_seqs, expected, "insertion_seq must be 0..N contiguous");
+    }
+
+    #[test]
+    fn hybrid_collector_spill_data_is_deserializable() {
+        // Verify that data written to temp files can actually be read back.
+        let mut collector = HybridBucketCollector::with_threshold(1, 1, 2, 100);
+
+        // Push enough rows to trigger at least one flush.
+        for i in 0..5 {
+            let row = make_test_row("chr1", i * 100, 2);
+            collector.push(row, i as usize, 0, (i as f64) * 1.5).unwrap();
+        }
+
+        collector.join_all().unwrap();
+
+        let bucket = &collector.buckets()[0];
+        assert!(!bucket.completed_flushes.is_empty());
+
+        // Read back from the first flush and verify the data.
+        let flush = &bucket.completed_flushes[0];
+        let file_data = std::fs::read(&flush.temp_path).unwrap();
+
+        for idx in &flush.indices {
+            let offset = idx.file_offset as usize;
+            let len = idx.row_byte_len as usize;
+            let slice = &file_data[offset..offset + len];
+            let restored = deserialize_row(slice, &flush.chrom_table).unwrap();
+
+            assert_eq!(&*restored.record.chrom, "chr1");
+            assert_eq!(restored.sample_count, 1);
+            assert_eq!(restored.bin_count, 2);
+            assert_eq!(restored.values.len(), 2);
+        }
+    }
+
+    #[test]
+    fn hybrid_collector_multiple_groups_independent() {
+        // Each group has its own insertion_seq counter and flush state.
+        let mut collector = HybridBucketCollector::with_threshold(3, 1, 2, 100);
+
+        // Push rows to different groups.
+        for i in 0..4 {
+            let row = make_test_row("chr1", i * 100, 2);
+            collector.push(row, i as usize, 0, 0.0).unwrap();
+        }
+        for i in 0..4 {
+            let row = make_test_row("chr2", i * 100, 2);
+            collector.push(row, (10 + i) as usize, 1, 0.0).unwrap();
+        }
+        // Group 2 gets no rows — should be fine.
+
+        collector.join_all().unwrap();
+
+        // Group 2 should have no flushes and empty active.
+        assert!(collector.buckets()[2].completed_flushes.is_empty());
+        assert!(collector.buckets()[2].active.is_empty());
+
+        // Each of groups 0 and 1 should have some rows (flushed + active).
+        for g in 0..2 {
+            let bucket = &collector.buckets()[g];
+            let flushed: usize = bucket
+                .completed_flushes
+                .iter()
+                .map(|f| f.indices.len())
+                .sum();
+            let total = flushed + bucket.active.len();
+            assert_eq!(total, 4, "group {g} should have 4 rows total");
+        }
     }
 }
