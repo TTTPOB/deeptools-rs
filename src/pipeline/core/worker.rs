@@ -2,11 +2,11 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
-use crate::config::GeneralOptions;
+use crate::config::{AverageTypeBins, GeneralOptions};
 use crate::io::BedRecord;
 use crate::pipeline::matrix::MatrixRow;
 
-use super::aggregation::{aggregate_slice, index_from_coordinate};
+use super::aggregation::{aggregate_slice, direct_mean_bins, direct_sum_bins, index_from_coordinate};
 use super::traits::{PipelineMode, RegionPlan, SignalBin};
 use super::samples::Sample;
 use super::coalesce::CoalescedBatch;
@@ -293,6 +293,19 @@ pub(super) fn process_batch<M: PipelineMode>(
 
     let chrom = &batch.items[0].2.chrom;
 
+    // Determine if direct aggregation is possible (Mean or Sum only)
+    let use_direct = matches!(
+        general.average_type_bins,
+        AverageTypeBins::Mean | AverageTypeBins::Sum
+    );
+
+    // Store raw intervals per sample when using the direct path
+    let mut sample_raw_intervals: Vec<Vec<(i64, i64, f64)>> = if use_direct {
+        vec![Vec::new(); sample_count]
+    } else {
+        Vec::new()
+    };
+
     // ── ONE bigWig read per sample for the entire merged window ────────
     let sample_paths: Vec<_> = samples.iter().map(|s| s.path().to_path_buf()).collect();
     let mut sample_coverages = take_coverage_buffers(sample_count, window_len, default_fill);
@@ -322,6 +335,14 @@ pub(super) fn process_batch<M: PipelineMode>(
                     sample_paths[si].display()
                 )
             })?;
+
+        // Collect raw intervals for direct aggregation path
+        if use_direct {
+            sample_raw_intervals[si] = intervals
+                .iter()
+                .map(|v| (i64::from(v.start), i64::from(v.end), f64::from(v.value)))
+                .collect();
+        }
 
         let cov = &mut sample_coverages[si];
         for v in intervals {
@@ -361,35 +382,75 @@ pub(super) fn process_batch<M: PipelineMode>(
         let bin_count = bins.len();
         let mut all_values = Vec::with_capacity(sample_count * bin_count);
 
-        for si in 0..sample_count {
-            let cov = &sample_coverages[si];
-            for bin in bins {
-                let bs =
-                    ((bin.start() - batch.query_start).max(0) as usize).min(window_len);
-                let be =
-                    ((bin.end() - batch.query_start).max(0) as usize).min(window_len);
+        if use_direct {
+            // Direct aggregation path: compute mean/sum directly from
+            // raw intervals without expanding per-base coverage buffer.
+            let bin_coords: Vec<(i64, i64)> = bins.iter()
+                .map(|bin| (bin.start(), bin.end()))
+                .collect();
 
-                let mut value = if bs < be {
-                    aggregate_slice(&cov[bs..be], general.average_type_bins)
-                } else {
-                    None
+            for si in 0..sample_count {
+                let direct_values = match general.average_type_bins {
+                    AverageTypeBins::Mean => direct_mean_bins(
+                        &bin_coords,
+                        &sample_raw_intervals[si],
+                        general.missing_data_as_zero,
+                    ),
+                    AverageTypeBins::Sum => direct_sum_bins(
+                        &bin_coords,
+                        &sample_raw_intervals[si],
+                        general.missing_data_as_zero,
+                    ),
+                    _ => unreachable!(),
                 };
 
-                if value.is_none() && general.missing_data_as_zero {
-                    value = Some(0.0);
+                for (bi, value_option) in direct_values.into_iter().enumerate() {
+                    // missing_data_as_zero is already handled inside direct_*_bins
+                    let mut value = value_option.unwrap_or(f64::NAN);
+
+                    if nan_after_end && bins[bi].beyond_region() {
+                        value = f64::NAN;
+                    }
+
+                    if value.is_finite() {
+                        value *= general.scale_factor;
+                    }
+
+                    all_values.push(value);
                 }
+            }
+        } else {
+            // Coverage buffer path: used for Median, Std, Min, Max
+            for si in 0..sample_count {
+                let cov = &sample_coverages[si];
+                for bin in bins {
+                    let bs =
+                        ((bin.start() - batch.query_start).max(0) as usize).min(window_len);
+                    let be =
+                        ((bin.end() - batch.query_start).max(0) as usize).min(window_len);
 
-                let mut value = value.unwrap_or(f64::NAN);
+                    let mut value = if bs < be {
+                        aggregate_slice(&cov[bs..be], general.average_type_bins)
+                    } else {
+                        None
+                    };
 
-                if nan_after_end && bin.beyond_region() {
-                    value = f64::NAN;
+                    if value.is_none() && general.missing_data_as_zero {
+                        value = Some(0.0);
+                    }
+
+                    let mut value = value.unwrap_or(f64::NAN);
+
+                    if nan_after_end && bin.beyond_region() {
+                        value = f64::NAN;
+                    }
+
+                    if value.is_finite() {
+                        value *= general.scale_factor;
+                    }
+
+                    all_values.push(value);
                 }
-
-                if value.is_finite() {
-                    value *= general.scale_factor;
-                }
-
-                all_values.push(value);
             }
         }
 

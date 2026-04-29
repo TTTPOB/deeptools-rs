@@ -102,6 +102,79 @@ pub(super) fn aggregate_slice(slice: &[f64], average_type: AverageTypeBins) -> O
     }
 }
 
+/// Compute mean values for bins directly from interval data, skipping the
+/// per-base coverage buffer expansion. O(intervals x bins) instead of
+/// O(window_span).
+pub(super) fn direct_mean_bins(
+    bins: &[(i64, i64)],
+    intervals: &[(i64, i64, f64)],
+    missing_data_as_zero: bool,
+) -> Vec<Option<f64>> {
+    bins.iter()
+        .map(|&(bin_start, bin_end)| {
+            if bin_start >= bin_end {
+                return if missing_data_as_zero { Some(0.0) } else { None };
+            }
+
+            let mut weighted_sum = 0.0;
+            let mut covered = 0_i64;
+            for &(start, end, value) in intervals {
+                if value.is_nan() {
+                    continue;
+                }
+                let overlap_start = start.max(bin_start);
+                let overlap_end = end.min(bin_end);
+                if overlap_start < overlap_end {
+                    let width = overlap_end - overlap_start;
+                    weighted_sum += value * width as f64;
+                    covered += width;
+                }
+            }
+
+            if missing_data_as_zero {
+                Some(weighted_sum / (bin_end - bin_start) as f64)
+            } else if covered == 0 {
+                None
+            } else {
+                Some(weighted_sum / covered as f64)
+            }
+        })
+        .collect()
+}
+
+/// Compute sum values for bins directly from interval data, skipping the
+/// per-base coverage buffer expansion. O(intervals x bins) instead of
+/// O(window_span).
+pub(super) fn direct_sum_bins(
+    bins: &[(i64, i64)],
+    intervals: &[(i64, i64, f64)],
+    missing_data_as_zero: bool,
+) -> Vec<Option<f64>> {
+    bins.iter()
+        .map(|&(bin_start, bin_end)| {
+            let mut sum = 0.0;
+            let mut found = false;
+            for &(start, end, value) in intervals {
+                if value.is_nan() {
+                    continue;
+                }
+                let overlap_start = start.max(bin_start);
+                let overlap_end = end.min(bin_end);
+                if overlap_start < overlap_end {
+                    sum += value * (overlap_end - overlap_start) as f64;
+                    found = true;
+                }
+            }
+
+            if found || missing_data_as_zero {
+                Some(sum)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,5 +420,57 @@ mod tests {
     #[test]
     fn index_beyond_window_len_clamped() {
         assert_eq!(index_from_coordinate(200, 100, 50), 50);
+    }
+
+    // ── direct_mean_bins ──────────────────────────────────────────────────
+
+    #[test]
+    fn direct_mean_weights_interval_overlap_by_base_count() {
+        let bins = vec![(0, 10), (10, 20)];
+        let intervals = vec![(0, 5, 2.0), (5, 20, 4.0)];
+        let values = direct_mean_bins(&bins, &intervals, false);
+        assert_eq!(values, vec![Some(3.0), Some(4.0)]);
+    }
+
+    #[test]
+    fn direct_mean_counts_uncovered_bases_as_zero_when_missing_data_as_zero() {
+        let bins = vec![(0, 10)];
+        let intervals = vec![(0, 5, 2.0)];
+        let values = direct_mean_bins(&bins, &intervals, true);
+        assert_eq!(values, vec![Some(1.0)]);
+    }
+
+    #[test]
+    fn direct_mean_ignores_uncovered_bases_when_missing_data_stays_nan() {
+        let bins = vec![(0, 10)];
+        let intervals = vec![(0, 5, 2.0)];
+        let values = direct_mean_bins(&bins, &intervals, false);
+        assert_eq!(values, vec![Some(2.0)]);
+    }
+
+    #[test]
+    fn direct_mean_returns_none_for_fully_uncovered_nan_bin() {
+        let bins = vec![(0, 10)];
+        let intervals = Vec::new();
+        let values = direct_mean_bins(&bins, &intervals, false);
+        assert_eq!(values, vec![None]);
+    }
+
+    // ── direct_sum_bins ───────────────────────────────────────────────────
+
+    #[test]
+    fn direct_sum_weights_interval_overlap_by_base_count() {
+        let bins = vec![(0, 10), (10, 20)];
+        let intervals = vec![(0, 5, 2.0), (5, 20, 4.0)];
+        let values = direct_sum_bins(&bins, &intervals, false);
+        assert_eq!(values, vec![Some(30.0), Some(40.0)]);
+    }
+
+    #[test]
+    fn direct_sum_returns_zero_for_uncovered_bin_when_missing_data_as_zero() {
+        let bins = vec![(0, 10)];
+        let intervals = Vec::new();
+        let values = direct_sum_bins(&bins, &intervals, true);
+        assert_eq!(values, vec![Some(0.0)]);
     }
 }
