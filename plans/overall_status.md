@@ -2,6 +2,14 @@
 
 ## v0.3.0 Changes (2026-04-29)
 
+### Completed: BigWig Reader Memory & Cache Optimization
+All 4 tasks from `docs/superpowers/plans/2026-04-29-bigwig-reader-optimization.md` are done:
+
+1. **Task 1: Eliminate chrom_lengths HashMap** — `Sample` no longer clones a `HashMap<String, u32>` per instance; `chrom_length()` delegates to `SharedBigWigReader::find_chrom_length()` via binary search on the existing sorted `chroms` Vec
+2. **Task 2: Shared CIR node cache** — moved `cir_node_cache` from per-`BigWigReader` `HashMap` (with crude clear-all eviction) to a shared `quick_cache::sync::Cache` on `SharedBigWigReader` with proper LRU eviction (1000 entries)
+3. **Task 3: Per-worker decompression buffer sharing** — extracted `work_buf`/`decode_buf` from `BigWigReader` into `WorkerSamples`, reused across batches via `map_init`. Memory reduced from T×S×buf_size to T×1×buf_size
+4. **Task 4: Adaptive block cache sizing** — replaced fixed 500-entry global budget with per-file default of 200 entries, hard-capped at 2000 total with remainder-aware distribution
+
 ### Completed: Next Stages Implementation Plan
 All 5 tasks from `docs/superpowers/plans/2026-04-29-next-stages.md` are done:
 
