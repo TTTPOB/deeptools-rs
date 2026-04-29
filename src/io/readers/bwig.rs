@@ -5,8 +5,8 @@ use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::Arc;
 
-use thiserror::Error;
 use flate2::Decompress;
+use thiserror::Error;
 
 use super::block_cache::SharedBlockCache;
 
@@ -106,6 +106,16 @@ fn pread_exact(file: &File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
 
 // ── Shared immutable state: File + parsed metadata ───────────────────────
 // One instance per bigWig file; shared across threads via Arc.
+
+/// Binary-search the sorted chroms slice for the given chromosome name and
+/// return its length, or None if not present.
+fn binary_search_chrom_length(chroms: &[ChromInfo], name: &str) -> Option<u32> {
+    chroms
+        .binary_search_by(|c| c.name.as_str().cmp(name))
+        .ok()
+        .map(|idx| chroms[idx].length)
+}
+
 pub struct SharedBigWigReader {
     file: File,
     uncompress_buf_size: usize,
@@ -162,8 +172,7 @@ impl SharedBigWigReader {
         let uncompress_buf_size = read_u32(&mut s)? as usize;
 
         // Parse chromosome B+ tree from file.
-        let (chroms, chrom_id_by_name) =
-            Self::parse_chrom_tree(&file, chrom_tree_offset)?;
+        let (chroms, chrom_id_by_name) = Self::parse_chrom_tree(&file, chrom_tree_offset)?;
 
         // The CIR tree root node is at offset + 48
         let cir_tree_root = cir_tree_offset + 48;
@@ -191,6 +200,10 @@ impl SharedBigWigReader {
             .binary_search_by(|(n, _)| n.as_str().cmp(name))
             .ok()
             .map(|idx| self.chrom_id_by_name[idx].1)
+    }
+
+    pub fn find_chrom_length(&self, name: &str) -> Option<u32> {
+        binary_search_chrom_length(&self.chroms, name)
     }
 
     /// Read and parse a CIR tree node from the file at the given offset.
@@ -281,16 +294,14 @@ impl SharedBigWigReader {
         let root_offset = offset + 32;
         let mut root_header = [0u8; 4];
         pread_exact(file, root_offset, &mut root_header).map_err(BigWigReadError::Io)?;
-        let count =
-            u16::from_le_bytes([root_header[2], root_header[3]]) as usize;
+        let count = u16::from_le_bytes([root_header[2], root_header[3]]) as usize;
 
         let item_size = key_size as usize + val_size as usize;
         let root_size = 4 + count * item_size;
         let mut root_data = vec![0u8; root_size];
         root_data[..4].copy_from_slice(&root_header);
         if root_size > 4 {
-            pread_exact(file, root_offset + 4, &mut root_data[4..])
-                .map_err(BigWigReadError::Io)?;
+            pread_exact(file, root_offset + 4, &mut root_data[4..]).map_err(BigWigReadError::Io)?;
         }
 
         let mut chroms = Vec::new();
@@ -374,6 +385,10 @@ impl BigWigReader {
         self.shared.chroms()
     }
 
+    pub fn shared(&self) -> &Arc<SharedBigWigReader> {
+        &self.shared
+    }
+
     pub fn values(
         &mut self,
         chrom: &str,
@@ -407,12 +422,7 @@ impl BigWigReader {
         Ok(&self.values_buf)
     }
 
-    fn search_cir_tree(
-        &mut self,
-        chrom_ix: u32,
-        start: u32,
-        end: u32,
-    ) -> io::Result<()> {
+    fn search_cir_tree(&mut self, chrom_ix: u32, start: u32, end: u32) -> io::Result<()> {
         let file = &self.shared.file;
         let cir_tree_root = self.shared.cir_tree_root;
 
@@ -437,7 +447,8 @@ impl BigWigReader {
                     self.cir_node_cache.clear();
                     cir_clears += 1;
                 }
-                self.cir_node_cache.insert(node_offset, Arc::clone(&arc_parsed));
+                self.cir_node_cache
+                    .insert(node_offset, Arc::clone(&arc_parsed));
                 arc_parsed
             };
 
@@ -472,11 +483,7 @@ impl BigWigReader {
         Ok(())
     }
 
-    fn get_or_cache_block(
-        &mut self,
-        offset: u64,
-        size: u64,
-    ) -> io::Result<Arc<[u8]>> {
+    fn get_or_cache_block(&mut self, offset: u64, size: u64) -> io::Result<Arc<[u8]>> {
         let key = (offset, size);
         if let Some(data) = self.shared.block_cache.get(&key) {
             self.stats.block_cache_hits += 1;
@@ -544,12 +551,7 @@ fn read_and_decompress<'a>(
     }
 }
 
-fn parse_block_values(
-    raw: &[u8],
-    query_start: u32,
-    query_end: u32,
-    values: &mut Vec<BigWigValue>,
-) {
+fn parse_block_values(raw: &[u8], query_start: u32, query_end: u32, values: &mut Vec<BigWigValue>) {
     let mut s = raw;
     if s.len() < 24 {
         return;
@@ -627,6 +629,51 @@ fn parse_block_values(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── binary_search_chrom_length ────────────────────────────────────────────
+
+    #[test]
+    fn binary_search_chrom_length_found() {
+        let chroms = vec![
+            ChromInfo {
+                name: "chr1".to_string(),
+                length: 1000,
+            },
+            ChromInfo {
+                name: "chr2".to_string(),
+                length: 2000,
+            },
+            ChromInfo {
+                name: "chrX".to_string(),
+                length: 3000,
+            },
+        ];
+        assert_eq!(binary_search_chrom_length(&chroms, "chr1"), Some(1000));
+        assert_eq!(binary_search_chrom_length(&chroms, "chr2"), Some(2000));
+        assert_eq!(binary_search_chrom_length(&chroms, "chrX"), Some(3000));
+    }
+
+    #[test]
+    fn binary_search_chrom_length_not_found() {
+        let chroms = vec![
+            ChromInfo {
+                name: "chr1".to_string(),
+                length: 1000,
+            },
+            ChromInfo {
+                name: "chr2".to_string(),
+                length: 2000,
+            },
+        ];
+        assert_eq!(binary_search_chrom_length(&chroms, "chr3"), None);
+        assert_eq!(binary_search_chrom_length(&chroms, ""), None);
+    }
+
+    #[test]
+    fn binary_search_chrom_length_empty_vec() {
+        let chroms: Vec<ChromInfo> = vec![];
+        assert_eq!(binary_search_chrom_length(&chroms, "chr1"), None);
+    }
 
     // Build a 24-byte block header with the given parameters.
     fn build_header(

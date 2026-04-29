@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -9,23 +8,16 @@ use crate::io::{BigWigReader, SharedBigWigReader};
 pub struct Sample {
     path: PathBuf,
     reader: BigWigReader,
-    chrom_lengths: HashMap<String, u32>,
 }
 
 impl Sample {
     pub fn open(path: &Path) -> Result<Self> {
         let reader = BigWigReader::open(path)
             .with_context(|| format!("Failed to open bigWig file '{}'", path.display()))?;
-        let chrom_lengths = reader
-            .chroms()
-            .iter()
-            .map(|chrom| (chrom.name.clone(), chrom.length))
-            .collect::<HashMap<_, _>>();
 
         Ok(Self {
             path: path.to_path_buf(),
             reader,
-            chrom_lengths,
         })
     }
 
@@ -45,20 +37,14 @@ impl Sample {
     /// mmap and metadata are shared via Arc; only the per-worker caches are
     /// fresh.
     pub fn from_shared(path: PathBuf, shared: Arc<SharedBigWigReader>) -> Self {
-        let chrom_lengths = shared
-            .chroms()
-            .iter()
-            .map(|chrom| (chrom.name.clone(), chrom.length))
-            .collect::<HashMap<_, _>>();
         Self {
             path,
             reader: BigWigReader::from_shared(shared),
-            chrom_lengths,
         }
     }
 
     pub fn chrom_length(&self, chrom: &str) -> Option<u32> {
-        self.chrom_lengths.get(chrom).copied()
+        self.reader.shared().find_chrom_length(chrom)
     }
 }
 
@@ -84,7 +70,9 @@ impl WorkerSamples {
             .zip(shared_readers.iter())
             .map(|(path, shared)| Sample::from_shared(path.clone(), Arc::clone(shared)))
             .collect();
-        Self { samples: Ok(samples) }
+        Self {
+            samples: Ok(samples),
+        }
     }
 
     pub fn samples(&mut self) -> Result<&mut Vec<Sample>> {
