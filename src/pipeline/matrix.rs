@@ -2,7 +2,18 @@ use std::cmp::Ordering;
 
 use crate::config::{GeneralOptions, SortUsing};
 use crate::io::BedRecord;
-use serde::Serialize;
+use serde::{Serialize, Serializer};
+
+/// Serialize a f64 as an integer when its value is a whole number, otherwise
+/// as a float.  This matches the Python JSON output where `scale=1` is written
+/// as `1` rather than `1.0`.
+fn serialize_scale<S: Serializer>(value: &f64, s: S) -> Result<S::Ok, S::Error> {
+    if value.fract() == 0.0 && value.is_finite() {
+        s.serialize_i64(*value as i64)
+    } else {
+        s.serialize_f64(*value)
+    }
+}
 
 /// Serializable metadata header mirroring the JSON preamble written by the
 /// Python implementation of `computeMatrix`.
@@ -10,7 +21,7 @@ use serde::Serialize;
 pub struct MatrixHeader {
     #[serde(rename = "verbose")]
     pub verbose: bool,
-    #[serde(rename = "scale")]
+    #[serde(rename = "scale", serialize_with = "serialize_scale")]
     pub scale: f64,
     #[serde(rename = "skip zeros")]
     pub skip_zeros: bool,
