@@ -235,7 +235,33 @@ impl ProcessorRequest {
 }
 
 fn available_cpus() -> u32 {
-    let count = num_cpus::get();
-    let count = std::cmp::max(count, 1);
+    let count = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
     u32::try_from(count).unwrap_or(u32::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_max_returns_at_least_one() {
+        assert!(ProcessorRequest::Max.resolve() >= 1);
+    }
+
+    #[test]
+    fn resolve_max_half_returns_at_least_one() {
+        assert!(ProcessorRequest::MaxHalf.resolve() >= 1);
+    }
+
+    #[test]
+    fn resolve_fixed_zero_clamps_to_one() {
+        assert_eq!(ProcessorRequest::Fixed(0).resolve(), 1);
+    }
+
+    #[test]
+    fn resolve_fixed_value() {
+        assert_eq!(ProcessorRequest::Fixed(4).resolve(), 4);
+    }
 }
