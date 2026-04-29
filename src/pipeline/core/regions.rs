@@ -164,23 +164,31 @@ pub(crate) fn load_chrom_sizes(scores: &[PathBuf]) -> Result<HashMap<String, u32
 }
 
 /// Return blacklist intervals for `chrom`, matching both original and
-/// chr-prefix-toggled chromosome names. Uses binary search on the
-/// sorted blacklist to find matching intervals in O(log n + k) time.
+/// chr-prefix-toggled chromosome names. Uses partition_point for true
+/// lower/upper bound search in O(log n + k) time, avoiding the
+/// binary_search_by pitfall where the match position is not guaranteed
+/// to be the first equal element.
 fn blacklist_intervals_for_chrom<'a>(
     blacklist: &'a [(Arc<str>, u32, u32)],
     chrom: &str,
 ) -> &'a [(Arc<str>, u32, u32)] {
     let [ref name_a, name_b] = normalize_chrom_name(chrom);
-    // find the first entry matching either normalized name
-    let start = blacklist
-        .binary_search_by(|(c, _, _)| c.as_ref().cmp(name_a))
-        .unwrap_or_else(|i| i);
-    let end = start
-        + blacklist[start..]
-            .iter()
-            .take_while(|(c, _, _)| c.as_ref() == name_a || c.as_ref() == name_b)
-            .count();
-    &blacklist[start..end]
+
+    // find the first entry >= the lexicographically smaller variant
+    let candidate_a = name_a.as_str();
+    let candidate_b = name_b.as_str();
+    let probe = candidate_a.min(candidate_b);
+
+    let lo = blacklist.partition_point(|(c, _, _)| c.as_ref() < probe);
+
+    // scan forward to find the range matching either variant
+    let mut hi = lo;
+    while hi < blacklist.len()
+        && (blacklist[hi].0.as_ref() == name_a || blacklist[hi].0.as_ref() == name_b)
+    {
+        hi += 1;
+    }
+    &blacklist[lo..hi]
 }
 
 /// Subtract sorted, non-overlapping blacklist intervals from a genomic span.
@@ -574,5 +582,55 @@ mod tests {
     fn subtract_blacklist_multiple_intervals() {
         let result = subtract_blacklist((0, 100), &[(10, 20), (40, 60), (90, 95)]);
         assert_eq!(result, vec![(0, 10), (20, 40), (60, 90), (95, 100)]);
+    }
+
+    // ── blacklist_intervals_for_chrom ────────────────────────────────────────
+
+    fn make_blacklist(entries: Vec<(&str, u32, u32)>) -> Vec<(Arc<str>, u32, u32)> {
+        entries
+            .into_iter()
+            .map(|(c, s, e)| (Arc::from(c), s, e))
+            .collect()
+    }
+
+    #[test]
+    fn blacklist_intervals_single_interval_per_chrom() {
+        let bl = make_blacklist(vec![("chr1", 10, 20), ("chr2", 30, 40)]);
+        let result = blacklist_intervals_for_chrom(&bl, "chr1");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].1, 10);
+        assert_eq!(result[0].2, 20);
+    }
+
+    #[test]
+    fn blacklist_intervals_multiple_intervals_same_chrom() {
+        // Regression: binary_search_by does not guarantee the first match.
+        // With 3 intervals on chr1, the search must return all 3, not a
+        // suffix starting from a later interval.
+        let bl = make_blacklist(vec![
+            ("chr1", 10, 20),
+            ("chr1", 40, 60),
+            ("chr1", 90, 95),
+            ("chr2", 30, 40),
+        ]);
+        let result = blacklist_intervals_for_chrom(&bl, "chr1");
+        assert_eq!(result.len(), 3);
+        let starts: Vec<u32> = result.iter().map(|(_, s, _)| *s).collect();
+        assert_eq!(starts, vec![10, 40, 90]);
+    }
+
+    #[test]
+    fn blacklist_intervals_chrom_not_in_blacklist_returns_empty() {
+        let bl = make_blacklist(vec![("chr1", 10, 20)]);
+        let result = blacklist_intervals_for_chrom(&bl, "chrX");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn blacklist_intervals_chr_prefix_toggle_match() {
+        let bl = make_blacklist(vec![("1", 10, 20)]);
+        let result = blacklist_intervals_for_chrom(&bl, "chr1");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].1, 10);
     }
 }
