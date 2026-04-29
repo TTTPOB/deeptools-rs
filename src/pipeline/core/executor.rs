@@ -19,6 +19,9 @@ use super::spill::HybridBucketCollector;
 use super::traits::{PipelineMode, RegionPlan};
 use super::worker::process_batch;
 
+const MIN_CHUNK_SIZE: usize = 256;
+const CHUNKS_PER_THREAD: usize = 4;
+
 /// Output dispatch strategy for the chunk-collect pipeline.
 enum OutputStrategy {
     /// Input order already matches compute-sorted order (or SortRegions::No
@@ -195,7 +198,7 @@ where
         .context("Failed to initialise rayon thread pool for pipeline scheduling")?;
 
     // ── Phase 6: Split batches into chunks ──────────────────────────────
-    let chunk_size = std::cmp::max(256, batches.len() / (thread_count * 4));
+    let chunk_size = std::cmp::max(MIN_CHUNK_SIZE, batches.len() / (thread_count * CHUNKS_PER_THREAD));
     let chunks = into_chunks(batches, chunk_size);
 
     let metadata_ref = metadata.as_ref();

@@ -7,6 +7,9 @@ use super::executor::WorkItem;
 // ── Query coalescing ──────────────────────────────────────────────────────
 
 pub(super) const COALESCE_CLAMP_MAX: i64 = 2000;
+pub(super) const COALESCE_CLAMP_MIN: i64 = 100;
+pub(super) const COALESCE_DEFAULT_GAP: i64 = 500;
+pub(super) const COALESCE_MIN_GAP_SAMPLES: usize = 10;
 
 pub(super) enum CoalesceStrategy {
     Coalesce(i64),
@@ -20,7 +23,7 @@ pub(super) enum CoalesceStrategy {
 /// observed gaps.  Falls back to 500 bp when there are too few gaps (< 10).
 pub(super) fn estimate_coalesce_gap(work_items: &[WorkItem], verbose: bool) -> i64 {
     if work_items.len() < 2 {
-        return 500;
+        return COALESCE_DEFAULT_GAP;
     }
 
     let mut gaps: Vec<i64> = Vec::new();
@@ -33,14 +36,14 @@ pub(super) fn estimate_coalesce_gap(work_items: &[WorkItem], verbose: bool) -> i
         }
     }
 
-    if gaps.len() < 10 {
+    if gaps.len() < COALESCE_MIN_GAP_SAMPLES {
         if verbose {
             eprintln!(
-                "[coalesce-gap] {} gaps (< 10), using default threshold: 500",
+                "[coalesce-gap] {} gaps (< {COALESCE_MIN_GAP_SAMPLES}), using default threshold: {COALESCE_DEFAULT_GAP}",
                 gaps.len()
             );
         }
-        return 500;
+        return COALESCE_DEFAULT_GAP;
     }
 
     gaps.sort_unstable();
@@ -48,7 +51,7 @@ pub(super) fn estimate_coalesce_gap(work_items: &[WorkItem], verbose: bool) -> i
     let n = gaps.len();
     let p50 = gaps[n / 2];
     let p75 = gaps[(n * 3) / 4];
-    let threshold = p75.clamp(100, 2000);
+    let threshold = p75.clamp(COALESCE_CLAMP_MIN, COALESCE_CLAMP_MAX);
 
     if verbose {
         eprintln!(
