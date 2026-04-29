@@ -626,6 +626,14 @@ mod tests {
         assert_eq!(result, Some(2.0));
     }
 
+    #[test]
+    fn aggregate_min_single() {
+        assert_eq!(
+            aggregate_slice(&[42.0], AverageTypeBins::Min),
+            Some(42.0)
+        );
+    }
+
     // ── aggregate_slice: Max ───────────────────────────────────────────────
 
     #[test]
@@ -650,6 +658,14 @@ mod tests {
     fn aggregate_max_mixed_nan() {
         let result = aggregate_slice(&[f64::NAN, 4.0, 9.0], AverageTypeBins::Max);
         assert_eq!(result, Some(9.0));
+    }
+
+    #[test]
+    fn aggregate_max_single() {
+        assert_eq!(
+            aggregate_slice(&[42.0], AverageTypeBins::Max),
+            Some(42.0)
+        );
     }
 
     // ── aggregate_slice: Std ───────────────────────────────────────────────
