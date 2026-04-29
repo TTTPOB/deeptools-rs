@@ -156,7 +156,7 @@ where
         return collector.finalize(header);
     }
 
-    // ── Phase 3: Open shared bigWig readers once ────────────────────────
+    // ── Phase 3: Open BigWig files once ──────────────────────────────────
     // Each file gets its own block cache whose capacity is a fair share of
     // the global budget, preventing cross-sample block collisions.
     let sample_count_for_cache = sample_paths.len();

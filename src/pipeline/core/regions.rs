@@ -147,8 +147,8 @@ pub(crate) fn load_blacklist(path: &Path) -> Result<Vec<(Arc<str>, u32, u32)>> {
     Ok(merged)
 }
 
-/// Load chromosome sizes from bigWig score files, normalizing chr-prefix
-/// names to the non-prefixed canonical form.
+/// Load chromosome sizes from bigWig score files. Chromosome names are
+/// stored as-is (original form from the bigWig header).
 pub(crate) fn load_chrom_sizes(scores: &[PathBuf]) -> Result<HashMap<String, u32>> {
     let mut sizes: HashMap<String, u32> = HashMap::new();
     for path in scores {
@@ -164,17 +164,23 @@ pub(crate) fn load_chrom_sizes(scores: &[PathBuf]) -> Result<HashMap<String, u32
 }
 
 /// Return blacklist intervals for `chrom`, matching both original and
-/// chr-prefix-toggled chromosome names.
-fn blacklist_intervals_for_chrom(
-    blacklist: &[(Arc<str>, u32, u32)],
+/// chr-prefix-toggled chromosome names. Uses binary search on the
+/// sorted blacklist to find matching intervals in O(log n + k) time.
+fn blacklist_intervals_for_chrom<'a>(
+    blacklist: &'a [(Arc<str>, u32, u32)],
     chrom: &str,
-) -> Vec<(u32, u32)> {
-    let [name_a, name_b] = normalize_chrom_name(chrom);
-    blacklist
-        .iter()
-        .filter(|(c, _, _)| c.as_ref() == name_a || c.as_ref() == name_b)
-        .map(|(_, s, e)| (*s, *e))
-        .collect()
+) -> &'a [(Arc<str>, u32, u32)] {
+    let [ref name_a, name_b] = normalize_chrom_name(chrom);
+    // find the first entry matching either normalized name
+    let start = blacklist
+        .binary_search_by(|(c, _, _)| c.as_ref().cmp(name_a))
+        .unwrap_or_else(|i| i);
+    let end = start
+        + blacklist[start..]
+            .iter()
+            .take_while(|(c, _, _)| c.as_ref() == name_a || c.as_ref() == name_b)
+            .count();
+    &blacklist[start..end]
 }
 
 /// Subtract sorted, non-overlapping blacklist intervals from a genomic span.
@@ -227,11 +233,12 @@ pub(crate) fn record_passes_blacklist(
         None => return true,
     };
 
-    let bl_intervals = blacklist_intervals_for_chrom(blacklist, &canonical_name);
-    if bl_intervals.is_empty() {
+    let bl_slice = blacklist_intervals_for_chrom(blacklist, &canonical_name);
+    if bl_slice.is_empty() {
         return true;
     }
 
+    let bl_intervals: Vec<(u32, u32)> = bl_slice.iter().map(|(_, s, e)| (*s, *e)).collect();
     let allowed = subtract_blacklist((0, chrom_size), &bl_intervals);
 
     // A record is dispatched if its interval overlaps any allowed interval.

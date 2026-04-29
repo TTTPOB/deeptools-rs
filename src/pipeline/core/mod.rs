@@ -81,6 +81,7 @@ mod tests {
     }
 
     #[derive(Clone)]
+    #[allow(dead_code)]
     struct TestBin {
         start: i64,
         end: i64,
@@ -101,6 +102,7 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
     struct TestPlan {
         start: i64,
         end: i64,
