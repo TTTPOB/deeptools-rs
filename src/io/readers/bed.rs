@@ -195,6 +195,8 @@ pub enum BedReadError {
         message: String,
         line: String,
     },
+    #[error("no data records found in BED file")]
+    EmptyFile,
 }
 
 pub struct BedReader<R: BufRead> {

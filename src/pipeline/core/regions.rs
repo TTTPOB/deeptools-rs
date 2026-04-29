@@ -156,11 +156,7 @@ fn parse_grouped_bed(
             seen_labels,
         );
     } else if groups.is_empty() {
-        let label = next_unique_label("", &default_label, seen_labels);
-        groups.push(Group {
-            label,
-            records: Vec::new(),
-        });
+        return Err(BedReadError::EmptyFile);
     }
 
     Ok(groups)
@@ -180,6 +176,9 @@ fn parse_grouped_gtf(
     let mut groups = Vec::new();
 
     let records = load_gtf_records(path, options)?;
+    if records.is_empty() {
+        bail!("no data records found in GTF file '{}'", path.display());
+    }
     let label = next_unique_label("", &default_label, seen_labels);
     groups.push(Group { label, records });
 
