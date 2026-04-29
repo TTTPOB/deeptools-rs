@@ -29,6 +29,29 @@ TIMESTAMP=$(date +%Y-%m-%d-%H%M%S)
 REPORT="bench_reports/${TIMESTAMP}-${NAME}.md"
 mkdir -p bench_reports
 
+echo "=== Warm-up run (populating page cache) ===" >&2
+WARMUP_DIR=$(mktemp -d)
+# Redirect all output-producing flags to temp dir
+WARMUP_MODIFIED=()
+SKIP_NEXT=false
+for arg in "$@"; do
+    if $SKIP_NEXT; then
+        WARMUP_MODIFIED+=("$WARMUP_DIR/warmup_output")
+        SKIP_NEXT=false
+    elif [ "$arg" = "-o" ] || [ "$arg" = "--outFileName" ] \
+      || [ "$arg" = "--outFileNameMatrix" ] \
+      || [ "$arg" = "--outFileSortedRegions" ]; then
+        WARMUP_MODIFIED+=("$arg")
+        SKIP_NEXT=true
+    else
+        WARMUP_MODIFIED+=("$arg")
+    fi
+done
+"${WARMUP_MODIFIED[@]}" > /dev/null 2>&1 || true
+rm -rf "$WARMUP_DIR"
+echo "  warm-up complete" >&2
+echo "" >&2
+
 cat > "$REPORT" << EOF
 # Profile: ${NAME}
 Time: $(date -Iseconds)
