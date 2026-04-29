@@ -1,6 +1,7 @@
 pub mod traits;
 pub mod samples;
 pub mod regions;
+pub(crate) mod spill;
 mod executor;
 mod collector;
 mod coalesce;
