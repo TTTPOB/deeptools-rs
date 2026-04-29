@@ -258,3 +258,143 @@ fn infer_region_format(path: &Path) -> RegionFormat {
         RegionFormat::Bed
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    use std::path::Path;
+
+    // --- normalize_sort_sample_indices ---
+
+    #[test]
+    fn normalize_none_returns_ok_none() {
+        let result = normalize_sort_sample_indices(None, 5).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn normalize_empty_vec_returns_ok_none() {
+        let indices: Vec<usize> = vec![];
+        let result = normalize_sort_sample_indices(Some(&indices), 5).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn normalize_valid_indices_converts_to_zero_based() {
+        let indices = vec![1, 3, 5];
+        let result = normalize_sort_sample_indices(Some(&indices), 5).unwrap();
+        assert_eq!(result, Some(vec![0, 2, 4]));
+    }
+
+    #[test]
+    fn normalize_index_zero_returns_error() {
+        let indices = vec![0];
+        let result = normalize_sort_sample_indices(Some(&indices), 5);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn normalize_index_exceeds_sample_count_returns_error() {
+        let indices = vec![6];
+        let result = normalize_sort_sample_indices(Some(&indices), 5);
+        assert!(result.is_err());
+    }
+
+    // --- label_from_path ---
+
+    #[test]
+    fn label_from_path_use_stem_false_returns_filename_with_extension() {
+        let path = Path::new("/some/dir/sample.bw");
+        let label = label_from_path(path, false);
+        assert_eq!(label, "sample.bw");
+    }
+
+    #[test]
+    fn label_from_path_use_stem_true_returns_filename_without_extension() {
+        let path = Path::new("/some/dir/sample.bw");
+        let label = label_from_path(path, true);
+        assert_eq!(label, "sample");
+    }
+
+    // --- infer_region_format ---
+
+    #[test]
+    fn infer_format_bed_extension() {
+        assert_eq!(infer_region_format(Path::new("regions.bed")), RegionFormat::Bed);
+    }
+
+    #[test]
+    fn infer_format_gtf_extension() {
+        assert_eq!(infer_region_format(Path::new("genes.gtf")), RegionFormat::Gtf);
+    }
+
+    #[test]
+    fn infer_format_gtf_gz_extension() {
+        assert_eq!(infer_region_format(Path::new("genes.gtf.gz")), RegionFormat::Gtf);
+    }
+
+    #[test]
+    fn infer_format_gff_extension() {
+        assert_eq!(infer_region_format(Path::new("genes.gff")), RegionFormat::Gtf);
+    }
+
+    #[test]
+    fn infer_format_gff_gz_extension() {
+        assert_eq!(infer_region_format(Path::new("genes.gff.gz")), RegionFormat::Gtf);
+    }
+
+    #[test]
+    fn infer_format_gff3_extension() {
+        assert_eq!(infer_region_format(Path::new("genes.gff3")), RegionFormat::Gtf);
+    }
+
+    #[test]
+    fn infer_format_gff3_gz_extension() {
+        assert_eq!(infer_region_format(Path::new("genes.gff3.gz")), RegionFormat::Gtf);
+    }
+
+    #[test]
+    fn infer_format_txt_defaults_to_bed() {
+        assert_eq!(infer_region_format(Path::new("regions.txt")), RegionFormat::Bed);
+    }
+
+    #[test]
+    fn infer_format_case_insensitive_bed() {
+        assert_eq!(infer_region_format(Path::new("regions.BED")), RegionFormat::Bed);
+    }
+
+    // --- next_unique_label ---
+
+    #[test]
+    fn next_unique_label_empty_raw_uses_default() {
+        let mut seen = HashSet::new();
+        let label = next_unique_label("", "genes", &mut seen);
+        assert_eq!(label, "genes");
+    }
+
+    #[test]
+    fn next_unique_label_nonempty_raw_uses_raw() {
+        let mut seen = HashSet::new();
+        let label = next_unique_label("promoters", "genes", &mut seen);
+        assert_eq!(label, "promoters");
+    }
+
+    #[test]
+    fn next_unique_label_duplicate_appends_suffix() {
+        let mut seen = HashSet::new();
+        let first = next_unique_label("genes", "default", &mut seen);
+        let second = next_unique_label("genes", "default", &mut seen);
+        let third = next_unique_label("genes", "default", &mut seen);
+        assert_eq!(first, "genes");
+        assert_eq!(second, "genes_1");
+        assert_eq!(third, "genes_2");
+    }
+
+    #[test]
+    fn next_unique_label_whitespace_only_raw_uses_default() {
+        let mut seen = HashSet::new();
+        let label = next_unique_label("   ", "genes", &mut seen);
+        assert_eq!(label, "genes");
+    }
+}
