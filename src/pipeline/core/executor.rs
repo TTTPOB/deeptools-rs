@@ -350,3 +350,142 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::io::BedRecord;
+    use crate::io::readers::bed::Strand;
+
+    use super::*;
+
+    /// Build a minimal WorkItem for testing sort/order checks.
+    fn make_item(chrom: &str, query_start: i64, query_end: i64) -> WorkItem {
+        WorkItem {
+            orig_idx: 0,
+            group_index: 0,
+            record: Arc::new(BedRecord {
+                chrom: Arc::from(chrom),
+                start: query_start.max(0) as u32,
+                end: query_end.max(0) as u32,
+                name: None,
+                score: None,
+                score_raw: None,
+                strand: Strand::Unstranded,
+                strand_raw: None,
+                extra_fields: Vec::new(),
+            }),
+            query_start,
+            query_end,
+        }
+    }
+
+    // ── into_chunks ────────────────────────────────────────────────────────
+
+    #[test]
+    fn into_chunks_evenly_divisible() {
+        // 6 items, chunk_size 2 → 3 chunks of 2
+        let items = vec![1, 2, 3, 4, 5, 6];
+        let chunks = into_chunks(items, 2);
+        assert_eq!(chunks, vec![vec![1, 2], vec![3, 4], vec![5, 6]]);
+    }
+
+    #[test]
+    fn into_chunks_last_chunk_smaller() {
+        // 5 items, chunk_size 2 → 2 full chunks + 1 remainder chunk
+        let items = vec![1, 2, 3, 4, 5];
+        let chunks = into_chunks(items, 2);
+        assert_eq!(chunks, vec![vec![1, 2], vec![3, 4], vec![5]]);
+    }
+
+    #[test]
+    fn into_chunks_size_larger_than_items() {
+        // chunk_size exceeds item count → single chunk containing all items
+        let items = vec![1, 2, 3];
+        let chunks = into_chunks(items, 10);
+        assert_eq!(chunks, vec![vec![1, 2, 3]]);
+    }
+
+    #[test]
+    fn into_chunks_empty_input() {
+        // empty input → no chunks
+        let items: Vec<i32> = vec![];
+        let chunks = into_chunks(items, 5);
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn into_chunks_size_one() {
+        // chunk_size 1 → each item is its own chunk
+        let items = vec![10, 20, 30];
+        let chunks = into_chunks(items, 1);
+        assert_eq!(chunks, vec![vec![10], vec![20], vec![30]]);
+    }
+
+    // ── input_order_is_compute_sorted ──────────────────────────────────────
+
+    #[test]
+    fn sorted_already_sorted() {
+        // Items in correct (chrom, start, end) order → true
+        let items = vec![
+            make_item("chr1", 100, 200),
+            make_item("chr1", 200, 300),
+            make_item("chr2", 50, 150),
+        ];
+        assert!(input_order_is_compute_sorted(&items));
+    }
+
+    #[test]
+    fn sorted_empty_slice() {
+        // Empty slice is trivially sorted
+        assert!(input_order_is_compute_sorted(&[]));
+    }
+
+    #[test]
+    fn sorted_single_item() {
+        // A single item is always sorted
+        let items = vec![make_item("chr1", 100, 200)];
+        assert!(input_order_is_compute_sorted(&items));
+    }
+
+    #[test]
+    fn sorted_unsorted_by_chrom() {
+        // chr2 comes before chr1 → not sorted
+        let items = vec![
+            make_item("chr2", 100, 200),
+            make_item("chr1", 100, 200),
+        ];
+        assert!(!input_order_is_compute_sorted(&items));
+    }
+
+    #[test]
+    fn sorted_same_chrom_unsorted_by_start() {
+        // Same chrom, but start decreases → not sorted
+        let items = vec![
+            make_item("chr1", 300, 400),
+            make_item("chr1", 100, 200),
+        ];
+        assert!(!input_order_is_compute_sorted(&items));
+    }
+
+    #[test]
+    fn sorted_same_chrom_and_start_unsorted_by_end() {
+        // Same chrom and start, but end decreases → not sorted
+        let items = vec![
+            make_item("chr1", 100, 400),
+            make_item("chr1", 100, 200),
+        ];
+        assert!(!input_order_is_compute_sorted(&items));
+    }
+
+    #[test]
+    fn sorted_equal_items() {
+        // Identical items satisfy the <= ordering → true
+        let items = vec![
+            make_item("chr1", 100, 200),
+            make_item("chr1", 100, 200),
+        ];
+        assert!(input_order_is_compute_sorted(&items));
+    }
+}
