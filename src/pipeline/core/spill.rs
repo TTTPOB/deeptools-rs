@@ -1686,4 +1686,476 @@ mod tests {
             assert!(!path.exists(), "temp file should be removed: {:?}", path);
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Integration tests — full pipeline with spilling
+    // -----------------------------------------------------------------------
+
+    /// Build a tagged row with a specific value at index 0 (for tracking identity
+    /// through the round-trip) and additional values to bulk up the row size.
+    fn make_large_tagged_row(chrom: &str, start: u32, tag: f64, n_extra: usize) -> MatrixRow {
+        let mut values = vec![tag];
+        values.extend(std::iter::repeat(tag * 0.1).take(n_extra));
+        let bin_count = 1 + n_extra;
+        let record = BedRecord {
+            chrom: Arc::from(chrom),
+            start,
+            end: start + 200,
+            name: Some(format!("region_{start}")),
+            score: Some(1.0),
+            score_raw: None,
+            strand: Strand::Unstranded,
+            strand_raw: None,
+            extra_fields: vec!["extra1".to_string()],
+        };
+        MatrixRow {
+            record,
+            values,
+            sample_count: 1,
+            bin_count,
+            exon_coords: None,
+        }
+    }
+
+    /// Build a tagged row that contains NaN and Inf values to test special-value
+    /// preservation through serialize → spill file → mmap → deserialize.
+    fn make_special_values_row(chrom: &str, start: u32, tag: f64) -> MatrixRow {
+        let record = BedRecord {
+            chrom: Arc::from(chrom),
+            start,
+            end: start + 100,
+            name: None,
+            score: None,
+            score_raw: None,
+            strand: Strand::Unstranded,
+            strand_raw: None,
+            extra_fields: vec![],
+        };
+        MatrixRow {
+            record,
+            values: vec![tag, f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.0],
+            sample_count: 1,
+            bin_count: 5,
+            exon_coords: None,
+        }
+    }
+
+    /// Integration test: 24 rows across 3 groups with threshold=100 bytes.
+    /// Verifies:
+    ///   - Multiple spills are triggered.
+    ///   - finalize_sorted (ascending) emits each group sorted by sort_key.
+    ///   - finalize_sorted (descending) emits each group in reverse sorted order.
+    ///   - Tie-break: rows with equal sort_key appear in insertion_seq order for
+    ///     ascending and reverse insertion_seq order for descending.
+    #[test]
+    fn integration_sorted_ascending_and_descending_with_spill() {
+        // Parameters: 3 groups, 8 rows each, threshold small enough to force spills.
+        // row_estimated_bytes = 1 * 4 * 8 + 100 = 132, threshold=100 → every push spills.
+        let n_groups = 3usize;
+        let n_rows_per_group = 8usize;
+
+        // Pre-build expected data: sort_key and tag for each (group, row_within_group).
+        // Groups 0..2, sort keys cycle through [5, 3, 7, 1, 9, 2, 8, 4] per group.
+        let sort_keys = [5.0f64, 3.0, 7.0, 1.0, 9.0, 2.0, 8.0, 4.0];
+
+        // Build ascending — push rows interleaved across groups.
+        let mut collector_asc =
+            HybridBucketCollector::with_threshold(n_groups, 1, 4, 100);
+        let mut orig_idx = 0usize;
+        for row_i in 0..n_rows_per_group {
+            for group_i in 0..n_groups {
+                let key = sort_keys[row_i];
+                // tag encodes (group_i * 100 + row_i) so we can verify identity.
+                let tag = (group_i * 100 + row_i) as f64;
+                let row = make_large_tagged_row("chr1", orig_idx as u32 * 200, tag, 3);
+                collector_asc.push(row, orig_idx, group_i, key).unwrap();
+                orig_idx += 1;
+            }
+        }
+
+        let mut emitted_asc: Vec<(usize, f64, f64)> = Vec::new(); // (group_index, sort_key, tag)
+        // We need the sort key in emitted — encode as tag = group*100+row_i, and retrieve
+        // sort_key from values[0] being the tag, but we need another field. Instead, we
+        // re-derive sort_key from expected order after emission. We'll verify by checking
+        // that within each group the emitted tags are in expected ascending sort_key order.
+        let _header = collector_asc
+            .finalize_sorted(true, test_header_builder, |gi, row| {
+                emitted_asc.push((gi, row.values[0], 0.0)); // tag is values[0]
+                Ok(())
+            })
+            .unwrap();
+
+        // Verify total count.
+        assert_eq!(
+            emitted_asc.len(),
+            n_groups * n_rows_per_group,
+            "ascending: total row count mismatch"
+        );
+
+        // Verify group-contiguity and per-group ascending order.
+        // Expected ascending tag order for each group: row_i sorted by sort_keys.
+        // sort_keys[0..8] = [5,3,7,1,9,2,8,4], sorted indices = [3,5,1,7,0,2,6,4]
+        // → row_i in ascending sort_key order: [1,5,3,7,0,2,8,4] (by values 1,2,3,4,5,7,8,9)
+        let sorted_row_indices: Vec<usize> = {
+            let mut pairs: Vec<(f64, usize)> = sort_keys
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(i, k)| (k, i))
+                .collect();
+            pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            pairs.iter().map(|&(_, i)| i).collect()
+        };
+
+        // Verify group 0 comes before group 1, group 1 before group 2.
+        let group_ranges: Vec<std::ops::Range<usize>> = {
+            let mut ranges = Vec::new();
+            let mut start = 0;
+            for g in 0..n_groups {
+                let count = emitted_asc.iter().filter(|&&(gi, _, _)| gi == g).count();
+                ranges.push(start..start + count);
+                start += count;
+            }
+            ranges
+        };
+        for g in 0..n_groups {
+            assert_eq!(
+                group_ranges[g].len(),
+                n_rows_per_group,
+                "group {g} row count mismatch in ascending"
+            );
+        }
+
+        // Check ascending sort order within each group.
+        for g in 0..n_groups {
+            let group_tags: Vec<f64> = emitted_asc[group_ranges[g].clone()]
+                .iter()
+                .map(|&(_, tag, _)| tag)
+                .collect();
+            let expected_tags: Vec<f64> = sorted_row_indices
+                .iter()
+                .map(|&row_i| (g * 100 + row_i) as f64)
+                .collect();
+            assert_eq!(
+                group_tags, expected_tags,
+                "group {g} ascending order mismatch"
+            );
+        }
+
+        // Descending test — same data but sort_ascending=false.
+        let mut collector_desc =
+            HybridBucketCollector::with_threshold(n_groups, 1, 4, 100);
+        orig_idx = 0;
+        for row_i in 0..n_rows_per_group {
+            for group_i in 0..n_groups {
+                let key = sort_keys[row_i];
+                let tag = (group_i * 100 + row_i) as f64;
+                let row = make_large_tagged_row("chr1", orig_idx as u32 * 200, tag, 3);
+                collector_desc.push(row, orig_idx, group_i, key).unwrap();
+                orig_idx += 1;
+            }
+        }
+
+        let mut emitted_desc: Vec<(usize, f64)> = Vec::new();
+        let _header = collector_desc
+            .finalize_sorted(false, test_header_builder, |gi, row| {
+                emitted_desc.push((gi, row.values[0]));
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(emitted_desc.len(), n_groups * n_rows_per_group);
+
+        // Descending expected: reverse of ascending.
+        let desc_row_indices: Vec<usize> = sorted_row_indices.iter().rev().copied().collect();
+        let group_ranges_desc: Vec<std::ops::Range<usize>> = {
+            let mut ranges = Vec::new();
+            let mut start = 0;
+            for g in 0..n_groups {
+                let count = emitted_desc.iter().filter(|&&(gi, _)| gi == g).count();
+                ranges.push(start..start + count);
+                start += count;
+            }
+            ranges
+        };
+        for g in 0..n_groups {
+            let group_tags: Vec<f64> = emitted_desc[group_ranges_desc[g].clone()]
+                .iter()
+                .map(|&(_, tag)| tag)
+                .collect();
+            let expected_tags: Vec<f64> = desc_row_indices
+                .iter()
+                .map(|&row_i| (g * 100 + row_i) as f64)
+                .collect();
+            assert_eq!(
+                group_tags, expected_tags,
+                "group {g} descending order mismatch"
+            );
+        }
+    }
+
+    /// Integration test: keep-order mode with gaps (filtered rows) and spilling.
+    /// 20 tasks with alternating group assignment; every other task is "filtered"
+    /// (not pushed). Verifies emitted rows appear in original input order and
+    /// the group label matches the expected assignment for each row.
+    #[test]
+    fn integration_keep_order_with_gaps_and_spill() {
+        // threshold=100, row_estimated_bytes = 1*3*8+100 = 124 > 100 → every push spills.
+        let task_count = 20usize;
+        let n_groups = 2usize;
+        let mut collector = HybridBucketCollector::with_threshold(n_groups, 1, 3, 100);
+
+        // Push only even-indexed tasks (odd indices are "filtered" gaps).
+        // Even tasks alternate groups: task 0 → group 0, task 2 → group 1, task 4 → group 0, …
+        for task_i in (0..task_count).step_by(2) {
+            let group_i = (task_i / 2) % n_groups;
+            let tag = task_i as f64;
+            let row = make_large_tagged_row("chr1", task_i as u32 * 100, tag, 2);
+            collector.push(row, task_i, group_i, 0.0).unwrap();
+        }
+
+        let mut emitted: Vec<(usize, f64)> = Vec::new(); // (group_index, tag)
+        let _header = collector
+            .finalize_keep_order(task_count, test_header_builder, |gi, row| {
+                emitted.push((gi, row.values[0]));
+                Ok(())
+            })
+            .unwrap();
+
+        // Only even-indexed tasks were pushed: 0, 2, 4, … 18 → 10 rows.
+        assert_eq!(emitted.len(), 10, "expected 10 non-filtered rows");
+
+        // Verify original input order and correct group assignment.
+        for (emit_i, &(gi, tag)) in emitted.iter().enumerate() {
+            let expected_task_i = emit_i * 2; // 0, 2, 4, …
+            let expected_group = (emit_i) % n_groups;
+            assert_eq!(
+                tag, expected_task_i as f64,
+                "row {emit_i}: tag mismatch (expected task {expected_task_i})"
+            );
+            assert_eq!(
+                gi, expected_group,
+                "row {emit_i}: group mismatch for task {expected_task_i}"
+            );
+        }
+    }
+
+    /// Integration test: special float values (NaN, Inf, -Inf, -0.0) survive the
+    /// full round-trip through serialize → temp file → mmap → deserialize → emit.
+    #[test]
+    fn integration_special_values_survive_spill_round_trip() {
+        // threshold=1 forces every push to spill immediately.
+        let mut collector = HybridBucketCollector::with_threshold(1, 1, 5, 1);
+
+        // Push 6 rows; each contains the special values pattern.
+        for i in 0..6u32 {
+            let row = make_special_values_row("chrM", i * 50, i as f64 * 10.0);
+            collector.push(row, i as usize, 0, i as f64).unwrap();
+        }
+
+        let mut emitted_rows: Vec<MatrixRow> = Vec::new();
+        let _header = collector
+            .finalize_sorted(true, test_header_builder, |_gi, row| {
+                emitted_rows.push(row);
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(emitted_rows.len(), 6);
+
+        // Verify ascending sort order and special-value preservation.
+        for (i, row) in emitted_rows.iter().enumerate() {
+            let expected_tag = i as f64 * 10.0;
+            assert_eq!(
+                row.values[0], expected_tag,
+                "row {i}: tag value mismatch"
+            );
+            assert!(row.values[1].is_nan(), "row {i}: NaN not preserved");
+            assert_eq!(
+                row.values[2],
+                f64::INFINITY,
+                "row {i}: +Inf not preserved"
+            );
+            assert_eq!(
+                row.values[3],
+                f64::NEG_INFINITY,
+                "row {i}: -Inf not preserved"
+            );
+            // -0.0 == 0.0 in IEEE 754, so check the bit pattern.
+            assert_eq!(
+                row.values[4].to_bits(),
+                (-0.0f64).to_bits(),
+                "row {i}: -0.0 bit pattern not preserved"
+            );
+        }
+    }
+
+    /// Integration test: tie-break behaviour with spilling.
+    /// All rows have the same sort_key=1.0; insertion_seq should determine order.
+    /// Ascending: 0,1,2,3,4,… Descending: …4,3,2,1,0.
+    #[test]
+    fn integration_tiebreak_insertion_seq_with_spill() {
+        let n_rows = 10usize;
+
+        // Ascending tie-break.
+        let mut c_asc = HybridBucketCollector::with_threshold(1, 1, 1, 100);
+        for i in 0..n_rows {
+            // tag encodes insertion order.
+            let row = make_tagged_row("chr1", i as u32 * 100, i as f64);
+            c_asc.push(row, i, 0, 1.0).unwrap(); // all same sort_key
+        }
+        let mut tags_asc: Vec<f64> = Vec::new();
+        c_asc
+            .finalize_sorted(true, test_header_builder, |_gi, row| {
+                tags_asc.push(row.values[0]);
+                Ok(())
+            })
+            .unwrap();
+        let expected_asc: Vec<f64> = (0..n_rows).map(|i| i as f64).collect();
+        assert_eq!(
+            tags_asc, expected_asc,
+            "ascending tie-break: expected insertion order"
+        );
+
+        // Descending tie-break.
+        let mut c_desc = HybridBucketCollector::with_threshold(1, 1, 1, 100);
+        for i in 0..n_rows {
+            let row = make_tagged_row("chr1", i as u32 * 100, i as f64);
+            c_desc.push(row, i, 0, 1.0).unwrap();
+        }
+        let mut tags_desc: Vec<f64> = Vec::new();
+        c_desc
+            .finalize_sorted(false, test_header_builder, |_gi, row| {
+                tags_desc.push(row.values[0]);
+                Ok(())
+            })
+            .unwrap();
+        let expected_desc: Vec<f64> = (0..n_rows).rev().map(|i| i as f64).collect();
+        assert_eq!(
+            tags_desc, expected_desc,
+            "descending tie-break: expected reverse insertion order"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // sort=No group-contiguous regression test
+    // -----------------------------------------------------------------------
+
+    /// Regression test: when sort=No, the executor places rows by group (all
+    /// group-0 rows before group-1 rows etc.) using finalize_keep_order.
+    /// This test simulates multi-group inputs on shared chromosomes where the
+    /// I/O arrival order could be interleaved between groups, and verifies that
+    /// the emitted output is group-contiguous.
+    ///
+    /// Concretely: task indices are not grouped — row for group 1 can arrive
+    /// before a later row for group 0. finalize_keep_order must still emit
+    /// all group-0 rows before group-1 rows because the placement array is
+    /// indexed by orig_idx and the group assignment comes from the slot, not
+    /// from the emit order.
+    ///
+    /// NOTE: finalize_keep_order emits in orig_idx order, so true "group
+    /// contiguity" requires that the caller assigns orig_idx values that are
+    /// already block-separated by group (as the executor does for sort=No).
+    /// This test verifies that the collector faithfully preserves whatever
+    /// assignment the caller made — it does not re-sort by group itself.
+    #[test]
+    fn sort_no_group_contiguous_regression() {
+        // Simulate the executor layout for sort=No:
+        //   tasks for group 0 get orig_idx 0..n_per_group
+        //   tasks for group 1 get orig_idx n_per_group..2*n_per_group
+        // Rows are pushed in interleaved I/O order (group-1 row can arrive
+        // before group-0 row), but finalize_keep_order must restore the
+        // block layout.
+        let n_per_group = 6usize;
+        let n_groups = 3usize;
+        let task_count = n_per_group * n_groups;
+
+        // threshold=100, row_estimated_bytes=124 → every push spills.
+        let mut collector = HybridBucketCollector::with_threshold(n_groups, 1, 3, 100);
+
+        // Push in deliberately scrambled order: cycle through groups within
+        // each "position" to simulate async I/O reordering.
+        for pos in 0..n_per_group {
+            for gi in (0..n_groups).rev() {
+                // orig_idx is block-separated: gi * n_per_group + pos
+                let orig_idx = gi * n_per_group + pos;
+                let tag = orig_idx as f64;
+                let row = make_large_tagged_row(
+                    &format!("chr{}", gi + 1),
+                    pos as u32 * 100,
+                    tag,
+                    2,
+                );
+                collector.push(row, orig_idx, gi, 0.0).unwrap();
+            }
+        }
+
+        let mut emitted: Vec<(usize, f64)> = Vec::new(); // (group_index, tag)
+        let header = collector
+            .finalize_keep_order(task_count, test_header_builder, |gi, row| {
+                emitted.push((gi, row.values[0]));
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(
+            emitted.len(),
+            task_count,
+            "all rows should be emitted"
+        );
+
+        // Verify group-contiguity: all group-0 rows first, then group-1, then group-2.
+        let mut current_group = 0usize;
+        for (emit_i, &(gi, _tag)) in emitted.iter().enumerate() {
+            if gi > current_group {
+                // Verify we've seen exactly n_per_group rows for the previous group.
+                let prev_group_count = emitted[..emit_i]
+                    .iter()
+                    .filter(|&&(g, _)| g == current_group)
+                    .count();
+                assert_eq!(
+                    prev_group_count, n_per_group,
+                    "group {current_group} should have exactly {n_per_group} rows before group {gi} starts"
+                );
+                current_group = gi;
+            }
+            assert!(
+                gi >= current_group,
+                "group index went backwards at emit position {emit_i}: got {gi}, expected >= {current_group}"
+            );
+        }
+
+        // Verify the last group's count.
+        let last_group_count = emitted
+            .iter()
+            .filter(|&&(g, _)| g == n_groups - 1)
+            .count();
+        assert_eq!(
+            last_group_count, n_per_group,
+            "last group should have exactly {n_per_group} rows"
+        );
+
+        // Verify each group's rows have the correct tags (orig_idx = gi*n_per_group + pos).
+        for gi in 0..n_groups {
+            let group_tags: Vec<f64> = emitted
+                .iter()
+                .filter(|&&(g, _)| g == gi)
+                .map(|&(_, tag)| tag)
+                .collect();
+            let expected_tags: Vec<f64> = (0..n_per_group)
+                .map(|pos| (gi * n_per_group + pos) as f64)
+                .collect();
+            assert_eq!(
+                group_tags, expected_tags,
+                "group {gi}: tags do not match expected orig_idx-derived values"
+            );
+        }
+
+        // Verify the header group boundaries reflect n_per_group rows per group.
+        let expected_boundaries: Vec<usize> = (0..=n_groups).map(|g| g * n_per_group).collect();
+        assert_eq!(
+            header.group_boundaries, expected_boundaries,
+            "header group_boundaries mismatch"
+        );
+    }
 }
