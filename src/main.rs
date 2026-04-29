@@ -1,9 +1,13 @@
 use std::{env, process};
 
 use clap::Parser;
+use mimalloc::MiMalloc;
 
 use compute_matrix_rs::cli::Cli;
 use compute_matrix_rs::pipeline;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 fn main() -> anyhow::Result<()> {
     guard_multi_letter_short_flags();

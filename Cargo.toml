@@ -20,6 +20,7 @@ itoa = "1.0"
 bio = "3.0.0"
 quick_cache = "0.6.21"
 memmap2 = "0.9"
+mimalloc = { version = "0.1", default-features = false }
 
 [profile.release]
 lto = true
