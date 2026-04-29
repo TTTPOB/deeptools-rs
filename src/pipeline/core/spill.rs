@@ -20,6 +20,30 @@ pub(crate) const SPILL_BUF_CAPACITY: usize = 1_048_576; // 1 MB
 pub(crate) const DEFAULT_MEMORY_SPILL_THRESHOLD: usize = 1024 * 1024 * 1024; // 1 GB
 
 // ---------------------------------------------------------------------------
+// TempFileGuard — cleans up spill files on drop (including during panics)
+// ---------------------------------------------------------------------------
+
+/// Holds temporary spill file paths and removes them on drop.
+/// Disarm with `std::mem::forget` after a successful explicit cleanup.
+struct TempFileGuard {
+    paths: Vec<PathBuf>,
+}
+
+impl TempFileGuard {
+    fn new(paths: Vec<PathBuf>) -> Self {
+        Self { paths }
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        for path in &self.paths {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // FlushResult
 // ---------------------------------------------------------------------------
 
@@ -313,6 +337,15 @@ impl HybridBucketCollector {
             .collect();
         let header = header_builder(group_counts)?;
 
+        // Collect all temp paths before drain, so the guard can clean them up
+        // if a panic occurs during the emit loop.
+        let all_temp_paths: Vec<PathBuf> = self
+            .buckets
+            .iter()
+            .flat_map(|b| b.completed_flushes.iter().map(|f| f.temp_path.clone()))
+            .collect();
+        let guard = TempFileGuard::new(all_temp_paths);
+
         // 3. For each bucket, merge spilled + in-memory rows and emit in sorted order.
         for bucket in self.buckets.drain(..) {
             let group_index = bucket.group_index;
@@ -428,6 +461,9 @@ impl HybridBucketCollector {
             }
         }
 
+        // All temp files cleaned up — disarm the guard.
+        std::mem::forget(guard);
+
         Ok(header)
     }
 
@@ -450,6 +486,15 @@ impl HybridBucketCollector {
     {
         // 1. Join all in-flight flushes.
         self.join_all()?;
+
+        // Collect all temp paths now so the guard can clean them up if a panic
+        // occurs during mmap or emit.
+        let all_temp_paths: Vec<PathBuf> = self
+            .buckets
+            .iter()
+            .flat_map(|b| b.completed_flushes.iter().map(|f| f.temp_path.clone()))
+            .collect();
+        let guard = TempFileGuard::new(all_temp_paths);
 
         // Slot for placement array: group_index + either a spill reference or owned row.
         enum RowSlot {
@@ -557,6 +602,9 @@ impl HybridBucketCollector {
         for path in &temp_paths {
             let _ = std::fs::remove_file(path);
         }
+
+        // All temp files cleaned up — disarm the guard.
+        std::mem::forget(guard);
 
         Ok(header)
     }
