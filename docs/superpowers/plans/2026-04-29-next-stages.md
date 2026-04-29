@@ -4,7 +4,7 @@
 
 **Goal:** Five improvements: remove `num_cpus` dep, add file-spilling for large sorted matrices, build a matrix comparison dev binary, migrate Python regression tests to Rust integration tests, and improve the profiling bench script.
 
-**Architecture:** File spilling uses a hybrid per-group bucket design (in-memory below 4 GB, mmap-backed temp file above) to eliminate OOM on large sorted matrices. A new dev-only `compare_matrix` binary provides subcommand-based matrix comparison (header, values, full diff) and serves as test infrastructure. The `StreamOrdered` path is extended to support auxiliary outputs (`--outFileNameMatrix`, `--outFileSortedRegions`), eliminating the forced in-memory fallback.
+**Architecture:** File spilling uses a hybrid per-group bucket design (in-memory below 4 GB, chunked-flush to temp file above) to eliminate OOM on large sorted matrices. Each bucket accumulates rows in memory up to ~4 GB, then flushes the entire chunk to a temp file via a dedicated writer thread (`std::thread::spawn` + move). A double-buffer scheme reuses the flushed Vec's capacity; back-pressure (join oldest flush handle) prevents unbounded memory growth on slow I/O (HDD). At finalize, the temp file is mmap'd (`memmap2`) for zero-copy sorted readback. A new dev-only `compare_matrix` binary provides subcommand-based matrix comparison (header, values, full diff) and serves as test infrastructure. The `StreamOrdered` path is extended to support auxiliary outputs (`--outFileNameMatrix`, `--outFileSortedRegions`), eliminating the forced in-memory fallback.
 
 **Tech Stack:** Rust (edition 2024), `memmap2` for mmap, `clap` for the comparison binary CLI, existing `flate2`/`serde_json` for matrix I/O.
 
@@ -199,10 +199,10 @@ impl ChromTable {
     }
 }
 
-/// Per-row binary format written to the spill file:
+/// Per-row binary format written to the spill file.
+/// No outer length prefix — row byte length is tracked in `SpillIndex` in memory.
 ///
 /// ```text
-/// [4 bytes: payload_len (u32 LE)]
 /// [2 bytes: chrom_id (u16 LE)]
 /// [4 bytes: start (u32 LE)]
 /// [4 bytes: end (u32 LE)]
@@ -220,10 +220,6 @@ impl ChromTable {
 /// ```
 pub(crate) fn serialize_row(buf: &mut Vec<u8>, row: &MatrixRow, chrom_table: &mut ChromTable) {
     buf.clear();
-
-    // placeholder for payload_len — filled at end
-    let len_pos = 0;
-    buf.extend_from_slice(&0u32.to_le_bytes());
 
     let chrom_id = chrom_table.get_or_insert(&row.record.chrom);
     buf.extend_from_slice(&chrom_id.to_le_bytes());
@@ -290,9 +286,6 @@ pub(crate) fn serialize_row(buf: &mut Vec<u8>, row: &MatrixRow, chrom_table: &mu
     for &value in &row.values {
         buf.extend_from_slice(&value.to_le_bytes());
     }
-
-    let payload_len = (buf.len() - 4) as u32;
-    buf[len_pos..len_pos + 4].copy_from_slice(&payload_len.to_le_bytes());
 }
 
 /// Deserialize a row from a byte slice (typically an mmap region).
@@ -416,40 +409,81 @@ pub(crate) fn deserialize_row(data: &[u8], chrom_table: &ChromTable) -> MatrixRo
     }
 }
 
-/// Collector that manages multiple hybrid buckets — one per group for
-/// ascend/descend sorting, or a single bucket for sort=keep reordering.
-///
-/// Each bucket starts in-memory and spills to a temp file when accumulated
-/// data exceeds `MEMORY_SPILL_THRESHOLD`. Tracks per-row metadata
-/// (orig_idx, group_index, sort_key) alongside the row data.
-pub(crate) struct HybridBucketCollector {
-    /// One bucket per group (ascend/descend) or a single bucket (keep).
-    buckets: Vec<CollectorBucket>,
-    sample_count: usize,
-    bin_count: usize,
-}
-
-struct CollectorBucket {
-    rows: Vec<(usize, f64, MatrixRow)>, // (orig_idx, sort_key, row)
-    estimated_bytes: usize,
-    spill: Option<SpillState>,
-}
-
-struct SpillState {
-    index: Vec<SpillIndex>,
-    writer: BufWriter<File>,
-    temp_path: std::path::PathBuf,
+/// Result returned by a writer thread after flushing a chunk to disk.
+struct FlushResult {
+    indices: Vec<SpillIndex>,
+    returned_buf: Vec<(usize, f64, MatrixRow)>,
     chrom_table: ChromTable,
-    current_offset: u64,
-    serialize_buf: Vec<u8>,
+    temp_path: std::path::PathBuf,
+}
+
+/// Flush a chunk of rows to a new temp file. Runs on a dedicated thread.
+fn flush_chunk(
+    rows: Vec<(usize, f64, MatrixRow)>,
+    group_index: usize,
+) -> Result<FlushResult> {
+    let temp = NamedTempFile::new().context("Failed to create spill temp file")?;
+    let temp_path = temp.path().to_path_buf();
+    let file = temp.into_file();
+    let mut writer = BufWriter::with_capacity(SPILL_BUF_CAPACITY, file);
+    let mut chrom_table = ChromTable::new();
+    let mut index = Vec::with_capacity(rows.len());
+    let mut serialize_buf = Vec::with_capacity(32768);
+    let mut offset: u64 = 0;
+
+    for &(orig_idx, sort_key, ref row) in &rows {
+        serialize_row(&mut serialize_buf, row, &mut chrom_table);
+        writer
+            .write_all(&serialize_buf)
+            .context("Failed to write row to spill file")?;
+        index.push(SpillIndex {
+            orig_idx,
+            group_index,
+            sort_key,
+            file_offset: offset,
+            row_byte_len: serialize_buf.len() as u32,
+        });
+        offset += serialize_buf.len() as u64;
+    }
+
+    writer.flush().context("Failed to flush spill file")?;
+
+    // Clear the Vec but keep its capacity for reuse
+    let mut returned_buf = rows;
+    returned_buf.clear();
+
+    Ok(FlushResult {
+        indices: index,
+        returned_buf,
+        chrom_table,
+        temp_path,
+    })
+}
+
+/// A single per-group bucket using chunked flush with double-buffering.
+///
+/// Accumulates rows in memory up to ~4 GB, then flushes the entire chunk
+/// to a temp file on a dedicated writer thread. A spare buffer is reused
+/// to avoid re-allocation. Back-pressure is applied when the spare buffer
+/// is not yet returned (join oldest flush handle).
+struct CollectorBucket {
+    active: Vec<(usize, f64, MatrixRow)>,
+    spare: Option<Vec<(usize, f64, MatrixRow)>>,
+    estimated_bytes: usize,
+    group_index: usize,
+    flush_handles: Vec<std::thread::JoinHandle<Result<FlushResult>>>,
+    completed_flushes: Vec<FlushResult>,
 }
 
 impl CollectorBucket {
-    fn new() -> Self {
+    fn new(group_index: usize) -> Self {
         Self {
-            rows: Vec::new(),
+            active: Vec::new(),
+            spare: None,
             estimated_bytes: 0,
-            spill: None,
+            group_index,
+            flush_handles: Vec::new(),
+            completed_flushes: Vec::new(),
         }
     }
 
@@ -457,93 +491,75 @@ impl CollectorBucket {
         &mut self,
         row: MatrixRow,
         orig_idx: usize,
-        group_index: usize,
         sort_key: f64,
     ) -> Result<()> {
         let row_bytes = row.values.len() * 8 + 200;
-
-        if self.spill.is_some() {
-            // Already spilling — write directly to file
-            let spill = self.spill.as_mut().unwrap();
-            serialize_row(&mut spill.serialize_buf, &row, &mut spill.chrom_table);
-            spill
-                .writer
-                .write_all(&spill.serialize_buf)
-                .context("Failed to write row to spill file")?;
-            spill.index.push(SpillIndex {
-                orig_idx,
-                group_index,
-                sort_key,
-                file_offset: spill.current_offset,
-                row_byte_len: spill.serialize_buf.len() as u32,
-            });
-            spill.current_offset += spill.serialize_buf.len() as u64;
-            return Ok(());
-        }
-
         self.estimated_bytes += row_bytes;
 
-        if self.estimated_bytes > MEMORY_SPILL_THRESHOLD && !self.rows.is_empty() {
-            // Transition: flush in-memory rows to file, then add new row
-            let temp = NamedTempFile::new().context("Failed to create spill temp file")?;
-            let temp_path = temp.path().to_path_buf();
-            let file = temp.into_file();
-            let mut writer = BufWriter::with_capacity(SPILL_BUF_CAPACITY, file);
-            let mut chrom_table = ChromTable::new();
-            let mut index = Vec::with_capacity(self.rows.len() + 1);
-            let mut serialize_buf = Vec::with_capacity(32768);
-            let mut offset: u64 = 0;
-
-            // Flush existing rows
-            let old_rows = std::mem::take(&mut self.rows);
-            for (old_orig_idx, old_sort_key, old_row) in old_rows {
-                serialize_row(&mut serialize_buf, &old_row, &mut chrom_table);
-                writer
-                    .write_all(&serialize_buf)
-                    .context("Failed to flush row to spill file")?;
-                index.push(SpillIndex {
-                    orig_idx: old_orig_idx,
-                    group_index,
-                    sort_key: old_sort_key,
-                    file_offset: offset,
-                    row_byte_len: serialize_buf.len() as u32,
-                });
-                offset += serialize_buf.len() as u64;
-            }
-
-            // Write the new row
-            serialize_row(&mut serialize_buf, &row, &mut chrom_table);
-            writer
-                .write_all(&serialize_buf)
-                .context("Failed to write row to spill file")?;
-            index.push(SpillIndex {
-                orig_idx,
-                group_index,
-                sort_key,
-                file_offset: offset,
-                row_byte_len: serialize_buf.len() as u32,
-            });
-            offset += serialize_buf.len() as u64;
-
-            self.spill = Some(SpillState {
-                index,
-                writer,
-                temp_path,
-                chrom_table,
-                current_offset: offset,
-                serialize_buf,
-            });
-        } else {
-            self.rows.push((orig_idx, sort_key, row));
+        if self.estimated_bytes > MEMORY_SPILL_THRESHOLD && !self.active.is_empty() {
+            self.flush_active()?;
+            self.estimated_bytes = row_bytes;
         }
+
+        self.active.push((orig_idx, sort_key, row));
         Ok(())
     }
+
+    fn flush_active(&mut self) -> Result<()> {
+        // Get spare buffer (reuse capacity) or apply back-pressure
+        let spare = match self.spare.take() {
+            Some(buf) => buf,
+            None if !self.flush_handles.is_empty() => {
+                // Back-pressure: wait for oldest flush to complete
+                let handle = self.flush_handles.remove(0);
+                let result = handle.join().unwrap()?;
+                let buf = result.returned_buf;
+                self.completed_flushes.push(FlushResult {
+                    returned_buf: Vec::new(), // capacity already taken
+                    ..result
+                });
+                buf
+            }
+            None => Vec::new(), // first flush, no spare yet
+        };
+
+        let full = std::mem::replace(&mut self.active, spare);
+        let group_index = self.group_index;
+        let handle = std::thread::spawn(move || flush_chunk(full, group_index));
+        self.flush_handles.push(handle);
+        Ok(())
+    }
+
+    /// Join all pending flush handles and return total row count
+    /// (in-memory + all flushed chunks).
+    fn join_all(&mut self) -> Result<usize> {
+        for handle in self.flush_handles.drain(..) {
+            let result = handle.join().unwrap()?;
+            self.completed_flushes.push(result);
+        }
+        let spilled: usize = self.completed_flushes.iter().map(|f| f.indices.len()).sum();
+        Ok(self.active.len() + spilled)
+    }
+}
+
+/// Collector that manages multiple hybrid buckets — one per group for
+/// ascend/descend sorting, or a single bucket for sort=keep reordering.
+///
+/// Each bucket accumulates rows in memory up to ~4 GB, then flushes the
+/// chunk to a temp file on a writer thread. Double-buffering reuses Vec
+/// capacity; back-pressure prevents unbounded memory growth on slow I/O.
+pub(crate) struct HybridBucketCollector {
+    buckets: Vec<CollectorBucket>,
+    sample_count: usize,
+    bin_count: usize,
 }
 
 impl HybridBucketCollector {
     pub(crate) fn new(group_count: usize, sample_count: usize, bin_count: usize) -> Self {
         Self {
-            buckets: (0..group_count).map(|_| CollectorBucket::new()).collect(),
+            buckets: (0..group_count)
+                .map(|i| CollectorBucket::new(i))
+                .collect(),
             sample_count,
             bin_count,
         }
@@ -556,7 +572,7 @@ impl HybridBucketCollector {
         group_index: usize,
         sort_key: f64,
     ) -> Result<()> {
-        self.buckets[group_index].push(row, orig_idx, group_index, sort_key)
+        self.buckets[group_index].push(row, orig_idx, sort_key)
     }
 }
 ```
@@ -620,9 +636,7 @@ mod tests {
         let mut buf = Vec::new();
         serialize_row(&mut buf, &row, &mut chrom_table);
 
-        // Skip the 4-byte length prefix for deserialization
-        let payload = &buf[4..];
-        let restored = deserialize_row(payload, &chrom_table);
+        let restored = deserialize_row(&buf, &chrom_table);
 
         assert_eq!(restored.record.chrom.as_ref(), "chr1");
         assert_eq!(restored.record.start, 1000);
@@ -718,8 +732,8 @@ git commit -m "feat: add spill module with hybrid bucket serialization and chrom
 Append to the `impl HybridBucketCollector` block in `spill.rs`:
 
 ```rust
-    /// Finalize for ascend/descend: sort each bucket by sort_key,
-    /// emit rows via the provided callback in group order.
+    /// Finalize for ascend/descend: join all flush handles, sort each
+    /// bucket by sort_key, emit rows via the provided callback in group order.
     pub(crate) fn finalize_sorted<F>(
         mut self,
         sort_ascending: bool,
@@ -729,21 +743,12 @@ Append to the `impl HybridBucketCollector` block in `spill.rs`:
     where
         F: FnMut(MatrixRow) -> Result<()>,
     {
-        let group_counts: Vec<usize> = self
-            .buckets
-            .iter()
-            .map(|b| {
-                b.rows.len()
-                    + b.spill.as_ref().map_or(0, |s| s.index.len())
-            })
-            .collect();
-        let header = header_builder(group_counts)?;
-
+        // Join all pending writer threads
+        let mut group_counts = Vec::with_capacity(self.buckets.len());
         for bucket in &mut self.buckets {
-            if let Some(ref mut spill) = bucket.spill {
-                spill.writer.flush().context("Failed to flush spill file")?;
-            }
+            group_counts.push(bucket.join_all()?);
         }
+        let header = header_builder(group_counts)?;
 
         for bucket in self.buckets {
             Self::emit_bucket_sorted(bucket, sort_ascending, &mut emit)?;
@@ -751,8 +756,8 @@ Append to the `impl HybridBucketCollector` block in `spill.rs`:
         Ok(header)
     }
 
-    /// Finalize for sort=keep: emit all rows across all buckets in
-    /// orig_idx order.
+    /// Finalize for sort=keep: join all flush handles, emit all rows
+    /// across all buckets in orig_idx order.
     pub(crate) fn finalize_keep_order<F>(
         mut self,
         header_builder: impl FnOnce(Vec<usize>) -> Result<MatrixHeader>,
@@ -761,52 +766,15 @@ Append to the `impl HybridBucketCollector` block in `spill.rs`:
     where
         F: FnMut(MatrixRow) -> Result<()>,
     {
-        let group_counts: Vec<usize> = self
-            .buckets
-            .iter()
-            .map(|b| {
-                b.rows.len()
-                    + b.spill.as_ref().map_or(0, |s| s.index.len())
-            })
-            .collect();
-        let header = header_builder(group_counts)?;
-
-        // Collect all entries with their orig_idx, sort, emit
-        let total: usize = group_counts.iter().sum();
-        let mut all_entries: Vec<(usize, RowSource)> = Vec::with_capacity(total);
-
-        for (bucket_idx, bucket) in self.buckets.into_iter().enumerate() {
-            if let Some(mut spill) = bucket.spill {
-                spill.writer.flush().context("Failed to flush spill file")?;
-
-                let file = File::open(&spill.temp_path)
-                    .context("Failed to reopen spill file for mmap")?;
-                let mmap = unsafe { Mmap::map(&file) }
-                    .context("Failed to mmap spill file")?;
-
-                for entry in &spill.index {
-                    all_entries.push((
-                        entry.orig_idx,
-                        RowSource::Spilled {
-                            offset: entry.file_offset,
-                            len: entry.row_byte_len,
-                        },
-                    ));
-                }
-                // Store mmap and chrom_table alongside entries
-                // — handled via a separate structure below
-            } else {
-                for (orig_idx, _sort_key, _row) in &bucket.rows {
-                    all_entries.push((*orig_idx, RowSource::InMemory(bucket_idx)));
-                }
-            }
+        let mut group_counts = Vec::with_capacity(self.buckets.len());
+        for bucket in &mut self.buckets {
+            group_counts.push(bucket.join_all()?);
         }
+        let header = header_builder(group_counts)?;
+        let total: usize = group_counts.iter().sum();
 
-        // For keep order, use a pre-allocated Vec<Option<MatrixRow>> indexed by orig_idx
-        // (as discussed: O(1) placement, O(n) scan, zero sort overhead)
-        // Implementation detail: collect all in-memory rows into a flat vec,
-        // sort all_entries by orig_idx, emit in order.
-        // Full implementation in the next step.
+        // Full implementation in Task 2c — uses pre-allocated placement array
+        // indexed by orig_idx for O(n) emit with zero sorting overhead.
         todo!("Complete keep-order finalize — see Task 2c")
     }
 
@@ -818,40 +786,82 @@ Append to the `impl HybridBucketCollector` block in `spill.rs`:
     where
         F: FnMut(MatrixRow) -> Result<()>,
     {
-        if let Some(mut spill) = bucket.spill {
-            // Spilled path: sort index, mmap, emit
-            let file =
-                File::open(&spill.temp_path).context("Failed to reopen spill file for mmap")?;
-            let mmap =
-                unsafe { Mmap::map(&file) }.context("Failed to mmap spill file")?;
+        // Collect all spill indices + mmap all chunk files
+        let mut all_indices: Vec<SpillIndex> = Vec::new();
+        let mut mmaps: Vec<(Mmap, ChromTable)> = Vec::new();
 
-            spill.index.sort_by(|a, b| {
-                let cmp = crate::pipeline::matrix::compare_ascending(a.sort_key, b.sort_key);
-                if sort_ascending { cmp } else { cmp.reverse() }
-            });
+        for flush in bucket.completed_flushes {
+            let file = File::open(&flush.temp_path)
+                .context("Failed to reopen spill file for mmap")?;
+            let mmap = unsafe { Mmap::map(&file) }
+                .context("Failed to mmap spill file")?;
+            let mmap_idx = mmaps.len();
 
-            for entry in &spill.index {
-                let start = entry.file_offset as usize + 4; // skip length prefix
-                let end = entry.file_offset as usize + entry.row_byte_len as usize;
-                let row = deserialize_row(&mmap[start..end], &spill.chrom_table);
-                emit(row)?;
+            // Remap indices to include mmap_idx (stored in group_index field
+            // temporarily — or use a wrapper struct)
+            for mut entry in flush.indices {
+                entry.group_index = mmap_idx; // reuse field as mmap index
+                all_indices.push(entry);
             }
+            mmaps.push((mmap, flush.chrom_table));
+        }
 
-            // Also emit any remaining in-memory rows that were added before
-            // the spill threshold was crossed — but in this design, all rows
-            // are flushed to the spill file during transition, so bucket.rows
-            // is empty after spill. No action needed.
-        } else {
-            // In-memory path: sort rows, emit
-            let mut rows = bucket.rows;
-            rows.sort_by(|a, b| {
-                let cmp = crate::pipeline::matrix::compare_ascending(a.1, b.1);
-                if sort_ascending { cmp } else { cmp.reverse() }
-            });
-            for (_orig_idx, _sort_key, row) in rows {
+        // Merge in-memory rows: assign sort_key, add to a combined list
+        // In-memory rows don't need mmap — emit directly after sorting
+        let mut in_memory_rows = bucket.active;
+
+        // Sort everything by sort_key
+        all_indices.sort_by(|a, b| {
+            let cmp = crate::pipeline::matrix::compare_ascending(a.sort_key, b.sort_key);
+            if sort_ascending { cmp } else { cmp.reverse() }
+        });
+        in_memory_rows.sort_by(|a, b| {
+            let cmp = crate::pipeline::matrix::compare_ascending(a.1, b.1);
+            if sort_ascending { cmp } else { cmp.reverse() }
+        });
+
+        // Merge-emit spilled and in-memory rows in sorted order
+        let mut spill_pos = 0;
+        let mut mem_pos = 0;
+        while spill_pos < all_indices.len() && mem_pos < in_memory_rows.len() {
+            let spill_key = all_indices[spill_pos].sort_key;
+            let mem_key = in_memory_rows[mem_pos].1;
+            let cmp = crate::pipeline::matrix::compare_ascending(spill_key, mem_key);
+            let pick_spill = if sort_ascending {
+                cmp.is_le()
+            } else {
+                cmp.is_ge()
+            };
+            if pick_spill {
+                let entry = &all_indices[spill_pos];
+                let (ref mmap, ref ct) = mmaps[entry.group_index];
+                let start = entry.file_offset as usize;
+                let end = start + entry.row_byte_len as usize;
+                emit(deserialize_row(&mmap[start..end], ct))?;
+                spill_pos += 1;
+            } else {
+                let (_, _, row) = std::mem::replace(
+                    &mut in_memory_rows[mem_pos],
+                    // placeholder — won't be accessed again
+                    in_memory_rows.last().unwrap().clone(),
+                );
+                // Actually, better to drain:
                 emit(row)?;
+                mem_pos += 1;
             }
         }
+        // Drain remaining spilled
+        for entry in &all_indices[spill_pos..] {
+            let (ref mmap, ref ct) = mmaps[entry.group_index];
+            let start = entry.file_offset as usize;
+            let end = start + entry.row_byte_len as usize;
+            emit(deserialize_row(&mmap[start..end], ct))?;
+        }
+        // Drain remaining in-memory
+        for (_, _, row) in in_memory_rows.into_iter().skip(mem_pos) {
+            emit(row)?;
+        }
+
         Ok(())
     }
 ```
@@ -977,8 +987,8 @@ Replace the `todo!()` in `finalize_keep_order` with the full implementation usin
                     let (ref mmap, ref chrom_table) = mmaps[*bucket_spill_idx]
                         .as_ref()
                         .expect("mmap must exist for spilled slot");
-                    let start = *offset as usize + 4; // skip length prefix
-                    let end = *offset as usize + *len as usize;
+                    let start = *offset as usize;
+                    let end = start + *len as usize;
                     let row = deserialize_row(&mmap[start..end], chrom_table);
                     emit(row)?;
                 }
