@@ -394,7 +394,7 @@ impl MatrixData {
     }
 }
 
-fn compute_sort_metric(
+pub(crate) fn compute_sort_metric(
     row: &MatrixRow,
     sort_using: SortUsing,
     sample_list: Option<&[usize]>,
@@ -470,7 +470,7 @@ fn collect_values(row: &MatrixRow, sample_list: Option<&[usize]>) -> Vec<f64> {
     values
 }
 
-fn compare_ascending(left: f64, right: f64) -> Ordering {
+pub(crate) fn compare_ascending(left: f64, right: f64) -> Ordering {
     match (left.is_nan(), right.is_nan()) {
         (true, true) => Ordering::Equal,
         (true, false) => Ordering::Greater,

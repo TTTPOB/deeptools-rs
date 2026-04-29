@@ -5,9 +5,10 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use anyhow::{Context, Result};
+use memmap2::Mmap;
 
 use crate::io::readers::bed::{BedRecord, Strand};
-use crate::pipeline::matrix::MatrixRow;
+use crate::pipeline::matrix::{MatrixHeader, MatrixRow, compare_ascending};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -628,6 +629,291 @@ impl HybridBucketCollector {
         Ok(())
     }
 
+    /// Finalize the collector in sorted mode.
+    ///
+    /// Joins all in-flight flushes, then for each bucket (group) emits rows in
+    /// sorted order by `(sort_key, insertion_seq)`. When `sort_ascending` is
+    /// false the final order is reversed (matching the `sort_by(ascending) +
+    /// reverse()` behaviour of `MatrixData::sort_groups`).
+    ///
+    /// The `header_builder` closure receives the final per-group row counts and
+    /// returns a `MatrixHeader`. The `emit` closure receives `(group_index, row)`.
+    pub(crate) fn finalize_sorted<F>(
+        mut self,
+        sort_ascending: bool,
+        header_builder: impl FnOnce(Vec<usize>) -> Result<MatrixHeader>,
+        mut emit: F,
+    ) -> Result<MatrixHeader>
+    where
+        F: FnMut(usize, MatrixRow) -> Result<()>,
+    {
+        // 1. Join all in-flight flushes.
+        self.join_all()?;
+
+        // 2. Compute group counts for the header.
+        let group_counts: Vec<usize> = self
+            .buckets
+            .iter()
+            .map(|b| {
+                let flushed: usize = b.completed_flushes.iter().map(|f| f.indices.len()).sum();
+                flushed + b.active.len()
+            })
+            .collect();
+        let header = header_builder(group_counts)?;
+
+        // 3. For each bucket, merge spilled + in-memory rows and emit in sorted order.
+        for bucket in self.buckets.drain(..) {
+            let group_index = bucket.group_index;
+
+            // mmap all spill files for this bucket.
+            let mut mmaps: Vec<Mmap> = Vec::with_capacity(bucket.completed_flushes.len());
+            let mut chrom_tables: Vec<&ChromTable> =
+                Vec::with_capacity(bucket.completed_flushes.len());
+            let mut temp_paths: Vec<PathBuf> = Vec::new();
+
+            // We need to hold references to completed_flushes, so collect everything first.
+            // Build a unified list of emit entries.
+
+            // An entry that can be either a spill reference or an owned in-memory row.
+            enum EmitEntry {
+                Spill {
+                    sort_key: f64,
+                    insertion_seq: u32,
+                    mmap_idx: usize,
+                    file_offset: u64,
+                    row_byte_len: u32,
+                },
+                InMemory {
+                    sort_key: f64,
+                    insertion_seq: u32,
+                    row: MatrixRow,
+                },
+            }
+
+            impl EmitEntry {
+                fn sort_key(&self) -> f64 {
+                    match self {
+                        EmitEntry::Spill { sort_key, .. } => *sort_key,
+                        EmitEntry::InMemory { sort_key, .. } => *sort_key,
+                    }
+                }
+                fn insertion_seq(&self) -> u32 {
+                    match self {
+                        EmitEntry::Spill { insertion_seq, .. } => *insertion_seq,
+                        EmitEntry::InMemory { insertion_seq, .. } => *insertion_seq,
+                    }
+                }
+            }
+
+            // Open mmaps for all spill files.
+            for flush in &bucket.completed_flushes {
+                let file = std::fs::File::open(&flush.temp_path)
+                    .with_context(|| format!("failed to open spill file {:?}", flush.temp_path))?;
+                // SAFETY: the file is complete and no longer being written to.
+                let mmap = unsafe { Mmap::map(&file) }
+                    .with_context(|| format!("failed to mmap spill file {:?}", flush.temp_path))?;
+                mmaps.push(mmap);
+                chrom_tables.push(&flush.chrom_table);
+                temp_paths.push(flush.temp_path.clone());
+            }
+
+            let mut all_entries: Vec<EmitEntry> = Vec::new();
+
+            // Collect spill references.
+            for (flush_idx, flush) in bucket.completed_flushes.iter().enumerate() {
+                for idx in &flush.indices {
+                    all_entries.push(EmitEntry::Spill {
+                        sort_key: idx.sort_key,
+                        insertion_seq: idx.insertion_seq,
+                        mmap_idx: flush_idx,
+                        file_offset: idx.file_offset,
+                        row_byte_len: idx.row_byte_len,
+                    });
+                }
+            }
+
+            // Collect in-memory rows.
+            for (_orig_idx, sort_key, insertion_seq, row) in bucket.active {
+                all_entries.push(EmitEntry::InMemory {
+                    sort_key,
+                    insertion_seq,
+                    row,
+                });
+            }
+
+            // Sort ascending by (sort_key, insertion_seq).
+            all_entries.sort_by(|a, b| {
+                compare_ascending(a.sort_key(), b.sort_key())
+                    .then(a.insertion_seq().cmp(&b.insertion_seq()))
+            });
+            if !sort_ascending {
+                all_entries.reverse();
+            }
+
+            // Emit rows.
+            for entry in all_entries {
+                let row = match entry {
+                    EmitEntry::Spill {
+                        mmap_idx,
+                        file_offset,
+                        row_byte_len,
+                        ..
+                    } => {
+                        let offset = file_offset as usize;
+                        let len = row_byte_len as usize;
+                        let data = &mmaps[mmap_idx][offset..offset + len];
+                        deserialize_row(data, chrom_tables[mmap_idx])?
+                    }
+                    EmitEntry::InMemory { row, .. } => row,
+                };
+                emit(group_index, row)?;
+            }
+
+            // Cleanup: drop mmaps then remove temp files.
+            drop(mmaps);
+            for path in &temp_paths {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+
+        Ok(header)
+    }
+
+    /// Finalize the collector in keep-order mode.
+    ///
+    /// Joins all in-flight flushes, then places every row into a flat placement
+    /// array indexed by `orig_idx`. A linear scan emits rows in their original
+    /// input order. Slots at filtered-row indices remain `None` and are skipped.
+    ///
+    /// `task_count` is the total number of input tasks (regions) — it determines
+    /// the size of the placement array.
+    pub(crate) fn finalize_keep_order<F>(
+        mut self,
+        task_count: usize,
+        header_builder: impl FnOnce(Vec<usize>) -> Result<MatrixHeader>,
+        mut emit: F,
+    ) -> Result<MatrixHeader>
+    where
+        F: FnMut(usize, MatrixRow) -> Result<()>,
+    {
+        // 1. Join all in-flight flushes.
+        self.join_all()?;
+
+        // Slot for placement array: group_index + either a spill reference or owned row.
+        enum RowSlot {
+            Spill {
+                group_index: usize,
+                mmap_idx: usize,
+                file_offset: u64,
+                row_byte_len: u32,
+            },
+            InMemory {
+                group_index: usize,
+                row: MatrixRow,
+            },
+        }
+
+        impl RowSlot {
+            fn group_index(&self) -> usize {
+                match self {
+                    RowSlot::Spill { group_index, .. } => *group_index,
+                    RowSlot::InMemory { group_index, .. } => *group_index,
+                }
+            }
+        }
+
+        let mut slots: Vec<Option<RowSlot>> = (0..task_count).map(|_| None).collect();
+
+        // Global mmap / chrom_table storage keyed by a global flush index.
+        let mut mmaps: Vec<Mmap> = Vec::new();
+        let mut chrom_tables: Vec<ChromTable> = Vec::new();
+        let mut temp_paths: Vec<PathBuf> = Vec::new();
+
+        // 2. Populate slots from all buckets.
+        let group_count = self.buckets.len();
+        for bucket in self.buckets.drain(..) {
+            let group_index = bucket.group_index;
+
+            // Process spilled flushes.
+            for flush in bucket.completed_flushes {
+                let mmap_idx = mmaps.len();
+                let file = std::fs::File::open(&flush.temp_path).with_context(|| {
+                    format!("failed to open spill file {:?}", flush.temp_path)
+                })?;
+                let mmap = unsafe { Mmap::map(&file) }.with_context(|| {
+                    format!("failed to mmap spill file {:?}", flush.temp_path)
+                })?;
+                mmaps.push(mmap);
+                chrom_tables.push(flush.chrom_table);
+                temp_paths.push(flush.temp_path);
+
+                for idx in &flush.indices {
+                    if idx.orig_idx < task_count {
+                        slots[idx.orig_idx] = Some(RowSlot::Spill {
+                            group_index,
+                            mmap_idx,
+                            file_offset: idx.file_offset,
+                            row_byte_len: idx.row_byte_len,
+                        });
+                    }
+                }
+            }
+
+            // Process in-memory rows.
+            for (orig_idx, _sort_key, _insertion_seq, row) in bucket.active {
+                if orig_idx < task_count {
+                    slots[orig_idx] = Some(RowSlot::InMemory {
+                        group_index,
+                        row,
+                    });
+                }
+            }
+        }
+
+        // 3. Count rows per group.
+        let mut group_counts = vec![0usize; group_count];
+        for slot in &slots {
+            if let Some(s) = slot {
+                let gi = s.group_index();
+                if gi < group_counts.len() {
+                    group_counts[gi] += 1;
+                }
+            }
+        }
+
+        let header = header_builder(group_counts)?;
+
+        // 4. Linear scan — emit in original order, skip None slots (filtered rows).
+        for slot in slots {
+            if let Some(s) = slot {
+                let gi = s.group_index();
+                let row = match s {
+                    RowSlot::Spill {
+                        mmap_idx,
+                        file_offset,
+                        row_byte_len,
+                        ..
+                    } => {
+                        let offset = file_offset as usize;
+                        let len = row_byte_len as usize;
+                        let data = &mmaps[mmap_idx][offset..offset + len];
+                        deserialize_row(data, &chrom_tables[mmap_idx])?
+                    }
+                    RowSlot::InMemory { row, .. } => row,
+                };
+                emit(gi, row)?;
+            }
+        }
+
+        // 5. Cleanup: drop mmaps then remove temp files.
+        drop(mmaps);
+        for path in &temp_paths {
+            let _ = std::fs::remove_file(path);
+        }
+
+        Ok(header)
+    }
+
     /// Access the buckets (for reading results after join_all).
     #[cfg(test)]
     fn buckets(&self) -> &[CollectorBucket] {
@@ -1002,6 +1288,399 @@ mod tests {
                 .sum();
             let total = flushed + bucket.active.len();
             assert_eq!(total, 4, "group {g} should have 4 rows total");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // finalize_sorted tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: build a trivial MatrixHeader from group counts (test only).
+    fn test_header_builder(group_counts: Vec<usize>) -> Result<MatrixHeader> {
+        Ok(MatrixHeader::default_for_test(group_counts))
+    }
+
+    /// Helper: create a row whose first value encodes a tag so we can track it.
+    fn make_tagged_row(chrom: &str, start: u32, tag: f64) -> MatrixRow {
+        let record = BedRecord {
+            chrom: Arc::from(chrom),
+            start,
+            end: start + 100,
+            name: None,
+            score: None,
+            score_raw: None,
+            strand: Strand::Unstranded,
+            strand_raw: None,
+            extra_fields: vec![],
+        };
+        MatrixRow {
+            record,
+            values: vec![tag],
+            sample_count: 1,
+            bin_count: 1,
+            exon_coords: None,
+        }
+    }
+
+    #[test]
+    fn finalize_sorted_ascending_in_memory_only() {
+        // All rows stay in memory (high threshold). Verify ascending sort order.
+        let mut collector = HybridBucketCollector::with_threshold(1, 1, 1, 1_000_000);
+
+        // Push rows with sort keys: 3.0, 1.0, 2.0
+        collector
+            .push(make_tagged_row("chr1", 300, 30.0), 0, 0, 3.0)
+            .unwrap();
+        collector
+            .push(make_tagged_row("chr1", 100, 10.0), 1, 0, 1.0)
+            .unwrap();
+        collector
+            .push(make_tagged_row("chr1", 200, 20.0), 2, 0, 2.0)
+            .unwrap();
+
+        let mut emitted: Vec<(usize, f64)> = Vec::new();
+        let header = collector
+            .finalize_sorted(true, test_header_builder, |gi, row| {
+                emitted.push((gi, row.values[0]));
+                Ok(())
+            })
+            .unwrap();
+
+        // Ascending: sort_key 1.0, 2.0, 3.0 → tags 10.0, 20.0, 30.0
+        assert_eq!(emitted.len(), 3);
+        assert_eq!(emitted[0], (0, 10.0));
+        assert_eq!(emitted[1], (0, 20.0));
+        assert_eq!(emitted[2], (0, 30.0));
+
+        // Header should reflect 3 rows in group 0.
+        assert_eq!(header.group_boundaries, vec![0, 3]);
+    }
+
+    #[test]
+    fn finalize_sorted_descending_in_memory_only() {
+        let mut collector = HybridBucketCollector::with_threshold(1, 1, 1, 1_000_000);
+
+        collector
+            .push(make_tagged_row("chr1", 300, 30.0), 0, 0, 3.0)
+            .unwrap();
+        collector
+            .push(make_tagged_row("chr1", 100, 10.0), 1, 0, 1.0)
+            .unwrap();
+        collector
+            .push(make_tagged_row("chr1", 200, 20.0), 2, 0, 2.0)
+            .unwrap();
+
+        let mut emitted: Vec<f64> = Vec::new();
+        let _header = collector
+            .finalize_sorted(false, test_header_builder, |_gi, row| {
+                emitted.push(row.values[0]);
+                Ok(())
+            })
+            .unwrap();
+
+        // Descending: sort_key 3.0, 2.0, 1.0 → tags 30.0, 20.0, 10.0
+        assert_eq!(emitted, vec![30.0, 20.0, 10.0]);
+    }
+
+    #[test]
+    fn finalize_sorted_with_spill_ascending() {
+        // Use a very low threshold so every row triggers a spill.
+        let mut collector = HybridBucketCollector::with_threshold(1, 1, 1, 1);
+
+        // Push rows with sort keys: 5.0, 1.0, 3.0, 2.0, 4.0
+        let keys = [5.0, 1.0, 3.0, 2.0, 4.0];
+        for (i, &key) in keys.iter().enumerate() {
+            let tag = key * 10.0;
+            collector
+                .push(make_tagged_row("chr1", i as u32 * 100, tag), i, 0, key)
+                .unwrap();
+        }
+
+        let mut emitted: Vec<f64> = Vec::new();
+        let header = collector
+            .finalize_sorted(true, test_header_builder, |_gi, row| {
+                emitted.push(row.values[0]);
+                Ok(())
+            })
+            .unwrap();
+
+        // Ascending: sort_key 1.0, 2.0, 3.0, 4.0, 5.0 → tags 10.0, 20.0, 30.0, 40.0, 50.0
+        assert_eq!(emitted, vec![10.0, 20.0, 30.0, 40.0, 50.0]);
+        assert_eq!(header.group_boundaries, vec![0, 5]);
+    }
+
+    #[test]
+    fn finalize_sorted_with_spill_descending() {
+        let mut collector = HybridBucketCollector::with_threshold(1, 1, 1, 1);
+
+        let keys = [5.0, 1.0, 3.0, 2.0, 4.0];
+        for (i, &key) in keys.iter().enumerate() {
+            let tag = key * 10.0;
+            collector
+                .push(make_tagged_row("chr1", i as u32 * 100, tag), i, 0, key)
+                .unwrap();
+        }
+
+        let mut emitted: Vec<f64> = Vec::new();
+        let _header = collector
+            .finalize_sorted(false, test_header_builder, |_gi, row| {
+                emitted.push(row.values[0]);
+                Ok(())
+            })
+            .unwrap();
+
+        // Descending: 50.0, 40.0, 30.0, 20.0, 10.0
+        assert_eq!(emitted, vec![50.0, 40.0, 30.0, 20.0, 10.0]);
+    }
+
+    #[test]
+    fn finalize_sorted_stable_tiebreak() {
+        // When sort keys are equal, insertion_seq determines order.
+        // Ascending: equal keys keep insertion order.
+        // Descending: equal keys appear in reverse insertion order.
+        let mut collector = HybridBucketCollector::with_threshold(1, 1, 1, 1);
+
+        // All sort keys are 1.0. Tags encode insertion order: 10, 20, 30.
+        collector
+            .push(make_tagged_row("chr1", 0, 10.0), 0, 0, 1.0)
+            .unwrap();
+        collector
+            .push(make_tagged_row("chr1", 100, 20.0), 1, 0, 1.0)
+            .unwrap();
+        collector
+            .push(make_tagged_row("chr1", 200, 30.0), 2, 0, 1.0)
+            .unwrap();
+
+        // Ascending: insertion order preserved.
+        let mut emitted_asc: Vec<f64> = Vec::new();
+        let collector_asc = HybridBucketCollector::with_threshold(1, 1, 1, 1);
+        // Need a fresh collector for ascending test.
+        let mut c = HybridBucketCollector::with_threshold(1, 1, 1, 1);
+        c.push(make_tagged_row("chr1", 0, 10.0), 0, 0, 1.0)
+            .unwrap();
+        c.push(make_tagged_row("chr1", 100, 20.0), 1, 0, 1.0)
+            .unwrap();
+        c.push(make_tagged_row("chr1", 200, 30.0), 2, 0, 1.0)
+            .unwrap();
+        let _ = c
+            .finalize_sorted(true, test_header_builder, |_gi, row| {
+                emitted_asc.push(row.values[0]);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(emitted_asc, vec![10.0, 20.0, 30.0]);
+
+        // Descending: reversed insertion order (sort ascending then .reverse()).
+        let mut emitted_desc: Vec<f64> = Vec::new();
+        let _header = collector
+            .finalize_sorted(false, test_header_builder, |_gi, row| {
+                emitted_desc.push(row.values[0]);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(emitted_desc, vec![30.0, 20.0, 10.0]);
+
+        drop(collector_asc); // suppress unused warning
+    }
+
+    #[test]
+    fn finalize_sorted_multiple_groups() {
+        // Two groups, each with their own sort order.
+        let mut collector = HybridBucketCollector::with_threshold(2, 1, 1, 1);
+
+        // Group 0: keys 3.0, 1.0
+        collector
+            .push(make_tagged_row("chr1", 0, 30.0), 0, 0, 3.0)
+            .unwrap();
+        collector
+            .push(make_tagged_row("chr1", 100, 10.0), 1, 0, 1.0)
+            .unwrap();
+
+        // Group 1: keys 2.0, 4.0
+        collector
+            .push(make_tagged_row("chr2", 0, 20.0), 2, 1, 2.0)
+            .unwrap();
+        collector
+            .push(make_tagged_row("chr2", 100, 40.0), 3, 1, 4.0)
+            .unwrap();
+
+        let mut emitted: Vec<(usize, f64)> = Vec::new();
+        let header = collector
+            .finalize_sorted(true, test_header_builder, |gi, row| {
+                emitted.push((gi, row.values[0]));
+                Ok(())
+            })
+            .unwrap();
+
+        // Group 0 ascending: 10.0, 30.0
+        // Group 1 ascending: 20.0, 40.0
+        assert_eq!(emitted.len(), 4);
+        assert_eq!(emitted[0], (0, 10.0));
+        assert_eq!(emitted[1], (0, 30.0));
+        assert_eq!(emitted[2], (1, 20.0));
+        assert_eq!(emitted[3], (1, 40.0));
+
+        assert_eq!(header.group_boundaries, vec![0, 2, 4]);
+    }
+
+    #[test]
+    fn finalize_sorted_temp_files_cleaned_up() {
+        let mut collector = HybridBucketCollector::with_threshold(1, 1, 1, 1);
+
+        for i in 0..5 {
+            collector
+                .push(make_tagged_row("chr1", i * 100, i as f64), i as usize, 0, i as f64)
+                .unwrap();
+        }
+
+        // Join to get temp paths before finalize consumes the collector.
+        collector.join_all().unwrap();
+        let temp_paths: Vec<PathBuf> = collector
+            .buckets()
+            .iter()
+            .flat_map(|b| b.completed_flushes.iter().map(|f| f.temp_path.clone()))
+            .collect();
+        assert!(!temp_paths.is_empty(), "should have at least one spill file");
+
+        // Re-create collector to run finalize (since join_all already consumed handles).
+        // Actually, we already joined — finalize_sorted calls join_all again which is a no-op.
+        let _header = collector
+            .finalize_sorted(true, test_header_builder, |_gi, _row| Ok(()))
+            .unwrap();
+
+        // All temp files should have been removed.
+        for path in &temp_paths {
+            assert!(
+                !path.exists(),
+                "temp file should have been removed: {:?}",
+                path
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // finalize_keep_order tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn finalize_keep_order_preserves_original_indices() {
+        let mut collector = HybridBucketCollector::with_threshold(1, 1, 1, 1_000_000);
+
+        // Push rows with orig_idx: 2, 0, 4 (out of task_count=5).
+        // Indices 1 and 3 are "filtered" (absent).
+        collector
+            .push(make_tagged_row("chr1", 200, 20.0), 2, 0, 0.0)
+            .unwrap();
+        collector
+            .push(make_tagged_row("chr1", 0, 0.0), 0, 0, 0.0)
+            .unwrap();
+        collector
+            .push(make_tagged_row("chr1", 400, 40.0), 4, 0, 0.0)
+            .unwrap();
+
+        let mut emitted: Vec<(usize, f64)> = Vec::new();
+        let header = collector
+            .finalize_keep_order(5, test_header_builder, |gi, row| {
+                emitted.push((gi, row.values[0]));
+                Ok(())
+            })
+            .unwrap();
+
+        // Should emit in orig_idx order: 0, 2, 4 (skipping 1 and 3).
+        assert_eq!(emitted.len(), 3);
+        assert_eq!(emitted[0], (0, 0.0));   // orig_idx=0
+        assert_eq!(emitted[1], (0, 20.0));  // orig_idx=2
+        assert_eq!(emitted[2], (0, 40.0));  // orig_idx=4
+
+        assert_eq!(header.group_boundaries, vec![0, 3]);
+    }
+
+    #[test]
+    fn finalize_keep_order_with_spill() {
+        // Very low threshold forces spilling.
+        let mut collector = HybridBucketCollector::with_threshold(1, 1, 1, 1);
+
+        // task_count=6, push at indices 5, 3, 1 (gaps at 0, 2, 4).
+        collector
+            .push(make_tagged_row("chr1", 500, 50.0), 5, 0, 0.0)
+            .unwrap();
+        collector
+            .push(make_tagged_row("chr1", 300, 30.0), 3, 0, 0.0)
+            .unwrap();
+        collector
+            .push(make_tagged_row("chr1", 100, 10.0), 1, 0, 0.0)
+            .unwrap();
+
+        let mut emitted: Vec<f64> = Vec::new();
+        let _header = collector
+            .finalize_keep_order(6, test_header_builder, |_gi, row| {
+                emitted.push(row.values[0]);
+                Ok(())
+            })
+            .unwrap();
+
+        // Emitted in original index order: idx 1, 3, 5 → tags 10.0, 30.0, 50.0
+        assert_eq!(emitted, vec![10.0, 30.0, 50.0]);
+    }
+
+    #[test]
+    fn finalize_keep_order_multiple_groups() {
+        let mut collector = HybridBucketCollector::with_threshold(2, 1, 1, 1_000_000);
+
+        // task_count=4. Group 0 at indices 0, 2. Group 1 at index 3. Index 1 is filtered.
+        collector
+            .push(make_tagged_row("chr1", 0, 0.0), 0, 0, 0.0)
+            .unwrap();
+        collector
+            .push(make_tagged_row("chr1", 200, 20.0), 2, 0, 0.0)
+            .unwrap();
+        collector
+            .push(make_tagged_row("chr2", 300, 30.0), 3, 1, 0.0)
+            .unwrap();
+
+        let mut emitted: Vec<(usize, f64)> = Vec::new();
+        let header = collector
+            .finalize_keep_order(4, test_header_builder, |gi, row| {
+                emitted.push((gi, row.values[0]));
+                Ok(())
+            })
+            .unwrap();
+
+        // Original order: idx 0 (g0), skip 1, idx 2 (g0), idx 3 (g1)
+        assert_eq!(emitted.len(), 3);
+        assert_eq!(emitted[0], (0, 0.0));   // orig_idx=0
+        assert_eq!(emitted[1], (0, 20.0));  // orig_idx=2
+        assert_eq!(emitted[2], (1, 30.0));  // orig_idx=3
+
+        // Group 0 has 2 rows, group 1 has 1 row.
+        assert_eq!(header.group_boundaries, vec![0, 2, 3]);
+    }
+
+    #[test]
+    fn finalize_keep_order_temp_files_cleaned_up() {
+        let mut collector = HybridBucketCollector::with_threshold(1, 1, 1, 1);
+
+        for i in 0..5u32 {
+            collector
+                .push(make_tagged_row("chr1", i * 100, i as f64), i as usize, 0, 0.0)
+                .unwrap();
+        }
+
+        // Join to capture temp paths.
+        collector.join_all().unwrap();
+        let temp_paths: Vec<PathBuf> = collector
+            .buckets()
+            .iter()
+            .flat_map(|b| b.completed_flushes.iter().map(|f| f.temp_path.clone()))
+            .collect();
+        assert!(!temp_paths.is_empty());
+
+        let _header = collector
+            .finalize_keep_order(5, test_header_builder, |_gi, _row| Ok(()))
+            .unwrap();
+
+        for path in &temp_paths {
+            assert!(!path.exists(), "temp file should be removed: {:?}", path);
         }
     }
 }
