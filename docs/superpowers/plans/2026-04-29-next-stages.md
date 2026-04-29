@@ -155,7 +155,7 @@ use tempfile::NamedTempFile;
 use crate::io::readers::bed::{BedRecord, Strand, intern_chrom};
 use crate::pipeline::matrix::MatrixRow;
 
-const SPILL_BUF_CAPACITY: usize = 131_072;
+const SPILL_BUF_CAPACITY: usize = 1_048_576; // 1 MB — large sequential writes
 
 /// Threshold in bytes per bucket before spilling to disk (~4 GB).
 const MEMORY_SPILL_THRESHOLD: usize = 4 * 1024 * 1024 * 1024;
@@ -821,45 +821,29 @@ Append to the `impl HybridBucketCollector` block in `spill.rs`:
         });
 
         // Merge-emit spilled and in-memory rows in sorted order
-        let mut spill_pos = 0;
-        let mut mem_pos = 0;
-        while spill_pos < all_indices.len() && mem_pos < in_memory_rows.len() {
-            let spill_key = all_indices[spill_pos].sort_key;
-            let mem_key = in_memory_rows[mem_pos].1;
-            let cmp = crate::pipeline::matrix::compare_ascending(spill_key, mem_key);
-            let pick_spill = if sort_ascending {
-                cmp.is_le()
-            } else {
-                cmp.is_ge()
+        let mut spill_iter = all_indices.iter().peekable();
+        let mut mem_iter = in_memory_rows.into_iter().peekable();
+
+        loop {
+            let pick_spill = match (spill_iter.peek(), mem_iter.peek()) {
+                (Some(s), Some(m)) => {
+                    let cmp = crate::pipeline::matrix::compare_ascending(s.sort_key, m.1);
+                    if sort_ascending { cmp.is_le() } else { cmp.is_ge() }
+                }
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (None, None) => break,
             };
             if pick_spill {
-                let entry = &all_indices[spill_pos];
+                let entry = spill_iter.next().unwrap();
                 let (ref mmap, ref ct) = mmaps[entry.group_index];
                 let start = entry.file_offset as usize;
                 let end = start + entry.row_byte_len as usize;
                 emit(deserialize_row(&mmap[start..end], ct))?;
-                spill_pos += 1;
             } else {
-                let (_, _, row) = std::mem::replace(
-                    &mut in_memory_rows[mem_pos],
-                    // placeholder — won't be accessed again
-                    in_memory_rows.last().unwrap().clone(),
-                );
-                // Actually, better to drain:
+                let (_, _, row) = mem_iter.next().unwrap();
                 emit(row)?;
-                mem_pos += 1;
             }
-        }
-        // Drain remaining spilled
-        for entry in &all_indices[spill_pos..] {
-            let (ref mmap, ref ct) = mmaps[entry.group_index];
-            let start = entry.file_offset as usize;
-            let end = start + entry.row_byte_len as usize;
-            emit(deserialize_row(&mmap[start..end], ct))?;
-        }
-        // Drain remaining in-memory
-        for (_, _, row) in in_memory_rows.into_iter().skip(mem_pos) {
-            emit(row)?;
         }
 
         Ok(())
