@@ -263,6 +263,8 @@ pub(super) fn process_batch<M: PipelineMode>(
     mode: &M,
     general: &GeneralOptions,
     metadata: &M::Metadata,
+    work_buf: &mut Vec<u8>,
+    decode_buf: &mut Vec<u8>,
 ) -> Result<Vec<(usize, usize, Option<MatrixRow>)>> {
     if batch.items.is_empty() {
         return Ok(Vec::new());
@@ -337,9 +339,7 @@ pub(super) fn process_batch<M: PipelineMode>(
         }
 
         let intervals = sample
-            .reader_mut()
-            .values(chrom, fetch_start, fetch_end)
-            .map_err(anyhow::Error::new)
+            .values_with_bufs(chrom, fetch_start, fetch_end, work_buf, decode_buf)
             .with_context(|| {
                 format!(
                     "Failed to read bigWig intervals for '{}' in '{}'",

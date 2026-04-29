@@ -207,6 +207,10 @@ impl SharedBigWigReader {
         binary_search_chrom_length(&self.chroms, name)
     }
 
+    pub fn uncompress_buf_size(&self) -> usize {
+        self.uncompress_buf_size
+    }
+
     /// Look up a CIR tree node from the shared cache, or read and parse it from
     /// the file and insert it into the cache.
     fn get_or_read_cir_node(&self, offset: u64) -> io::Result<Arc<CachedCirNode>> {
@@ -361,8 +365,6 @@ impl SharedBigWigReader {
 // the file handle and parsed metadata via Arc<SharedBigWigReader>.
 pub struct BigWigReader {
     shared: Arc<SharedBigWigReader>,
-    work_buf: Vec<u8>,
-    decode_buf: Vec<u8>,
     values_buf: Vec<BigWigValue>,
     blocks_buf: Vec<Block>,
     remaining_buf: VecDeque<u64>,
@@ -380,11 +382,8 @@ impl BigWigReader {
     /// already-opened [`SharedBigWigReader`]. Each worker gets its own
     /// CIR-node and block caches.
     pub fn from_shared(shared: Arc<SharedBigWigReader>) -> Self {
-        let uncompress_buf_size = shared.uncompress_buf_size;
         Self {
             shared,
-            work_buf: Vec::with_capacity(uncompress_buf_size),
-            decode_buf: Vec::new(),
             values_buf: Vec::new(),
             blocks_buf: Vec::new(),
             remaining_buf: VecDeque::new(),
@@ -400,11 +399,30 @@ impl BigWigReader {
         &self.shared
     }
 
+    /// Read bigWig values for the given region, allocating temporary
+    /// decompression buffers internally.  Prefer `values_with_bufs` on the
+    /// hot path to reuse externally-owned buffers across calls.
     pub fn values(
         &mut self,
         chrom: &str,
         start: u32,
         end: u32,
+    ) -> Result<&[BigWigValue], BigWigReadError> {
+        let mut work_buf = Vec::with_capacity(self.shared.uncompress_buf_size);
+        let mut decode_buf = Vec::new();
+        self.values_with_bufs(chrom, start, end, &mut work_buf, &mut decode_buf)
+    }
+
+    /// Read bigWig values using caller-provided decompression buffers.
+    /// This avoids per-call allocation when buffers are reused across
+    /// multiple samples and batches (the common case in `process_batch`).
+    pub fn values_with_bufs(
+        &mut self,
+        chrom: &str,
+        start: u32,
+        end: u32,
+        work_buf: &mut Vec<u8>,
+        decode_buf: &mut Vec<u8>,
     ) -> Result<&[BigWigValue], BigWigReadError> {
         self.stats.values_calls += 1;
 
@@ -416,11 +434,9 @@ impl BigWigReader {
         self.values_buf.clear();
         self.search_cir_tree(chrom_id, start, end)?;
 
-        // Index-based iteration because `self.get_or_cache_block()` borrows
-        // &mut self, conflicting with &self.blocks_buf.
         for i in 0..self.blocks_buf.len() {
             let (offset, size) = (self.blocks_buf[i].offset, self.blocks_buf[i].size);
-            let data = self.get_or_cache_block(offset, size)?;
+            let data = self.get_or_cache_block_with_bufs(offset, size, work_buf, decode_buf)?;
             if data.is_empty() {
                 continue;
             }
@@ -469,7 +485,13 @@ impl BigWigReader {
         Ok(())
     }
 
-    fn get_or_cache_block(&mut self, offset: u64, size: u64) -> io::Result<Arc<[u8]>> {
+    fn get_or_cache_block_with_bufs(
+        &mut self,
+        offset: u64,
+        size: u64,
+        work_buf: &mut Vec<u8>,
+        decode_buf: &mut Vec<u8>,
+    ) -> io::Result<Arc<[u8]>> {
         let key = (offset, size);
         if let Some(data) = self.shared.block_cache.get(&key) {
             self.stats.block_cache_hits += 1;
@@ -477,13 +499,7 @@ impl BigWigReader {
         }
 
         self.stats.block_cache_misses += 1;
-        let raw = read_and_decompress(
-            &self.shared.file,
-            offset,
-            size,
-            &mut self.work_buf,
-            &mut self.decode_buf,
-        )?;
+        let raw = read_and_decompress(&self.shared.file, offset, size, work_buf, decode_buf)?;
         self.stats.decoded_bytes += raw.len() as u64;
         let data: Arc<[u8]> = Arc::from(raw);
 

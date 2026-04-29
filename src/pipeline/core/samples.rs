@@ -46,16 +46,45 @@ impl Sample {
     pub fn chrom_length(&self, chrom: &str) -> Option<u32> {
         self.reader.shared().find_chrom_length(chrom)
     }
+
+    /// Read bigWig values using caller-provided decompression buffers.
+    pub fn values_with_bufs(
+        &mut self,
+        chrom: &str,
+        start: u32,
+        end: u32,
+        work_buf: &mut Vec<u8>,
+        decode_buf: &mut Vec<u8>,
+    ) -> Result<&[crate::io::BigWigValue], anyhow::Error> {
+        self.reader
+            .values_with_bufs(chrom, start, end, work_buf, decode_buf)
+            .map_err(anyhow::Error::new)
+    }
 }
 
 pub struct WorkerSamples {
     samples: Result<Vec<Sample>, String>,
+    work_buf: Vec<u8>,
+    decode_buf: Vec<u8>,
 }
 
 impl WorkerSamples {
     pub fn new(paths: Arc<Vec<PathBuf>>) -> Self {
         let samples = open_samples(paths.as_ref()).map_err(|err| err.to_string());
-        Self { samples }
+        // Compute max uncompress_buf_size across all successfully opened samples
+        let max_buf_size = match &samples {
+            Ok(s) => s
+                .iter()
+                .map(|sample| sample.reader().shared().uncompress_buf_size())
+                .max()
+                .unwrap_or(0),
+            Err(_) => 0,
+        };
+        Self {
+            samples,
+            work_buf: Vec::with_capacity(max_buf_size),
+            decode_buf: Vec::new(),
+        }
     }
 
     /// Create per-worker Sample instances from pre-opened shared readers.
@@ -65,6 +94,11 @@ impl WorkerSamples {
         paths: Arc<Vec<PathBuf>>,
         shared_readers: Arc<Vec<Arc<SharedBigWigReader>>>,
     ) -> Self {
+        let max_buf_size = shared_readers
+            .iter()
+            .map(|r| r.uncompress_buf_size())
+            .max()
+            .unwrap_or(0);
         let samples = paths
             .iter()
             .zip(shared_readers.iter())
@@ -72,12 +106,24 @@ impl WorkerSamples {
             .collect();
         Self {
             samples: Ok(samples),
+            work_buf: Vec::with_capacity(max_buf_size),
+            decode_buf: Vec::new(),
         }
     }
 
     pub fn samples(&mut self) -> Result<&mut Vec<Sample>> {
         match &mut self.samples {
             Ok(samples) => Ok(samples),
+            Err(message) => Err(anyhow!(message.clone())),
+        }
+    }
+
+    /// Return mutable references to both the sample list and the shared
+    /// decompression buffers.  This avoids borrow-checker issues that
+    /// would arise from separate accessors for samples and buffers.
+    pub fn samples_and_bufs(&mut self) -> Result<(&mut Vec<Sample>, &mut Vec<u8>, &mut Vec<u8>)> {
+        match &mut self.samples {
+            Ok(samples) => Ok((samples, &mut self.work_buf, &mut self.decode_buf)),
             Err(message) => Err(anyhow!(message.clone())),
         }
     }

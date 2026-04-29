@@ -232,8 +232,16 @@ where
                         )
                     },
                     |worker_samples, batch| {
-                        let samples = worker_samples.samples()?;
-                        process_batch(samples.as_mut_slice(), batch, mode, general, metadata_ref)
+                        let (samples, work_buf, decode_buf) = worker_samples.samples_and_bufs()?;
+                        process_batch(
+                            samples.as_mut_slice(),
+                            batch,
+                            mode,
+                            general,
+                            metadata_ref,
+                            work_buf,
+                            decode_buf,
+                        )
                     },
                 )
                 .collect()
