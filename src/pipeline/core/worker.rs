@@ -510,3 +510,331 @@ pub(super) fn process_batch<M: PipelineMode>(
     return_coverage_buffers(sample_coverages);
     Ok(results)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn default_general() -> GeneralOptions {
+        GeneralOptions {
+            bin_size: 10,
+            sort_regions: crate::config::SortRegions::Keep,
+            sort_using: crate::config::SortUsing::Mean,
+            sort_using_samples: None,
+            average_type_bins: AverageTypeBins::Mean,
+            missing_data_as_zero: false,
+            skip_zeros: false,
+            min_threshold: None,
+            max_threshold: None,
+            blacklist: None,
+            samples_label: None,
+            smart_labels: false,
+            quiet: true,
+            verbose: false,
+            scale_factor: 1.0,
+            number_of_processors: crate::config::ProcessorRequest::Fixed(1),
+        }
+    }
+
+    // ── aggregate_slice: Mean ──────────────────────────────────────────────
+
+    #[test]
+    fn aggregate_mean_normal() {
+        let result = aggregate_slice(&[1.0, 2.0, 3.0], AverageTypeBins::Mean);
+        assert_eq!(result, Some(2.0));
+    }
+
+    #[test]
+    fn aggregate_mean_all_nan() {
+        let result = aggregate_slice(&[f64::NAN, f64::NAN], AverageTypeBins::Mean);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn aggregate_mean_empty() {
+        let result = aggregate_slice(&[], AverageTypeBins::Mean);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn aggregate_mean_mixed_nan() {
+        let result = aggregate_slice(&[f64::NAN, 4.0, 6.0], AverageTypeBins::Mean);
+        assert_eq!(result, Some(5.0));
+    }
+
+    #[test]
+    fn aggregate_mean_single() {
+        let result = aggregate_slice(&[7.0], AverageTypeBins::Mean);
+        assert_eq!(result, Some(7.0));
+    }
+
+    // ── aggregate_slice: Sum ───────────────────────────────────────────────
+
+    #[test]
+    fn aggregate_sum_normal() {
+        let result = aggregate_slice(&[1.0, 2.0, 3.0], AverageTypeBins::Sum);
+        assert_eq!(result, Some(6.0));
+    }
+
+    #[test]
+    fn aggregate_sum_all_nan() {
+        let result = aggregate_slice(&[f64::NAN], AverageTypeBins::Sum);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn aggregate_sum_empty() {
+        let result = aggregate_slice(&[], AverageTypeBins::Sum);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn aggregate_sum_mixed_nan() {
+        let result = aggregate_slice(&[f64::NAN, 3.0, 5.0], AverageTypeBins::Sum);
+        assert_eq!(result, Some(8.0));
+    }
+
+    #[test]
+    fn aggregate_sum_single() {
+        let result = aggregate_slice(&[9.0], AverageTypeBins::Sum);
+        assert_eq!(result, Some(9.0));
+    }
+
+    // ── aggregate_slice: Min ───────────────────────────────────────────────
+
+    #[test]
+    fn aggregate_min_normal() {
+        let result = aggregate_slice(&[3.0, 1.0, 2.0], AverageTypeBins::Min);
+        assert_eq!(result, Some(1.0));
+    }
+
+    #[test]
+    fn aggregate_min_all_nan() {
+        let result = aggregate_slice(&[f64::NAN], AverageTypeBins::Min);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn aggregate_min_empty() {
+        let result = aggregate_slice(&[], AverageTypeBins::Min);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn aggregate_min_mixed_nan() {
+        let result = aggregate_slice(&[f64::NAN, 5.0, 2.0], AverageTypeBins::Min);
+        assert_eq!(result, Some(2.0));
+    }
+
+    // ── aggregate_slice: Max ───────────────────────────────────────────────
+
+    #[test]
+    fn aggregate_max_normal() {
+        let result = aggregate_slice(&[3.0, 1.0, 5.0], AverageTypeBins::Max);
+        assert_eq!(result, Some(5.0));
+    }
+
+    #[test]
+    fn aggregate_max_all_nan() {
+        let result = aggregate_slice(&[f64::NAN], AverageTypeBins::Max);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn aggregate_max_empty() {
+        let result = aggregate_slice(&[], AverageTypeBins::Max);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn aggregate_max_mixed_nan() {
+        let result = aggregate_slice(&[f64::NAN, 4.0, 9.0], AverageTypeBins::Max);
+        assert_eq!(result, Some(9.0));
+    }
+
+    // ── aggregate_slice: Std ───────────────────────────────────────────────
+
+    #[test]
+    fn aggregate_std_normal() {
+        // values [2, 4, 4, 4, 5, 5, 7, 9], mean=5, population std=2
+        let values = [2.0f64, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0];
+        let result = aggregate_slice(&values, AverageTypeBins::Std).unwrap();
+        assert!((result - 2.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn aggregate_std_all_nan() {
+        let result = aggregate_slice(&[f64::NAN], AverageTypeBins::Std);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn aggregate_std_empty() {
+        let result = aggregate_slice(&[], AverageTypeBins::Std);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn aggregate_std_single() {
+        // std of a single value is 0
+        let result = aggregate_slice(&[5.0], AverageTypeBins::Std);
+        assert_eq!(result, Some(0.0));
+    }
+
+    #[test]
+    fn aggregate_std_mixed_nan() {
+        // NaN values are ignored; std of [3, 3] is 0
+        let result = aggregate_slice(&[f64::NAN, 3.0, 3.0], AverageTypeBins::Std);
+        assert_eq!(result, Some(0.0));
+    }
+
+    // ── aggregate_slice: Median ────────────────────────────────────────────
+
+    #[test]
+    fn aggregate_median_odd_count() {
+        let result = aggregate_slice(&[3.0, 1.0, 2.0], AverageTypeBins::Median);
+        assert_eq!(result, Some(2.0));
+    }
+
+    #[test]
+    fn aggregate_median_even_count() {
+        let result = aggregate_slice(&[1.0, 2.0, 3.0, 4.0], AverageTypeBins::Median);
+        assert_eq!(result, Some(2.5));
+    }
+
+    #[test]
+    fn aggregate_median_all_nan() {
+        let result = aggregate_slice(&[f64::NAN], AverageTypeBins::Median);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn aggregate_median_empty() {
+        let result = aggregate_slice(&[], AverageTypeBins::Median);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn aggregate_median_mixed_nan() {
+        // NaN filtered out; median of [1, 3] = 2.0
+        let result = aggregate_slice(&[f64::NAN, 1.0, 3.0], AverageTypeBins::Median);
+        assert_eq!(result, Some(2.0));
+    }
+
+    #[test]
+    fn aggregate_median_single() {
+        let result = aggregate_slice(&[42.0], AverageTypeBins::Median);
+        assert_eq!(result, Some(42.0));
+    }
+
+    // ── index_from_coordinate ─────────────────────────────────────────────
+
+    #[test]
+    fn index_at_base_is_zero() {
+        assert_eq!(index_from_coordinate(100, 100, 50), 0);
+    }
+
+    #[test]
+    fn index_below_base_is_zero() {
+        assert_eq!(index_from_coordinate(50, 100, 50), 0);
+    }
+
+    #[test]
+    fn index_above_base_correct_offset() {
+        assert_eq!(index_from_coordinate(110, 100, 50), 10);
+    }
+
+    #[test]
+    fn index_beyond_window_len_clamped() {
+        assert_eq!(index_from_coordinate(200, 100, 50), 50);
+    }
+
+    // ── clamp_coordinate ──────────────────────────────────────────────────
+
+    #[test]
+    fn clamp_negative_to_zero() {
+        assert_eq!(clamp_coordinate(-5, 1000), 0);
+    }
+
+    #[test]
+    fn clamp_exceeding_chrom_length() {
+        assert_eq!(clamp_coordinate(2000, 1000), 1000);
+    }
+
+    #[test]
+    fn clamp_normal_value() {
+        assert_eq!(clamp_coordinate(500, 1000), 500);
+    }
+
+    // ── should_skip_row_flat ──────────────────────────────────────────────
+
+    #[test]
+    fn skip_zeros_all_zeros_returns_true() {
+        let general = GeneralOptions {
+            skip_zeros: true,
+            ..default_general()
+        };
+        assert!(should_skip_row_flat(&[0.0, 0.0, 0.0], &general));
+    }
+
+    #[test]
+    fn skip_zeros_has_nonzero_returns_false() {
+        let general = GeneralOptions {
+            skip_zeros: true,
+            ..default_general()
+        };
+        assert!(!should_skip_row_flat(&[0.0, 1.0, 0.0], &general));
+    }
+
+    #[test]
+    fn skip_zeros_all_nan_returns_true() {
+        // NaN values are skipped; no non-zero found, so all_zero stays true
+        let general = GeneralOptions {
+            skip_zeros: true,
+            ..default_general()
+        };
+        assert!(should_skip_row_flat(&[f64::NAN, f64::NAN], &general));
+    }
+
+    #[test]
+    fn min_threshold_below_threshold_returns_true() {
+        let general = GeneralOptions {
+            min_threshold: Some(5.0),
+            ..default_general()
+        };
+        assert!(should_skip_row_flat(&[3.0, 7.0], &general));
+    }
+
+    #[test]
+    fn min_threshold_at_threshold_returns_true() {
+        let general = GeneralOptions {
+            min_threshold: Some(5.0),
+            ..default_general()
+        };
+        assert!(should_skip_row_flat(&[5.0, 7.0], &general));
+    }
+
+    #[test]
+    fn max_threshold_above_threshold_returns_true() {
+        let general = GeneralOptions {
+            max_threshold: Some(10.0),
+            ..default_general()
+        };
+        assert!(should_skip_row_flat(&[8.0, 12.0], &general));
+    }
+
+    #[test]
+    fn max_threshold_at_threshold_returns_true() {
+        let general = GeneralOptions {
+            max_threshold: Some(10.0),
+            ..default_general()
+        };
+        assert!(should_skip_row_flat(&[8.0, 10.0], &general));
+    }
+
+    #[test]
+    fn no_thresholds_returns_false() {
+        let general = default_general();
+        assert!(!should_skip_row_flat(&[1.0, 2.0, 3.0], &general));
+    }
+}
