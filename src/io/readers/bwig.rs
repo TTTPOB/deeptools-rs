@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io;
 use std::os::unix::fs::FileExt;
@@ -7,6 +7,8 @@ use std::sync::Arc;
 
 use flate2::Decompress;
 use thiserror::Error;
+
+use quick_cache::sync::Cache;
 
 use super::block_cache::SharedBlockCache;
 
@@ -17,9 +19,6 @@ pub struct BigWigReaderStats {
     pub values_calls: u64,
     pub values_returned: u64,
     pub blocks_per_query_total: u64,
-    pub cir_cache_hits: u64,
-    pub cir_cache_misses: u64,
-    pub cir_cache_clears: u64,
     pub block_cache_hits: u64,
     pub block_cache_misses: u64,
     pub decoded_bytes: u64,
@@ -56,7 +55,7 @@ struct Block {
     size: u64,
 }
 
-const MAX_CIR_CACHE_ENTRIES: usize = 1000;
+const SHARED_CIR_CACHE_ENTRIES: usize = 1000;
 
 #[derive(Debug, Clone)]
 struct CirNodeItem {
@@ -123,6 +122,7 @@ pub struct SharedBigWigReader {
     chrom_id_by_name: Vec<(String, u32)>,
     cir_tree_root: u64,
     block_cache: Arc<SharedBlockCache>,
+    cir_cache: Cache<u64, Arc<CachedCirNode>>,
 }
 
 impl SharedBigWigReader {
@@ -184,6 +184,7 @@ impl SharedBigWigReader {
             chrom_id_by_name,
             cir_tree_root,
             block_cache,
+            cir_cache: Cache::new(SHARED_CIR_CACHE_ENTRIES),
         })
     }
 
@@ -204,6 +205,18 @@ impl SharedBigWigReader {
 
     pub fn find_chrom_length(&self, name: &str) -> Option<u32> {
         binary_search_chrom_length(&self.chroms, name)
+    }
+
+    /// Look up a CIR tree node from the shared cache, or read and parse it from
+    /// the file and insert it into the cache.
+    fn get_or_read_cir_node(&self, offset: u64) -> io::Result<Arc<CachedCirNode>> {
+        if let Some(node) = self.cir_cache.get(&offset) {
+            return Ok(node);
+        }
+        let parsed = Self::read_cir_node_raw(&self.file, offset)?;
+        let arc_node = Arc::new(parsed);
+        self.cir_cache.insert(offset, Arc::clone(&arc_node));
+        Ok(arc_node)
     }
 
     /// Read and parse a CIR tree node from the file at the given offset.
@@ -348,7 +361,6 @@ impl SharedBigWigReader {
 // the file handle and parsed metadata via Arc<SharedBigWigReader>.
 pub struct BigWigReader {
     shared: Arc<SharedBigWigReader>,
-    cir_node_cache: HashMap<u64, Arc<CachedCirNode>>,
     work_buf: Vec<u8>,
     decode_buf: Vec<u8>,
     values_buf: Vec<BigWigValue>,
@@ -371,7 +383,6 @@ impl BigWigReader {
         let uncompress_buf_size = shared.uncompress_buf_size;
         Self {
             shared,
-            cir_node_cache: HashMap::new(),
             work_buf: Vec::with_capacity(uncompress_buf_size),
             decode_buf: Vec::new(),
             values_buf: Vec::new(),
@@ -423,37 +434,16 @@ impl BigWigReader {
     }
 
     fn search_cir_tree(&mut self, chrom_ix: u32, start: u32, end: u32) -> io::Result<()> {
-        let file = &self.shared.file;
         let cir_tree_root = self.shared.cir_tree_root;
 
         self.blocks_buf.clear();
         self.remaining_buf.clear();
         self.remaining_buf.push_front(cir_tree_root);
 
-        // Local stat accumulators to avoid borrow conflicts with split fields.
-        let mut cir_hits: u64 = 0;
-        let mut cir_misses: u64 = 0;
-        let mut cir_clears: u64 = 0;
-
         while let Some(node_offset) = self.remaining_buf.pop_front() {
-            let node = if let Some(cached) = self.cir_node_cache.get(&node_offset) {
-                cir_hits += 1;
-                Arc::clone(cached)
-            } else {
-                cir_misses += 1;
-                let parsed = SharedBigWigReader::read_cir_node_raw(file, node_offset)?;
-                let arc_parsed = Arc::new(parsed);
-                if self.cir_node_cache.len() >= MAX_CIR_CACHE_ENTRIES {
-                    self.cir_node_cache.clear();
-                    cir_clears += 1;
-                }
-                self.cir_node_cache
-                    .insert(node_offset, Arc::clone(&arc_parsed));
-                arc_parsed
-            };
+            let node = self.shared.get_or_read_cir_node(node_offset)?;
 
             for item in &node.items {
-                // Overlap check
                 if item.end_chrom_id < chrom_ix || item.start_chrom_id > chrom_ix {
                     continue;
                 }
@@ -475,10 +465,6 @@ impl BigWigReader {
                 }
             }
         }
-
-        self.stats.cir_cache_hits += cir_hits;
-        self.stats.cir_cache_misses += cir_misses;
-        self.stats.cir_cache_clears += cir_clears;
 
         Ok(())
     }
