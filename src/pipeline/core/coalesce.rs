@@ -147,8 +147,8 @@ fn create_coalesced_batches(work_items: Vec<WorkItem>, coalesce_gap: i64) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io::readers::bed::Strand;
     use crate::io::BedRecord;
+    use crate::io::readers::bed::Strand;
     use std::sync::Arc;
 
     use super::super::executor::WorkItem;
@@ -205,8 +205,11 @@ mod tests {
             .map(|i| make_item("chr1", i * 300, i * 300 + 100, i as usize))
             .collect();
         let gap = estimate_coalesce_gap(&items, false);
-        assert!((100..=2000).contains(&gap),
-            "expected gap in [100,2000], got {}", gap);
+        assert!(
+            (100..=2000).contains(&gap),
+            "expected gap in [100,2000], got {}",
+            gap
+        );
         assert_eq!(gap, 200);
     }
 
@@ -256,10 +259,7 @@ mod tests {
     #[test]
     fn test_coalesce_adjacent_overlapping_merged() {
         // Items overlap: 0-200 and 100-300 → one batch.
-        let items = vec![
-            make_item("chr1", 0, 200, 0),
-            make_item("chr1", 100, 300, 1),
-        ];
+        let items = vec![make_item("chr1", 0, 200, 0), make_item("chr1", 100, 300, 1)];
         let batches = create_batches(items, &CoalesceStrategy::Coalesce(500));
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].items.len(), 2);
@@ -271,10 +271,7 @@ mod tests {
     fn test_coalesce_separated_by_exactly_gap_merged() {
         // Gap between items == coalesce_gap → merged.
         // item 0: 0-100, item 1: 600-700, gap = 500 == coalesce_gap 500.
-        let items = vec![
-            make_item("chr1", 0, 100, 0),
-            make_item("chr1", 600, 700, 1),
-        ];
+        let items = vec![make_item("chr1", 0, 100, 0), make_item("chr1", 600, 700, 1)];
         let batches = create_batches(items, &CoalesceStrategy::Coalesce(500));
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].query_start, 0);
@@ -284,10 +281,7 @@ mod tests {
     #[test]
     fn test_coalesce_separated_more_than_gap_split() {
         // Gap = 501 > coalesce_gap 500 → two separate batches.
-        let items = vec![
-            make_item("chr1", 0, 100, 0),
-            make_item("chr1", 601, 700, 1),
-        ];
+        let items = vec![make_item("chr1", 0, 100, 0), make_item("chr1", 601, 700, 1)];
         let batches = create_batches(items, &CoalesceStrategy::Coalesce(500));
         assert_eq!(batches.len(), 2);
         assert_eq!(batches[0].query_start, 0);
@@ -298,10 +292,7 @@ mod tests {
 
     #[test]
     fn test_coalesce_different_chroms_always_split() {
-        let items = vec![
-            make_item("chr1", 0, 100, 0),
-            make_item("chr2", 0, 100, 1),
-        ];
+        let items = vec![make_item("chr1", 0, 100, 0), make_item("chr2", 0, 100, 1)];
         let batches = create_batches(items, &CoalesceStrategy::Coalesce(10_000));
         assert_eq!(batches.len(), 2);
         assert_eq!(*batches[0].items[0].2.chrom, *"chr1");

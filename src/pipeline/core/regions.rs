@@ -320,47 +320,74 @@ mod tests {
 
     #[test]
     fn infer_format_bed_extension() {
-        assert_eq!(infer_region_format(Path::new("regions.bed")), RegionFormat::Bed);
+        assert_eq!(
+            infer_region_format(Path::new("regions.bed")),
+            RegionFormat::Bed
+        );
     }
 
     #[test]
     fn infer_format_gtf_extension() {
-        assert_eq!(infer_region_format(Path::new("genes.gtf")), RegionFormat::Gtf);
+        assert_eq!(
+            infer_region_format(Path::new("genes.gtf")),
+            RegionFormat::Gtf
+        );
     }
 
     #[test]
     fn infer_format_gtf_gz_extension() {
-        assert_eq!(infer_region_format(Path::new("genes.gtf.gz")), RegionFormat::Gtf);
+        assert_eq!(
+            infer_region_format(Path::new("genes.gtf.gz")),
+            RegionFormat::Gtf
+        );
     }
 
     #[test]
     fn infer_format_gff_extension() {
-        assert_eq!(infer_region_format(Path::new("genes.gff")), RegionFormat::Gtf);
+        assert_eq!(
+            infer_region_format(Path::new("genes.gff")),
+            RegionFormat::Gtf
+        );
     }
 
     #[test]
     fn infer_format_gff_gz_extension() {
-        assert_eq!(infer_region_format(Path::new("genes.gff.gz")), RegionFormat::Gtf);
+        assert_eq!(
+            infer_region_format(Path::new("genes.gff.gz")),
+            RegionFormat::Gtf
+        );
     }
 
     #[test]
     fn infer_format_gff3_extension() {
-        assert_eq!(infer_region_format(Path::new("genes.gff3")), RegionFormat::Gtf);
+        assert_eq!(
+            infer_region_format(Path::new("genes.gff3")),
+            RegionFormat::Gtf
+        );
     }
 
     #[test]
     fn infer_format_gff3_gz_extension() {
-        assert_eq!(infer_region_format(Path::new("genes.gff3.gz")), RegionFormat::Gtf);
+        assert_eq!(
+            infer_region_format(Path::new("genes.gff3.gz")),
+            RegionFormat::Gtf
+        );
     }
 
     #[test]
     fn infer_format_txt_defaults_to_bed() {
-        assert_eq!(infer_region_format(Path::new("regions.txt")), RegionFormat::Bed);
+        assert_eq!(
+            infer_region_format(Path::new("regions.txt")),
+            RegionFormat::Bed
+        );
     }
 
     #[test]
     fn infer_format_case_insensitive_bed() {
-        assert_eq!(infer_region_format(Path::new("regions.BED")), RegionFormat::Bed);
+        assert_eq!(
+            infer_region_format(Path::new("regions.BED")),
+            RegionFormat::Bed
+        );
     }
 
     // --- next_unique_label ---

@@ -36,8 +36,8 @@ pub struct Matrix {
 /// Load a matrix file from `path`. Detects plain text vs gzip (including
 /// multi-member gzip produced by the streaming writer).
 pub fn load_matrix(path: &Path) -> Result<Matrix> {
-    let mut file = File::open(path)
-        .with_context(|| format!("Failed to open '{}'", path.display()))?;
+    let mut file =
+        File::open(path).with_context(|| format!("Failed to open '{}'", path.display()))?;
 
     let mut buf = [0u8; 2];
     let n = file.read(&mut buf).context("Failed to read magic bytes")?;
@@ -106,9 +106,7 @@ fn parse_row(line: &str, line_number: usize) -> Result<MatrixFileRow> {
         ($name:expr) => {
             fields
                 .next()
-                .with_context(|| {
-                    format!("Missing field '{}' on line {}", $name, line_number)
-                })?
+                .with_context(|| format!("Missing field '{}' on line {}", $name, line_number))?
                 .to_owned()
         };
     }
@@ -159,8 +157,8 @@ fn parse_value(s: &str) -> Result<f64> {
         "nan" | "NaN" | "NAN" => Ok(f64::NAN),
         "inf" | "Inf" | "INF" => Ok(f64::INFINITY),
         "-inf" | "-Inf" | "-INF" => Ok(f64::NEG_INFINITY),
-        other => other.parse::<f64>().with_context(|| {
-            format!("Cannot parse '{}' as a floating-point number", other)
-        }),
+        other => other
+            .parse::<f64>()
+            .with_context(|| format!("Cannot parse '{}' as a floating-point number", other)),
     }
 }

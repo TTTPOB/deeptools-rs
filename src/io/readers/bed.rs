@@ -298,8 +298,7 @@ mod tests {
 
     #[test]
     fn keeps_invalid_score_and_strand_as_raw_strings() {
-        let record =
-            BedRecord::parse("chr1\t10\t20\tname\tabc\tstrandx").expect("should parse");
+        let record = BedRecord::parse("chr1\t10\t20\tname\tabc\tstrandx").expect("should parse");
         assert!(record.score.is_none());
         assert_eq!(record.score_raw.as_deref(), Some("abc"));
         assert_eq!(record.strand, Strand::Unstranded);

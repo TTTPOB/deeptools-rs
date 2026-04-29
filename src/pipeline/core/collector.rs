@@ -4,8 +4,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::io::writers::auxiliary::{write_plain_values_row, write_sorted_region_row};
 use crate::io::writers::StreamingMatrixWriter;
+use crate::io::writers::auxiliary::{write_plain_values_row, write_sorted_region_row};
 use crate::pipeline::matrix::{MatrixHeader, MatrixRow};
 
 pub trait RowCollector: Send {
@@ -17,7 +17,11 @@ pub trait RowCollector: Send {
     /// Discard this collector without finalising.  The default implementation
     /// simply drops `self`, which is appropriate for in-memory collectors.
     /// File-backed collectors should override this to release I/O resources.
-    fn abort(self) where Self: Sized {}
+    fn abort(self)
+    where
+        Self: Sized,
+    {
+    }
 }
 
 /// Information needed to rewrite the values header line 1 at finalize time.

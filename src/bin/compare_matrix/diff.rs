@@ -40,7 +40,8 @@ pub fn full_diff(
     let bed_diff = compare_bed_fields(left_rows, right_rows);
     let value_result = compare_values(left_rows, right_rows, tolerance, max_diffs_reported);
 
-    let matches = header_diffs.is_empty() && !bed_diff.reordered
+    let matches = header_diffs.is_empty()
+        && !bed_diff.reordered
         && bed_diff.left_only.is_empty()
         && bed_diff.right_only.is_empty()
         && value_result.matches;
@@ -97,15 +98,12 @@ fn compare_bed_fields(left: &[MatrixFileRow], right: &[MatrixFileRow]) -> BedFie
     right_only.sort();
 
     // Detect reordering: same set of rows but in different order
-    let reordered = left_only.is_empty()
-        && right_only.is_empty()
-        && left.len() == right.len()
-        && {
-            // Check positional order differs
-            left.iter()
-                .zip(right.iter())
-                .any(|(l, r)| l.key() != r.key())
-        };
+    let reordered = left_only.is_empty() && right_only.is_empty() && left.len() == right.len() && {
+        // Check positional order differs
+        left.iter()
+            .zip(right.iter())
+            .any(|(l, r)| l.key() != r.key())
+    };
 
     BedFieldDiff {
         reordered,

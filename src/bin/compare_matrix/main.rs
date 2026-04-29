@@ -93,10 +93,14 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             let left_matrix = load_matrix(&left)?;
             let right_matrix = load_matrix(&right)?;
 
-            let diffs = compare_headers(&left_matrix.header_json, &right_matrix.header_json, &ignore);
+            let diffs =
+                compare_headers(&left_matrix.header_json, &right_matrix.header_json, &ignore);
 
             if diffs.is_empty() {
-                println!("MATCH — headers are identical (ignoring {} key(s))", ignore.len());
+                println!(
+                    "MATCH — headers are identical (ignoring {} key(s))",
+                    ignore.len()
+                );
                 Ok(EXIT_MATCH)
             } else {
                 println!("MISMATCH — {} header difference(s):", diffs.len());
@@ -118,12 +122,8 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             let left_matrix = load_matrix(&left)?;
             let right_matrix = load_matrix(&right)?;
 
-            let result = compare_values(
-                &left_matrix.rows,
-                &right_matrix.rows,
-                tolerance,
-                max_diffs,
-            );
+            let result =
+                compare_values(&left_matrix.rows, &right_matrix.rows, tolerance, max_diffs);
 
             print_value_result(&result);
 
@@ -154,7 +154,11 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 max_diffs,
             );
 
-            print_full_diff(&diff, &left.display().to_string(), &right.display().to_string());
+            print_full_diff(
+                &diff,
+                &left.display().to_string(),
+                &right.display().to_string(),
+            );
 
             if diff.matches {
                 Ok(EXIT_MATCH)

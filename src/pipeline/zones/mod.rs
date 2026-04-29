@@ -384,7 +384,10 @@ pub(crate) fn intervals_total_length(intervals: &[(i64, i64)]) -> i64 {
         .sum()
 }
 
-pub(crate) fn intervals_to_bins(intervals: &[(i64, i64)], bin_count: usize) -> Vec<(i64, i64, bool)> {
+pub(crate) fn intervals_to_bins(
+    intervals: &[(i64, i64)],
+    bin_count: usize,
+) -> Vec<(i64, i64, bool)> {
     let mut bins = Vec::with_capacity(bin_count);
     if bin_count == 0 {
         return bins;
@@ -417,7 +420,10 @@ pub(crate) fn intervals_to_bins(intervals: &[(i64, i64)], bin_count: usize) -> V
     bins
 }
 
-pub(crate) fn collect_window_bounds(intervals: &[(i64, i64)], mut window: (i64, i64)) -> (i64, i64) {
+pub(crate) fn collect_window_bounds(
+    intervals: &[(i64, i64)],
+    mut window: (i64, i64),
+) -> (i64, i64) {
     if intervals.is_empty() {
         return window;
     }

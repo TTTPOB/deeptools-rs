@@ -85,7 +85,11 @@ pub fn compare_values(
         }
 
         // Count extra columns (beyond the shorter row) as diffs
-        let extra = if lcols > rcols { lcols - rcols } else { rcols - lcols };
+        let extra = if lcols > rcols {
+            lcols - rcols
+        } else {
+            rcols - lcols
+        };
         if extra > 0 {
             // Each extra column in the longer row is effectively a mismatch vs a missing value.
             // We don't emit individual ValueDiff entries for these since they're structural,

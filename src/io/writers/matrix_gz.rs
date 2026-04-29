@@ -6,8 +6,8 @@ use anyhow::{Context, Result, bail};
 use flate2::write::GzEncoder;
 use flate2::{Compression, GzBuilder};
 
-use crate::pipeline::matrix::{MatrixHeader, MatrixRow};
 use super::formatting::write_matrix_row;
+use crate::pipeline::matrix::{MatrixHeader, MatrixRow};
 
 const RESERVED_HEADER_COMPRESSED: usize = 8192;
 const RESERVED_HEADER_PAYLOAD: usize = RESERVED_HEADER_COMPRESSED - 23;
@@ -114,10 +114,7 @@ impl StreamingMatrixWriter {
         file = write_header_member(file, &placeholder_payload)?;
 
         let builder = GzBuilder::new().mtime(0);
-        let encoder = builder.write(
-            BufWriter::with_capacity(131_072, file),
-            Compression::fast(),
-        );
+        let encoder = builder.write(BufWriter::with_capacity(131_072, file), Compression::fast());
 
         Ok(Self {
             encoder: Some(encoder),

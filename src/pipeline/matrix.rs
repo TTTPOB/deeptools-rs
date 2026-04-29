@@ -321,7 +321,12 @@ fn collect_values(row: &MatrixRow, sample_list: Option<&[usize]>) -> Vec<f64> {
                 let start = sample_index * bin_count;
                 if start < row.values.len() {
                     let end = (start + bin_count).min(row.values.len());
-                    values.extend(row.values[start..end].iter().copied().filter(|v| !v.is_nan()));
+                    values.extend(
+                        row.values[start..end]
+                            .iter()
+                            .copied()
+                            .filter(|v| !v.is_nan()),
+                    );
                 }
             }
         }
@@ -359,7 +364,9 @@ impl MatrixHeader {
             sample_labels: vec!["test".into()],
             downstream: vec![0],
             unscaled_3_prime: vec![0],
-            group_labels: (0..group_counts.len()).map(|i| format!("group{i}")).collect(),
+            group_labels: (0..group_counts.len())
+                .map(|i| format!("group{i}"))
+                .collect(),
             bin_size: vec![10],
             upstream: vec![0],
             group_boundaries: boundaries,

@@ -2,8 +2,8 @@ use std::io::Write;
 
 use anyhow::Result;
 
-use crate::pipeline::matrix::MatrixRow;
 use super::formatting::write_plain_row;
+use crate::pipeline::matrix::MatrixRow;
 
 /// Write a single sorted-region BED row for streaming output.
 pub fn write_sorted_region_row<W: Write>(
@@ -28,13 +28,7 @@ pub fn write_sorted_region_row<W: Write>(
     writeln!(
         writer,
         "{}\t{}\t{}\t{}\t{}\t{}\t{}",
-        row.record.chrom,
-        row.record.start,
-        row.record.end,
-        name,
-        score,
-        strand,
-        group_label
+        row.record.chrom, row.record.start, row.record.end, name, score, strand, group_label
     )?;
     Ok(())
 }
