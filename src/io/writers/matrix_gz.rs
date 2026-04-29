@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use flate2::write::GzEncoder;
@@ -92,7 +92,12 @@ fn rewrite_header_member(mut file: File, payload: &[u8]) -> Result<File> {
 }
 
 pub struct StreamingMatrixWriter {
-    encoder: GzEncoder<BufWriter<File>>,
+    /// Wrapped in `Option` so `finish()` can take ownership of the encoder
+    /// without violating the `Drop` implementation's partial-move restriction.
+    encoder: Option<GzEncoder<BufWriter<File>>>,
+    /// Path to the output file.  `None` after a successful `finish()`, so
+    /// `Drop` only removes the file when the writer is abandoned.
+    path: Option<PathBuf>,
 }
 
 impl StreamingMatrixWriter {
@@ -114,17 +119,24 @@ impl StreamingMatrixWriter {
             Compression::fast(),
         );
 
-        Ok(Self { encoder })
+        Ok(Self {
+            encoder: Some(encoder),
+            path: Some(path.to_path_buf()),
+        })
     }
 
     pub fn write_row(&mut self, row: &MatrixRow) -> Result<()> {
-        write_matrix_row(&mut self.encoder, row)
+        write_matrix_row(self.encoder.as_mut().expect("encoder present"), row)
     }
 
-    pub fn finish(self, header: &MatrixHeader) -> Result<()> {
+    pub fn finish(mut self, header: &MatrixHeader) -> Result<()> {
         let final_payload = build_padded_header_payload(header)?;
-        let writer = self
-            .encoder
+
+        // Disarm the Drop guard so the file is not deleted on success.
+        let _path = self.path.take();
+
+        let encoder = self.encoder.take().expect("encoder present");
+        let writer = encoder
             .finish()
             .context("Failed to finalise streamed matrix member")?;
         let file = writer
@@ -136,10 +148,18 @@ impl StreamingMatrixWriter {
     }
 
     /// Discard the in-progress writer without finalising.  The output file is
-    /// left in a corrupt/partial state; callers are responsible for removing it
-    /// if desired.  Dropping the encoder closes the underlying file handle.
+    /// removed from disk.
     pub fn abort(self) {
-        drop(self.encoder);
+        // Cleanup happens in Drop impl.
+        drop(self);
+    }
+}
+
+impl Drop for StreamingMatrixWriter {
+    fn drop(&mut self) {
+        if let Some(ref path) = self.path {
+            let _ = std::fs::remove_file(path);
+        }
     }
 }
 
