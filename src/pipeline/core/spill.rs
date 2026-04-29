@@ -60,16 +60,15 @@ impl ChromTable {
         Self::default()
     }
 
-    /// Intern a chromosome name, returning a compact `u16` id. Re-uses an
-    /// existing id when the same name is interned again.
-    pub(crate) fn intern(&mut self, chrom: &Arc<str>) -> u16 {
+    pub(crate) fn intern(&mut self, chrom: &Arc<str>) -> Result<u16> {
         if let Some(&id) = self.to_id.get(chrom) {
-            return id;
+            return Ok(id);
         }
-        let id = self.to_name.len() as u16;
+        let id = u16::try_from(self.to_name.len())
+            .context("too many distinct chromosomes for spill format (max 65535)")?;
         self.to_name.push(Arc::clone(chrom));
         self.to_id.insert(Arc::clone(chrom), id);
-        id
+        Ok(id)
     }
 
     /// Resolve a u16 id back to the interned chromosome name.
@@ -174,7 +173,7 @@ pub(crate) fn serialize_row(
     let rec = &row.record;
 
     // chrom_id (2 bytes)
-    let chrom_id = chrom_table.intern(&rec.chrom);
+    let chrom_id = chrom_table.intern(&rec.chrom)?;
     buf.extend_from_slice(&chrom_id.to_le_bytes());
 
     // start (4 bytes)
@@ -1045,9 +1044,9 @@ mod tests {
         let chr1: Arc<str> = Arc::from("chr1");
         let chr2: Arc<str> = Arc::from("chr2");
 
-        let id1 = ct.intern(&chr1);
-        let id2 = ct.intern(&chr2);
-        let id1_again = ct.intern(&chr1);
+        let id1 = ct.intern(&chr1).unwrap();
+        let id2 = ct.intern(&chr2).unwrap();
+        let id1_again = ct.intern(&chr1).unwrap();
 
         // Same name returns same id
         assert_eq!(id1, id1_again);
