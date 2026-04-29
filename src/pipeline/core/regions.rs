@@ -1,18 +1,11 @@
 use std::collections::HashSet;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 
 use crate::config::{GeneralOptions, GtfOptions};
-use crate::io::{BedReadError, BedRecord, load_gtf_records};
-
-pub struct Group {
-    pub label: String,
-    pub records: Vec<BedRecord>,
-}
+use crate::io::{BedReadError, BedRecord, Group, GroupedBedReader, load_gtf_records};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RegionFormat {
@@ -33,23 +26,32 @@ pub fn load_groups(paths: &[PathBuf], gtf: &GtfOptions) -> Result<Vec<Group>> {
     // When there's only one file, Python uses "genes" as the default label
     let use_default_genes_label = paths.len() == 1;
     for path in paths {
+        let default_label = if use_default_genes_label {
+            "genes".to_string()
+        } else {
+            bed_file_label(path)
+        };
         match infer_region_format(path) {
             RegionFormat::Bed => {
-                let mut file_groups =
-                    parse_grouped_bed(path, use_default_genes_label, &mut seen_labels)
-                        .map_err(anyhow::Error::new)
-                        .with_context(|| {
-                            format!("Failed to parse regions file '{}'", path.display())
-                        })?;
-                groups.append(&mut file_groups);
+                let file_groups = parse_grouped_bed(path, default_label.clone())
+                    .map_err(anyhow::Error::new)
+                    .with_context(|| {
+                        format!("Failed to parse regions file '{}'", path.display())
+                    })?;
+                for mut group in file_groups {
+                    group.label = next_unique_label(&group.label, &default_label, &mut seen_labels);
+                    groups.push(group);
+                }
             }
             RegionFormat::Gtf => {
-                let mut file_groups =
-                    parse_grouped_gtf(path, gtf, use_default_genes_label, &mut seen_labels)
-                        .with_context(|| {
-                            format!("Failed to parse regions file '{}'", path.display())
-                        })?;
-                groups.append(&mut file_groups);
+                let file_groups = parse_grouped_gtf(path, gtf, default_label.clone())
+                    .with_context(|| {
+                        format!("Failed to parse regions file '{}'", path.display())
+                    })?;
+                for mut group in file_groups {
+                    group.label = next_unique_label(&group.label, &default_label, &mut seen_labels);
+                    groups.push(group);
+                }
             }
         }
     }
@@ -102,103 +104,25 @@ pub fn normalize_sort_sample_indices(
     Ok(Some(normalized))
 }
 
-fn parse_grouped_bed(
-    path: &Path,
-    use_default_genes_label: bool,
-    seen_labels: &mut HashSet<String>,
-) -> Result<Vec<Group>, BedReadError> {
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
-
-    let default_label = if use_default_genes_label {
-        "genes".to_string()
-    } else {
-        bed_file_label(path)
-    };
-    let mut groups = Vec::new();
-    let mut current_records = Vec::new();
-
-    for (line_number, line) in reader.lines().enumerate() {
-        let line = line?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if trimmed.starts_with('#') {
-            finalize_group(
-                trimmed.strip_prefix('#').unwrap_or("").trim(),
-                &default_label,
-                &mut current_records,
-                &mut groups,
-                seen_labels,
-            );
-            continue;
-        }
-
-        match BedRecord::parse(trimmed) {
-            Ok(record) => current_records.push(record),
-            Err(message) => {
-                return Err(BedReadError::Parse {
-                    line_number: line_number + 1,
-                    message,
-                    line,
-                });
-            }
-        }
-    }
-
-    if !current_records.is_empty() {
-        finalize_group(
-            "",
-            &default_label,
-            &mut current_records,
-            &mut groups,
-            seen_labels,
-        );
-    } else if groups.is_empty() {
-        return Err(BedReadError::EmptyFile);
-    }
-
-    Ok(groups)
+fn parse_grouped_bed(path: &Path, default_label: String) -> Result<Vec<Group>, BedReadError> {
+    let reader = GroupedBedReader::open(path, default_label)?;
+    reader.collect()
 }
 
 fn parse_grouped_gtf(
     path: &Path,
     options: &GtfOptions,
-    use_default_genes_label: bool,
-    seen_labels: &mut HashSet<String>,
+    default_label: String,
 ) -> Result<Vec<Group>> {
-    let default_label = if use_default_genes_label {
-        "genes".to_string()
-    } else {
-        bed_file_label(path)
-    };
-    let mut groups = Vec::new();
-
     let records = load_gtf_records(path, options)?;
     if records.is_empty() {
         bail!("no data records found in GTF file '{}'", path.display());
     }
-    let label = next_unique_label("", &default_label, seen_labels);
-    groups.push(Group { label, records });
-
-    Ok(groups)
-}
-
-fn finalize_group(
-    raw_label: &str,
-    default_label: &str,
-    current_records: &mut Vec<BedRecord>,
-    groups: &mut Vec<Group>,
-    seen_labels: &mut HashSet<String>,
-) {
-    if current_records.is_empty() {
-        return;
-    }
-
-    let label = next_unique_label(raw_label, default_label, seen_labels);
-    let records = std::mem::take(current_records);
-    groups.push(Group { label, records });
+    // Raw label (undeduplicated); load_groups() will deduplicate.
+    Ok(vec![Group {
+        label: default_label,
+        records,
+    }])
 }
 
 fn next_unique_label(

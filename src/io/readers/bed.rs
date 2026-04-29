@@ -199,61 +199,123 @@ pub enum BedReadError {
     EmptyFile,
 }
 
-pub struct BedReader<R: BufRead> {
-    lines: std::iter::Enumerate<io::Lines<R>>,
+/// A named group of BED records, typically delimited by a `#Label` line.
+#[derive(Debug, Clone)]
+pub struct Group {
+    pub label: String,
+    pub records: Vec<BedRecord>,
 }
 
-impl BedReader<BufReader<File>> {
-    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, BedReadError> {
+/// Reads a BED file and yields [`Group`]s delimited by `#` comment lines.
+///
+/// A `#Label` line terminates and names the **previous** accumulated group
+/// (trailing-delimiter style).  Groups that reach EOF without a preceding `#`
+/// line receive `default_label`.  When a `#` line provides an empty label the
+/// `default_label` is also used as a fallback.
+///
+/// Labels are emitted **raw** — no cross-file deduplication is performed.
+/// Callers should apply deduplication when merging groups from multiple files.
+pub struct GroupedBedReader<R: BufRead> {
+    lines: std::iter::Enumerate<io::Lines<R>>,
+    default_label: String,
+    /// Records accumulated since the last group boundary.
+    current_records: Vec<BedRecord>,
+    /// Whether at least one group has been yielded (for `EmptyFile` detection).
+    yielded_any: bool,
+    /// Whether the underlying line iterator has been exhausted.
+    done: bool,
+}
+
+impl GroupedBedReader<BufReader<File>> {
+    /// Open a BED file at `path` and return a reader that yields groups.
+    pub fn open(path: impl AsRef<Path>, default_label: String) -> Result<Self, BedReadError> {
         let file = File::open(path)?;
-        Ok(Self::new(BufReader::new(file)))
+        Ok(Self::new(BufReader::new(file), default_label))
     }
 }
 
-impl<R: BufRead> BedReader<R> {
-    pub fn new(reader: R) -> Self {
+impl<R: BufRead> GroupedBedReader<R> {
+    /// Create a new reader from any buffered reader.
+    ///
+    /// Useful for unit-testing grouping behavior without filesystem setup.
+    pub fn new(reader: R, default_label: String) -> Self {
         Self {
             lines: reader.lines().enumerate(),
+            default_label,
+            current_records: Vec::new(),
+            yielded_any: false,
+            done: false,
         }
-    }
-
-    pub fn read_all(mut self) -> Result<Vec<BedRecord>, BedReadError> {
-        let mut records = Vec::new();
-        while let Some(record) = self.next() {
-            records.push(record?);
-        }
-        Ok(records)
     }
 }
 
-impl<R: BufRead> Iterator for BedReader<R> {
-    type Item = Result<BedRecord, BedReadError>;
+impl<R: BufRead> Iterator for GroupedBedReader<R> {
+    type Item = Result<Group, BedReadError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some((index, line)) = self.lines.next() {
-            let line_number = index + 1;
-            let line = match line {
-                Ok(value) => value,
-                Err(err) => return Some(Err(BedReadError::Io(err))),
-            };
-
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                continue;
+        loop {
+            if self.done {
+                return None;
             }
 
-            match BedRecord::parse(trimmed) {
-                Ok(record) => return Some(Ok(record)),
-                Err(message) => {
-                    return Some(Err(BedReadError::Parse {
-                        line_number,
-                        message,
-                        line,
-                    }));
+            match self.lines.next() {
+                Some((idx, Ok(line))) => {
+                    let line_number = idx + 1;
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    if trimmed.starts_with('#') {
+                        let raw_label = trimmed.strip_prefix('#').unwrap_or("").trim();
+                        if !self.current_records.is_empty() {
+                            let records = std::mem::take(&mut self.current_records);
+                            let label = if raw_label.is_empty() {
+                                self.default_label.clone()
+                            } else {
+                                raw_label.to_string()
+                            };
+                            self.yielded_any = true;
+                            return Some(Ok(Group { label, records }));
+                        }
+                        // No preceding records: discard label, keep
+                        // accumulating.
+                        continue;
+                    }
+                    // Parse as a BED data line.
+                    match BedRecord::parse(trimmed) {
+                        Ok(record) => self.current_records.push(record),
+                        Err(message) => {
+                            self.done = true;
+                            return Some(Err(BedReadError::Parse {
+                                line_number,
+                                message,
+                                line,
+                            }));
+                        }
+                    }
+                }
+                Some((_idx, Err(err))) => {
+                    self.done = true;
+                    return Some(Err(BedReadError::Io(err)));
+                }
+                None => {
+                    self.done = true;
+                    // Emit the final group if records remain.
+                    if !self.current_records.is_empty() {
+                        let records = std::mem::take(&mut self.current_records);
+                        self.yielded_any = true;
+                        return Some(Ok(Group {
+                            label: self.default_label.clone(),
+                            records,
+                        }));
+                    }
+                    if !self.yielded_any {
+                        return Some(Err(BedReadError::EmptyFile));
+                    }
+                    return None;
                 }
             }
         }
-        None
     }
 }
 
@@ -287,13 +349,164 @@ mod tests {
         assert!(record.extra_fields.is_empty());
     }
 
+    // --- GroupedBedReader tests ---
+
+    fn make_reader(data: &[u8]) -> GroupedBedReader<BufReader<Cursor<&[u8]>>> {
+        GroupedBedReader::new(BufReader::new(Cursor::new(data)), "default".to_string())
+    }
+
     #[test]
-    fn reader_skips_comments_and_blank_lines() {
-        let data = b"# comment\n\nchr2\t0\t50\n";
-        let reader = BedReader::new(BufReader::new(Cursor::new(&data[..])));
-        let records: Vec<_> = reader.collect::<Result<_, _>>().expect("valid records");
-        assert_eq!(records.len(), 1);
-        assert_eq!(&*records[0].chrom, "chr2");
+    fn groups_with_trailing_delimiter() {
+        // `#Group 1` terminates the first three records; `#Group 2`
+        // terminates the next three.  This matches the test2.bed fixture.
+        let data = b"\
+ch1\t100\t150\tCG11023\t0\t+\n\
+ch2\t150\t175\tcda5\t0\t-\n\
+ch3\t100\t125\tcda8\t0\t+\n\
+#Group 1\n\
+ch1\t75\t125\tC11023\t0\t+\n\
+ch2\t125\t150\tca5\t0\t-\n\
+ch3\t75\t100\tca8\t0\t+\n\
+#Group 2\n\
+";
+        let groups: Vec<_> = make_reader(data)
+            .collect::<Result<_, _>>()
+            .expect("valid groups");
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].label, "Group 1");
+        assert_eq!(groups[0].records.len(), 3);
+        assert_eq!(groups[1].label, "Group 2");
+        assert_eq!(groups[1].records.len(), 3);
+    }
+
+    #[test]
+    fn single_group_no_delimiters_gets_default_label() {
+        let data = b"chr1\t100\t200\nchr1\t300\t400\n";
+        let groups: Vec<_> = make_reader(data)
+            .collect::<Result<_, _>>()
+            .expect("valid groups");
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].label, "default");
+        assert_eq!(groups[0].records.len(), 2);
+    }
+
+    #[test]
+    fn eof_group_gets_default_label() {
+        let data = b"chr1\t100\t200\n#Label1\nchr2\t300\t400\n";
+        let groups: Vec<_> = make_reader(data)
+            .collect::<Result<_, _>>()
+            .expect("valid groups");
+        assert_eq!(groups.len(), 2);
+        // First record(s) terminated by #Label1.
+        assert_eq!(groups[0].label, "Label1");
+        // Remaining record(s) at EOF get default_label.
+        assert_eq!(groups[1].label, "default");
+    }
+
+    #[test]
+    fn hash_with_no_preceding_records_discards_label() {
+        // File starts with `#` — no records precede it, so label is discarded.
+        let data = b"#Orphan\nchr1\t100\t200\n#Real\nchr2\t300\t400\n";
+        let groups: Vec<_> = make_reader(data)
+            .collect::<Result<_, _>>()
+            .expect("valid groups");
+        assert_eq!(groups.len(), 2);
+        // First record batch is terminated by #Real (NOT #Orphan).
+        assert_eq!(groups[0].label, "Real");
+        // Final batch at EOF.
+        assert_eq!(groups[1].label, "default");
+    }
+
+    #[test]
+    fn consecutive_hash_lines_no_intervening_records() {
+        let data = b"chr1\t100\t200\n#A\n#B\nchr2\t300\t400\n";
+        let groups: Vec<_> = make_reader(data)
+            .collect::<Result<_, _>>()
+            .expect("valid groups");
+        assert_eq!(groups.len(), 2);
+        // chr1 is terminated by #A. #B has no preceding records so is
+        // discarded.
+        assert_eq!(groups[0].label, "A");
+        // chr2 is the final group.
+        assert_eq!(groups[1].label, "default");
+    }
+
+    #[test]
+    fn empty_hash_line_uses_default_label() {
+        let data = b"chr1\t100\t200\n#\n";
+        let groups: Vec<_> = make_reader(data)
+            .collect::<Result<_, _>>()
+            .expect("valid groups");
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].label, "default");
+    }
+
+    #[test]
+    fn empty_file_yields_empty_file_error() {
+        let data = b"";
+        let result: Result<Vec<_>, _> = make_reader(data).collect();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, BedReadError::EmptyFile));
+    }
+
+    #[test]
+    fn comment_only_file_yields_empty_file_error() {
+        let data = b"# just a comment\n\n# another comment\n";
+        let result: Result<Vec<_>, _> = make_reader(data).collect();
+        assert!(matches!(result.unwrap_err(), BedReadError::EmptyFile));
+    }
+
+    #[test]
+    fn parse_error_includes_line_number_and_content() {
+        let data = b"chr1\n"; // only 1 column – will fail BedRecord::parse
+        let result: Result<Vec<_>, _> = make_reader(data).collect();
+        let err = result.unwrap_err();
+        assert!(matches!(err, BedReadError::Parse { .. }));
+        if let BedReadError::Parse {
+            line_number,
+            message: _,
+            line,
+        } = &err
+        {
+            assert_eq!(*line_number, 1);
+            assert_eq!(line, "chr1");
+        } else {
+            unreachable!();
+        }
+    }
+
+    #[test]
+    fn whitespace_only_lines_are_skipped() {
+        let data = b"  \t  \nchr1\t100\t200\n";
+        let groups: Vec<_> = make_reader(data)
+            .collect::<Result<_, _>>()
+            .expect("valid groups");
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].records.len(), 1);
+    }
+
+    #[test]
+    fn raw_labels_not_deduplicated_within_file() {
+        // Two groups with the same `#` label — both keep the raw label.
+        let data = b"chr1\t100\t200\n#dup\nchr2\t300\t400\n#dup\n";
+        let groups: Vec<_> = make_reader(data)
+            .collect::<Result<_, _>>()
+            .expect("valid groups");
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].label, "dup");
+        assert_eq!(groups[1].label, "dup");
+    }
+
+    #[test]
+    fn hash_line_with_whitespace_label() {
+        // `#  ` → raw_label is empty after trim, so fall back to default.
+        let data = b"chr1\t100\t200\n#  \n";
+        let groups: Vec<_> = make_reader(data)
+            .collect::<Result<_, _>>()
+            .expect("valid groups");
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].label, "default");
     }
 
     #[test]

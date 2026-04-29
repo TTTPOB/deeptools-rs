@@ -9,11 +9,10 @@ pub(crate) mod spill_format;
 pub mod traits;
 mod worker;
 
+pub use crate::io::Group;
 pub use collector::FileCollector;
 pub use executor::execute_mode;
-pub use regions::{
-    Group, RegionTask, derive_sample_labels, load_groups, normalize_sort_sample_indices,
-};
+pub use regions::{RegionTask, derive_sample_labels, load_groups, normalize_sort_sample_indices};
 pub use samples::{Sample, WorkerSamples};
 pub use traits::{ModeTag, PipelineMode, RegionPlan, SignalBin, ensure_multiple, ensure_positive};
 pub use worker::compute_row;
