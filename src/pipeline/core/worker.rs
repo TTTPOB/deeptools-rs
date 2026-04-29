@@ -6,17 +6,23 @@ use crate::config::{AverageTypeBins, GeneralOptions};
 use crate::io::BedRecord;
 use crate::pipeline::matrix::MatrixRow;
 
-use super::aggregation::{aggregate_slice, direct_mean_bins, direct_sum_bins, index_from_coordinate};
-use super::traits::{PipelineMode, RegionPlan, SignalBin};
-use super::samples::Sample;
+use super::aggregation::{
+    aggregate_slice, direct_mean_bins, direct_sum_bins, index_from_coordinate,
+};
 use super::coalesce::CoalescedBatch;
+use super::samples::Sample;
+use super::traits::{PipelineMode, RegionPlan, SignalBin};
 
 thread_local! {
     static COVERAGE_POOL: std::cell::RefCell<Vec<Vec<f64>>> =
         std::cell::RefCell::new(Vec::new());
 }
 
-fn take_coverage_buffers(sample_count: usize, window_len: usize, default_fill: f64) -> Vec<Vec<f64>> {
+fn take_coverage_buffers(
+    sample_count: usize,
+    window_len: usize,
+    default_fill: f64,
+) -> Vec<Vec<f64>> {
     COVERAGE_POOL.with(|pool| {
         let mut bufs = pool.borrow_mut();
         bufs.resize_with(sample_count, Vec::new);
@@ -41,7 +47,6 @@ fn clamp_coordinate(value: i64, chrom_length: u32) -> u32 {
         .try_into()
         .unwrap_or(0)
 }
-
 
 fn should_skip_row_flat(values: &[f64], general: &GeneralOptions) -> bool {
     if general.skip_zeros {
@@ -273,17 +278,16 @@ pub(super) fn process_batch<M: PipelineMode>(
         let mut results = Vec::with_capacity(item_count);
         for (orig_idx, group_index, record) in batch.items {
             let plan = mode.plan_for(&record, metadata);
-            let maybe_values =
-                compute_row(samples, &record, &plan, general, nan_after_end)?;
-            let row = maybe_values
-                .map(|(flat, sc, bc)| mode.postprocess_row(Arc::unwrap_or_clone(record), flat, sc, bc, metadata));
+            let maybe_values = compute_row(samples, &record, &plan, general, nan_after_end)?;
+            let row = maybe_values.map(|(flat, sc, bc)| {
+                mode.postprocess_row(Arc::unwrap_or_clone(record), flat, sc, bc, metadata)
+            });
             results.push((orig_idx, group_index, row));
         }
         return Ok(results);
     }
 
-    let window_len =
-        usize::try_from(window_span).context("batch window span exceeds usize")?;
+    let window_len = usize::try_from(window_span).context("batch window span exceeds usize")?;
 
     let default_fill = if general.missing_data_as_zero {
         0.0f64
@@ -355,9 +359,7 @@ pub(super) fn process_batch<M: PipelineMode>(
             // Fill per-base coverage buffer for non-direct aggregation types.
             let cov = &mut sample_coverages[si];
             for v in intervals {
-                let rs = i64::from(v.start)
-                    .saturating_sub(batch.query_start)
-                    .max(0);
+                let rs = i64::from(v.start).saturating_sub(batch.query_start).max(0);
                 let re = i64::from(v.end)
                     .saturating_sub(batch.query_start)
                     .min(window_span)
@@ -383,10 +385,10 @@ pub(super) fn process_batch<M: PipelineMode>(
         // (intron-skipping) must read individual exon intervals; we
         // delegate to the original per-item compute_row path.
         if plan.included_intervals().is_some() {
-            let maybe_values =
-                compute_row(samples, &record, &plan, general, nan_after_end)?;
-            let row = maybe_values
-                .map(|(flat, sc, bc)| mode.postprocess_row(Arc::unwrap_or_clone(record), flat, sc, bc, metadata));
+            let maybe_values = compute_row(samples, &record, &plan, general, nan_after_end)?;
+            let row = maybe_values.map(|(flat, sc, bc)| {
+                mode.postprocess_row(Arc::unwrap_or_clone(record), flat, sc, bc, metadata)
+            });
             results.push((orig_idx, group_index, row));
             continue;
         }
@@ -436,10 +438,8 @@ pub(super) fn process_batch<M: PipelineMode>(
             for si in 0..sample_count {
                 let cov = &sample_coverages[si];
                 for bin in bins {
-                    let bs =
-                        ((bin.start() - batch.query_start).max(0) as usize).min(window_len);
-                    let be =
-                        ((bin.end() - batch.query_start).max(0) as usize).min(window_len);
+                    let bs = ((bin.start() - batch.query_start).max(0) as usize).min(window_len);
+                    let be = ((bin.end() - batch.query_start).max(0) as usize).min(window_len);
 
                     let mut value = if bs < be {
                         aggregate_slice(&cov[bs..be], general.average_type_bins)

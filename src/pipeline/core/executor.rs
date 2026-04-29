@@ -6,17 +6,16 @@ use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
 
 use crate::config::{GeneralOptions, SortRegions};
-use crate::io::{BedRecord, SharedBigWigReader};
 use crate::io::readers::block_cache::{
-    DEFAULT_TOTAL_BLOCK_CACHE_ENTRIES,
-    split_block_cache_capacity,
+    DEFAULT_TOTAL_BLOCK_CACHE_ENTRIES, split_block_cache_capacity,
 };
+use crate::io::{BedRecord, SharedBigWigReader};
 use crate::pipeline::matrix::{MatrixHeader, compute_sort_metric};
 
-use super::collector::{FileCollector, RowCollector};
 use super::coalesce::{
-    CoalesceStrategy, COALESCE_CLAMP_MAX, create_batches, estimate_coalesce_gap,
+    COALESCE_CLAMP_MAX, CoalesceStrategy, create_batches, estimate_coalesce_gap,
 };
+use super::collector::{FileCollector, RowCollector};
 use super::regions::{RegionTask, normalize_sort_sample_indices};
 use super::samples::WorkerSamples;
 use super::spill::HybridBucketCollector;
@@ -175,9 +174,7 @@ where
                 );
                 SharedBigWigReader::open_with_block_cache_capacity(path, cache_capacity)
                     .map(Arc::new)
-                    .with_context(|| {
-                        format!("Failed to open bigWig file '{}'", path.display())
-                    })
+                    .with_context(|| format!("Failed to open bigWig file '{}'", path.display()))
             })
             .collect::<Result<Vec<_>>>()?,
     );
@@ -210,7 +207,10 @@ where
         .context("Failed to initialise rayon thread pool for pipeline scheduling")?;
 
     // ── Phase 6: Split batches into chunks ──────────────────────────────
-    let chunk_size = std::cmp::max(MIN_CHUNK_SIZE, batches.len() / (thread_count * CHUNKS_PER_THREAD));
+    let chunk_size = std::cmp::max(
+        MIN_CHUNK_SIZE,
+        batches.len() / (thread_count * CHUNKS_PER_THREAD),
+    );
     let chunks = into_chunks(batches, chunk_size);
 
     let metadata_ref = metadata.as_ref();
@@ -218,34 +218,27 @@ where
     // Helper closure: dispatch a single chunk to the thread pool and collect
     // the per-batch results.  Extracted to eliminate identical code in both
     // StreamOrdered and HybridBucket arms.
-    let dispatch_chunk =
-        |chunk: Vec<_>| -> Vec<Result<Vec<BatchResult>>> {
-            let sample_paths_c = Arc::clone(&sample_paths);
-            let shared_c = Arc::clone(&shared_readers);
-            pool.install(|| {
-                chunk
-                    .into_par_iter()
-                    .map_init(
-                        move || {
-                            WorkerSamples::from_shared(
-                                Arc::clone(&sample_paths_c),
-                                Arc::clone(&shared_c),
-                            )
-                        },
-                        |worker_samples, batch| {
-                            let samples = worker_samples.samples()?;
-                            process_batch(
-                                samples.as_mut_slice(),
-                                batch,
-                                mode,
-                                general,
-                                metadata_ref,
-                            )
-                        },
-                    )
-                    .collect()
-            })
-        };
+    let dispatch_chunk = |chunk: Vec<_>| -> Vec<Result<Vec<BatchResult>>> {
+        let sample_paths_c = Arc::clone(&sample_paths);
+        let shared_c = Arc::clone(&shared_readers);
+        pool.install(|| {
+            chunk
+                .into_par_iter()
+                .map_init(
+                    move || {
+                        WorkerSamples::from_shared(
+                            Arc::clone(&sample_paths_c),
+                            Arc::clone(&shared_c),
+                        )
+                    },
+                    |worker_samples, batch| {
+                        let samples = worker_samples.samples()?;
+                        process_batch(samples.as_mut_slice(), batch, mode, general, metadata_ref)
+                    },
+                )
+                .collect()
+        })
+    };
 
     // ── Phase 7: Dispatch based on output strategy ──────────────────────
     match output_strategy {
@@ -317,16 +310,16 @@ where
                 Ok(()) => {
                     let mut collector = collector;
                     let header = match general.sort_regions {
-                        SortRegions::Ascend => bucket_collector.finalize_sorted(
-                            true,
-                            header_builder,
-                            |gi, row| collector.on_row(gi, row),
-                        )?,
-                        SortRegions::Descend => bucket_collector.finalize_sorted(
-                            false,
-                            header_builder,
-                            |gi, row| collector.on_row(gi, row),
-                        )?,
+                        SortRegions::Ascend => {
+                            bucket_collector.finalize_sorted(true, header_builder, |gi, row| {
+                                collector.on_row(gi, row)
+                            })?
+                        }
+                        SortRegions::Descend => {
+                            bucket_collector.finalize_sorted(false, header_builder, |gi, row| {
+                                collector.on_row(gi, row)
+                            })?
+                        }
                         SortRegions::Keep => bucket_collector.finalize_keep_order(
                             task_count,
                             header_builder,
@@ -449,40 +442,28 @@ mod tests {
     #[test]
     fn sorted_unsorted_by_chrom() {
         // chr2 comes before chr1 → not sorted
-        let items = vec![
-            make_item("chr2", 100, 200),
-            make_item("chr1", 100, 200),
-        ];
+        let items = vec![make_item("chr2", 100, 200), make_item("chr1", 100, 200)];
         assert!(!input_order_is_compute_sorted(&items));
     }
 
     #[test]
     fn sorted_same_chrom_unsorted_by_start() {
         // Same chrom, but start decreases → not sorted
-        let items = vec![
-            make_item("chr1", 300, 400),
-            make_item("chr1", 100, 200),
-        ];
+        let items = vec![make_item("chr1", 300, 400), make_item("chr1", 100, 200)];
         assert!(!input_order_is_compute_sorted(&items));
     }
 
     #[test]
     fn sorted_same_chrom_and_start_unsorted_by_end() {
         // Same chrom and start, but end decreases → not sorted
-        let items = vec![
-            make_item("chr1", 100, 400),
-            make_item("chr1", 100, 200),
-        ];
+        let items = vec![make_item("chr1", 100, 400), make_item("chr1", 100, 200)];
         assert!(!input_order_is_compute_sorted(&items));
     }
 
     #[test]
     fn sorted_equal_items() {
         // Identical items satisfy the <= ordering → true
-        let items = vec![
-            make_item("chr1", 100, 200),
-            make_item("chr1", 100, 200),
-        ];
+        let items = vec![make_item("chr1", 100, 200), make_item("chr1", 100, 200)];
         assert!(input_order_is_compute_sorted(&items));
     }
 }

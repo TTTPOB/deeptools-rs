@@ -110,12 +110,7 @@ fn read_u32(data: &[u8], pos: &mut usize) -> Result<u32> {
     if *pos + 4 > data.len() {
         anyhow::bail!("unexpected end of data reading u32 at offset {}", *pos);
     }
-    let val = u32::from_le_bytes([
-        data[*pos],
-        data[*pos + 1],
-        data[*pos + 2],
-        data[*pos + 3],
-    ]);
+    let val = u32::from_le_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
     *pos += 4;
     Ok(val)
 }
@@ -218,8 +213,7 @@ pub(crate) fn serialize_row(
     // exon_coords (optional)
     if let Some(ref coords) = row.exon_coords {
         flags |= FLAG_HAS_EXON_COORDS;
-        let count =
-            u16::try_from(coords.len()).context("too many exon coords for spill format")?;
+        let count = u16::try_from(coords.len()).context("too many exon coords for spill format")?;
         buf.extend_from_slice(&count.to_le_bytes());
         for &(start, end) in coords {
             buf.extend_from_slice(&start.to_le_bytes());
@@ -239,8 +233,7 @@ pub(crate) fn serialize_row(
     // patch flags byte
     buf[flags_pos] = flags;
 
-    let row_byte_len =
-        u32::try_from(buf.len()).context("serialized row exceeds u32::MAX bytes")?;
+    let row_byte_len = u32::try_from(buf.len()).context("serialized row exceeds u32::MAX bytes")?;
     Ok(row_byte_len)
 }
 

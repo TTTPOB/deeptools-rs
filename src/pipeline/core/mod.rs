@@ -1,34 +1,33 @@
-pub mod traits;
-pub mod samples;
+mod aggregation;
+mod coalesce;
+mod collector;
+mod executor;
 pub mod regions;
+pub mod samples;
 pub(crate) mod spill;
 pub(crate) mod spill_format;
-mod executor;
-mod collector;
-mod coalesce;
-mod aggregation;
+pub mod traits;
 mod worker;
 
-pub use traits::{
-    SignalBin, ModeTag, RegionPlan, PipelineMode,
-    ensure_positive, ensure_multiple,
+pub use collector::{FileCollector, RowCollector};
+pub use executor::execute_mode;
+pub use regions::{
+    Group, RegionTask, derive_sample_labels, load_groups, normalize_sort_sample_indices,
 };
 pub use samples::{Sample, WorkerSamples};
-pub use regions::{Group, RegionTask, load_groups, derive_sample_labels, normalize_sort_sample_indices};
-pub use collector::{RowCollector, FileCollector};
-pub use executor::execute_mode;
+pub use traits::{ModeTag, PipelineMode, RegionPlan, SignalBin, ensure_multiple, ensure_positive};
 pub use worker::compute_row;
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use crate::io::readers::bed::Strand;
     use crate::io::BedRecord;
+    use crate::io::readers::bed::Strand;
 
+    use super::aggregation::{aggregate_slice, index_from_coordinate};
     use super::executor::{WorkItem, input_order_is_compute_sorted};
     use super::traits::{RegionPlan, SignalBin};
-    use super::aggregation::{aggregate_slice, index_from_coordinate};
     use crate::config::AverageTypeBins;
 
     fn work_item(idx: usize, chrom: &str, start: i64, end: i64) -> WorkItem {

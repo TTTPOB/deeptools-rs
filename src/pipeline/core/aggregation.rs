@@ -25,7 +25,11 @@ pub(super) fn aggregate_slice(slice: &[f64], average_type: AverageTypeBins) -> O
                     count += 1;
                 }
             }
-            if count == 0 { None } else { Some(sum / count as f64) }
+            if count == 0 {
+                None
+            } else {
+                Some(sum / count as f64)
+            }
         }
         AverageTypeBins::Sum => {
             let mut sum = 0.0f64;
@@ -83,11 +87,7 @@ pub(super) fn aggregate_slice(slice: &[f64], average_type: AverageTypeBins) -> O
             Some((variance_sum / count as f64).sqrt())
         }
         AverageTypeBins::Median => {
-            let mut values: Vec<f64> = slice
-                .iter()
-                .copied()
-                .filter(|v| !v.is_nan())
-                .collect();
+            let mut values: Vec<f64> = slice.iter().copied().filter(|v| !v.is_nan()).collect();
             if values.is_empty() {
                 return None;
             }
@@ -113,7 +113,11 @@ pub(super) fn direct_mean_bins(
     bins.iter()
         .map(|&(bin_start, bin_end)| {
             if bin_start >= bin_end {
-                return if missing_data_as_zero { Some(0.0) } else { None };
+                return if missing_data_as_zero {
+                    Some(0.0)
+                } else {
+                    None
+                };
             }
 
             let mut weighted_sum = 0.0;
@@ -153,7 +157,11 @@ pub(super) fn direct_sum_bins(
     bins.iter()
         .map(|&(bin_start, bin_end)| {
             if bin_start >= bin_end {
-                return if missing_data_as_zero { Some(0.0) } else { None };
+                return if missing_data_as_zero {
+                    Some(0.0)
+                } else {
+                    None
+                };
             }
 
             let mut sum = 0.0;

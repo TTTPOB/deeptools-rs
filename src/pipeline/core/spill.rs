@@ -7,7 +7,7 @@ use memmap2::Mmap;
 
 use crate::pipeline::matrix::{MatrixHeader, MatrixRow, compare_ascending};
 
-use super::spill_format::{deserialize_row, serialize_row, ChromTable, SpillIndex};
+use super::spill_format::{ChromTable, SpillIndex, deserialize_row, serialize_row};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -240,9 +240,7 @@ impl HybridBucketCollector {
         bin_count: usize,
         threshold: usize,
     ) -> Self {
-        let buckets = (0..group_count)
-            .map(|i| CollectorBucket::new(i))
-            .collect();
+        let buckets = (0..group_count).map(|i| CollectorBucket::new(i)).collect();
         // Approximate bytes per row: f64 values + overhead for BedRecord, etc.
         let row_estimated_bytes = sample_count * bin_count * 8 + 100;
         Self {
@@ -266,7 +264,13 @@ impl HybridBucketCollector {
             .buckets
             .get_mut(group_index)
             .context("group_index out of range")?;
-        bucket.push(row, orig_idx, sort_key, self.row_estimated_bytes, self.threshold)
+        bucket.push(
+            row,
+            orig_idx,
+            sort_key,
+            self.row_estimated_bytes,
+            self.threshold,
+        )
     }
 
     /// Join all in-flight flushes across all buckets.
@@ -485,12 +489,10 @@ impl HybridBucketCollector {
             // Process spilled flushes.
             for flush in bucket.completed_flushes {
                 let mmap_idx = mmaps.len();
-                let file = std::fs::File::open(&flush.temp_path).with_context(|| {
-                    format!("failed to open spill file {:?}", flush.temp_path)
-                })?;
-                let mmap = unsafe { Mmap::map(&file) }.with_context(|| {
-                    format!("failed to mmap spill file {:?}", flush.temp_path)
-                })?;
+                let file = std::fs::File::open(&flush.temp_path)
+                    .with_context(|| format!("failed to open spill file {:?}", flush.temp_path))?;
+                let mmap = unsafe { Mmap::map(&file) }
+                    .with_context(|| format!("failed to mmap spill file {:?}", flush.temp_path))?;
                 mmaps.push(mmap);
                 chrom_tables.push(flush.chrom_table);
                 temp_paths.push(flush.temp_path);
@@ -510,10 +512,7 @@ impl HybridBucketCollector {
             // Process in-memory rows.
             for (orig_idx, _sort_key, _insertion_seq, row) in bucket.active {
                 if orig_idx < task_count {
-                    slots[orig_idx] = Some(RowSlot::InMemory {
-                        group_index,
-                        row,
-                    });
+                    slots[orig_idx] = Some(RowSlot::InMemory { group_index, row });
                 }
             }
         }
@@ -723,7 +722,9 @@ mod tests {
         // Push enough rows to trigger at least one flush.
         for i in 0..5 {
             let row = make_test_row("chr1", i * 100, 2);
-            collector.push(row, i as usize, 0, (i as f64) * 1.5).unwrap();
+            collector
+                .push(row, i as usize, 0, (i as f64) * 1.5)
+                .unwrap();
         }
 
         collector.join_all().unwrap();
@@ -948,8 +949,7 @@ mod tests {
         let collector_asc = HybridBucketCollector::with_threshold(1, 1, 1, 1);
         // Need a fresh collector for ascending test.
         let mut c = HybridBucketCollector::with_threshold(1, 1, 1, 1);
-        c.push(make_tagged_row("chr1", 0, 10.0), 0, 0, 1.0)
-            .unwrap();
+        c.push(make_tagged_row("chr1", 0, 10.0), 0, 0, 1.0).unwrap();
         c.push(make_tagged_row("chr1", 100, 20.0), 1, 0, 1.0)
             .unwrap();
         c.push(make_tagged_row("chr1", 200, 30.0), 2, 0, 1.0)
@@ -1021,7 +1021,12 @@ mod tests {
 
         for i in 0..5 {
             collector
-                .push(make_tagged_row("chr1", i * 100, i as f64), i as usize, 0, i as f64)
+                .push(
+                    make_tagged_row("chr1", i * 100, i as f64),
+                    i as usize,
+                    0,
+                    i as f64,
+                )
                 .unwrap();
         }
 
@@ -1032,7 +1037,10 @@ mod tests {
             .iter()
             .flat_map(|b| b.completed_flushes.iter().map(|f| f.temp_path.clone()))
             .collect();
-        assert!(!temp_paths.is_empty(), "should have at least one spill file");
+        assert!(
+            !temp_paths.is_empty(),
+            "should have at least one spill file"
+        );
 
         // Re-create collector to run finalize (since join_all already consumed handles).
         // Actually, we already joined — finalize_sorted calls join_all again which is a no-op.
@@ -1080,9 +1088,9 @@ mod tests {
 
         // Should emit in orig_idx order: 0, 2, 4 (skipping 1 and 3).
         assert_eq!(emitted.len(), 3);
-        assert_eq!(emitted[0], (0, 0.0));   // orig_idx=0
-        assert_eq!(emitted[1], (0, 20.0));  // orig_idx=2
-        assert_eq!(emitted[2], (0, 40.0));  // orig_idx=4
+        assert_eq!(emitted[0], (0, 0.0)); // orig_idx=0
+        assert_eq!(emitted[1], (0, 20.0)); // orig_idx=2
+        assert_eq!(emitted[2], (0, 40.0)); // orig_idx=4
 
         assert_eq!(header.group_boundaries, vec![0, 3]);
     }
@@ -1140,9 +1148,9 @@ mod tests {
 
         // Original order: idx 0 (g0), skip 1, idx 2 (g0), idx 3 (g1)
         assert_eq!(emitted.len(), 3);
-        assert_eq!(emitted[0], (0, 0.0));   // orig_idx=0
-        assert_eq!(emitted[1], (0, 20.0));  // orig_idx=2
-        assert_eq!(emitted[2], (1, 30.0));  // orig_idx=3
+        assert_eq!(emitted[0], (0, 0.0)); // orig_idx=0
+        assert_eq!(emitted[1], (0, 20.0)); // orig_idx=2
+        assert_eq!(emitted[2], (1, 30.0)); // orig_idx=3
 
         // Group 0 has 2 rows, group 1 has 1 row.
         assert_eq!(header.group_boundaries, vec![0, 2, 3]);
@@ -1154,7 +1162,12 @@ mod tests {
 
         for i in 0..5u32 {
             collector
-                .push(make_tagged_row("chr1", i * 100, i as f64), i as usize, 0, 0.0)
+                .push(
+                    make_tagged_row("chr1", i * 100, i as f64),
+                    i as usize,
+                    0,
+                    0.0,
+                )
                 .unwrap();
         }
 
@@ -1248,8 +1261,7 @@ mod tests {
         let sort_keys = [5.0f64, 3.0, 7.0, 1.0, 9.0, 2.0, 8.0, 4.0];
 
         // Build ascending — push rows interleaved across groups.
-        let mut collector_asc =
-            HybridBucketCollector::with_threshold(n_groups, 1, 4, 100);
+        let mut collector_asc = HybridBucketCollector::with_threshold(n_groups, 1, 4, 100);
         let mut orig_idx = 0usize;
         for row_i in 0..n_rows_per_group {
             for group_i in 0..n_groups {
@@ -1332,8 +1344,7 @@ mod tests {
         }
 
         // Descending test — same data but sort_ascending=false.
-        let mut collector_desc =
-            HybridBucketCollector::with_threshold(n_groups, 1, 4, 100);
+        let mut collector_desc = HybridBucketCollector::with_threshold(n_groups, 1, 4, 100);
         orig_idx = 0;
         for row_i in 0..n_rows_per_group {
             for group_i in 0..n_groups {
@@ -1455,16 +1466,9 @@ mod tests {
         // Verify ascending sort order and special-value preservation.
         for (i, row) in emitted_rows.iter().enumerate() {
             let expected_tag = i as f64 * 10.0;
-            assert_eq!(
-                row.values[0], expected_tag,
-                "row {i}: tag value mismatch"
-            );
+            assert_eq!(row.values[0], expected_tag, "row {i}: tag value mismatch");
             assert!(row.values[1].is_nan(), "row {i}: NaN not preserved");
-            assert_eq!(
-                row.values[2],
-                f64::INFINITY,
-                "row {i}: +Inf not preserved"
-            );
+            assert_eq!(row.values[2], f64::INFINITY, "row {i}: +Inf not preserved");
             assert_eq!(
                 row.values[3],
                 f64::NEG_INFINITY,
@@ -1569,12 +1573,8 @@ mod tests {
                 // orig_idx is block-separated: gi * n_per_group + pos
                 let orig_idx = gi * n_per_group + pos;
                 let tag = orig_idx as f64;
-                let row = make_large_tagged_row(
-                    &format!("chr{}", gi + 1),
-                    pos as u32 * 100,
-                    tag,
-                    2,
-                );
+                let row =
+                    make_large_tagged_row(&format!("chr{}", gi + 1), pos as u32 * 100, tag, 2);
                 collector.push(row, orig_idx, gi, 0.0).unwrap();
             }
         }
@@ -1587,11 +1587,7 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(
-            emitted.len(),
-            task_count,
-            "all rows should be emitted"
-        );
+        assert_eq!(emitted.len(), task_count, "all rows should be emitted");
 
         // Verify group-contiguity: all group-0 rows first, then group-1, then group-2.
         let mut current_group = 0usize;
@@ -1615,10 +1611,7 @@ mod tests {
         }
 
         // Verify the last group's count.
-        let last_group_count = emitted
-            .iter()
-            .filter(|&&(g, _)| g == n_groups - 1)
-            .count();
+        let last_group_count = emitted.iter().filter(|&&(g, _)| g == n_groups - 1).count();
         assert_eq!(
             last_group_count, n_per_group,
             "last group should have exactly {n_per_group} rows"
