@@ -129,9 +129,6 @@ impl StreamingMatrixWriter {
     pub fn finish(mut self, header: &MatrixHeader) -> Result<()> {
         let final_payload = build_padded_header_payload(header)?;
 
-        // Disarm the Drop guard so the file is not deleted on success.
-        let _path = self.path.take();
-
         let encoder = self.encoder.take().expect("encoder present");
         let writer = encoder
             .finish()
@@ -141,6 +138,10 @@ impl StreamingMatrixWriter {
             .map_err(|err| err.into_error())
             .context("Failed to flush buffered streamed matrix member")?;
         let _ = rewrite_header_member(file, &final_payload)?;
+
+        // Disarm the Drop guard only after all fallible steps succeed,
+        // so that a partial matrix file is still cleaned up on failure.
+        let _path = self.path.take();
         Ok(())
     }
 
