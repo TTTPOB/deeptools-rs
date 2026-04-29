@@ -609,3 +609,231 @@ fn parse_block_values(
         _ => {}
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Build a 24-byte block header with the given parameters.
+    fn build_header(
+        chrom_start: u32,
+        chrom_end: u32,
+        item_step: u32,
+        item_span: u32,
+        block_type: u8,
+        item_count: u16,
+    ) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0u32.to_le_bytes()); // chrom_id (ignored)
+        buf.extend_from_slice(&chrom_start.to_le_bytes());
+        buf.extend_from_slice(&chrom_end.to_le_bytes());
+        buf.extend_from_slice(&item_step.to_le_bytes());
+        buf.extend_from_slice(&item_span.to_le_bytes());
+        buf.push(block_type);
+        buf.push(0); // reserved
+        buf.extend_from_slice(&item_count.to_le_bytes());
+        buf
+    }
+
+    // ── block type 1 (bedGraph) ──────────────────────────────────────────────
+
+    #[test]
+    fn bedgraph_normal_case() {
+        // Single item fully within query range [100, 300)
+        let mut raw = build_header(0, 1000, 0, 0, 1, 1);
+        raw.extend_from_slice(&100u32.to_le_bytes()); // start
+        raw.extend_from_slice(&200u32.to_le_bytes()); // end
+        raw.extend_from_slice(&1.5f32.to_le_bytes()); // value
+
+        let mut values = Vec::new();
+        parse_block_values(&raw, 100, 300, &mut values);
+
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0].start, 100);
+        assert_eq!(values[0].end, 200);
+        assert!((values[0].value - 1.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn bedgraph_items_partially_overlapping_query() {
+        // Three items: before, overlapping, after
+        let mut raw = build_header(0, 1000, 0, 0, 1, 3);
+        // Item 1: completely before query [500, 700) → should NOT appear
+        raw.extend_from_slice(&100u32.to_le_bytes());
+        raw.extend_from_slice(&200u32.to_le_bytes());
+        raw.extend_from_slice(&1.0f32.to_le_bytes());
+        // Item 2: overlaps query → should appear
+        raw.extend_from_slice(&600u32.to_le_bytes());
+        raw.extend_from_slice(&650u32.to_le_bytes());
+        raw.extend_from_slice(&2.0f32.to_le_bytes());
+        // Item 3: completely after query → should NOT appear
+        raw.extend_from_slice(&800u32.to_le_bytes());
+        raw.extend_from_slice(&900u32.to_le_bytes());
+        raw.extend_from_slice(&3.0f32.to_le_bytes());
+
+        let mut values = Vec::new();
+        parse_block_values(&raw, 500, 700, &mut values);
+
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0].start, 600);
+    }
+
+    #[test]
+    fn bedgraph_items_outside_query_range() {
+        // Items exist but query range does not overlap any of them.
+        let mut raw = build_header(0, 1000, 0, 0, 1, 2);
+        raw.extend_from_slice(&100u32.to_le_bytes());
+        raw.extend_from_slice(&200u32.to_le_bytes());
+        raw.extend_from_slice(&1.0f32.to_le_bytes());
+        raw.extend_from_slice(&300u32.to_le_bytes());
+        raw.extend_from_slice(&400u32.to_le_bytes());
+        raw.extend_from_slice(&2.0f32.to_le_bytes());
+
+        let mut values = Vec::new();
+        parse_block_values(&raw, 500, 600, &mut values);
+
+        assert!(values.is_empty());
+    }
+
+    #[test]
+    fn bedgraph_empty_block() {
+        // item_count = 0, so no values should be pushed.
+        let raw = build_header(0, 1000, 0, 0, 1, 0);
+
+        let mut values = Vec::new();
+        parse_block_values(&raw, 0, 1000, &mut values);
+
+        assert!(values.is_empty());
+    }
+
+    // ── block type 2 (variableStep) ─────────────────────────────────────────
+
+    #[test]
+    fn variable_step_normal_case() {
+        // item_span = 50; one item at start=200 → end=250, within query [100, 300)
+        let mut raw = build_header(0, 1000, 0, 50, 2, 1);
+        raw.extend_from_slice(&200u32.to_le_bytes()); // start
+        raw.extend_from_slice(&4.0f32.to_le_bytes()); // value
+
+        let mut values = Vec::new();
+        parse_block_values(&raw, 100, 300, &mut values);
+
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0].start, 200);
+        assert_eq!(values[0].end, 250);
+        assert!((values[0].value - 4.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn variable_step_query_filtering() {
+        // item_span = 10; two items, only one overlaps query [500, 600)
+        let mut raw = build_header(0, 1000, 0, 10, 2, 2);
+        // Item 1: [200, 210) → outside query
+        raw.extend_from_slice(&200u32.to_le_bytes());
+        raw.extend_from_slice(&1.0f32.to_le_bytes());
+        // Item 2: [550, 560) → inside query
+        raw.extend_from_slice(&550u32.to_le_bytes());
+        raw.extend_from_slice(&5.0f32.to_le_bytes());
+
+        let mut values = Vec::new();
+        parse_block_values(&raw, 500, 600, &mut values);
+
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0].start, 550);
+        assert_eq!(values[0].end, 560);
+    }
+
+    // ── block type 3 (fixedStep) ─────────────────────────────────────────────
+
+    #[test]
+    fn fixed_step_normal_case() {
+        // chrom_start=100, item_step=50, item_span=50, 3 items
+        // Positions: [100,150), [150,200), [200,250) — all within query [0, 300)
+        let mut raw = build_header(100, 250, 50, 50, 3, 3);
+        raw.extend_from_slice(&1.0f32.to_le_bytes());
+        raw.extend_from_slice(&2.0f32.to_le_bytes());
+        raw.extend_from_slice(&3.0f32.to_le_bytes());
+
+        let mut values = Vec::new();
+        parse_block_values(&raw, 0, 300, &mut values);
+
+        assert_eq!(values.len(), 3);
+        assert_eq!(values[0].start, 100);
+        assert_eq!(values[0].end, 150);
+        assert!((values[0].value - 1.0).abs() < 1e-6);
+        assert_eq!(values[1].start, 150);
+        assert_eq!(values[2].start, 200);
+    }
+
+    #[test]
+    fn fixed_step_query_filtering() {
+        // chrom_start=0, item_step=100, item_span=100, 5 items
+        // Positions: [0,100), [100,200), [200,300), [300,400), [400,500)
+        // Query [150, 300) overlaps items at [100,200) and [200,300) only:
+        //   [100,200): e_val=200 > 150 and s_val=100 < 300 → included
+        //   [200,300): e_val=300 > 150 and s_val=200 < 300 → included
+        //   [300,400): s_val=300 is NOT < query_end=300 → excluded
+        let mut raw = build_header(0, 500, 100, 100, 3, 5);
+        for v in 1..=5u32 {
+            raw.extend_from_slice(&(v as f32).to_le_bytes());
+        }
+
+        let mut values = Vec::new();
+        parse_block_values(&raw, 150, 300, &mut values);
+
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0].start, 100);
+        assert_eq!(values[0].end, 200);
+        assert_eq!(values[1].start, 200);
+        assert_eq!(values[1].end, 300);
+    }
+
+    // ── edge cases ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn raw_data_too_short() {
+        // Less than 24 bytes → early return, no values pushed.
+        let raw = vec![0u8; 10];
+        let mut values = Vec::new();
+        parse_block_values(&raw, 0, 1000, &mut values);
+        assert!(values.is_empty());
+    }
+
+    #[test]
+    fn block_entirely_before_query() {
+        // chrom_end (200) <= query_start (500) → early return
+        let raw = build_header(100, 200, 0, 0, 1, 1);
+        // Append one valid bedGraph item that would otherwise match
+        let mut raw = raw;
+        raw.extend_from_slice(&100u32.to_le_bytes());
+        raw.extend_from_slice(&150u32.to_le_bytes());
+        raw.extend_from_slice(&9.0f32.to_le_bytes());
+
+        let mut values = Vec::new();
+        parse_block_values(&raw, 500, 1000, &mut values);
+        assert!(values.is_empty());
+    }
+
+    #[test]
+    fn block_entirely_after_query() {
+        // chrom_start (800) >= query_end (500) → early return
+        let raw = build_header(800, 900, 0, 0, 1, 1);
+        let mut raw = raw;
+        raw.extend_from_slice(&800u32.to_le_bytes());
+        raw.extend_from_slice(&850u32.to_le_bytes());
+        raw.extend_from_slice(&9.0f32.to_le_bytes());
+
+        let mut values = Vec::new();
+        parse_block_values(&raw, 0, 500, &mut values);
+        assert!(values.is_empty());
+    }
+
+    #[test]
+    fn unknown_block_type() {
+        // block_type = 99 → falls through to `_ => {}`, no values pushed
+        let raw = build_header(0, 1000, 0, 0, 99, 1);
+        let mut values = Vec::new();
+        parse_block_values(&raw, 0, 1000, &mut values);
+        assert!(values.is_empty());
+    }
+}
