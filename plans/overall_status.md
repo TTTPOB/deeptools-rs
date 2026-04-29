@@ -1,5 +1,30 @@
 # Rust `computeMatrix` Reimplementation Plan
 
+## v0.3.0 Changes (2026-04-29)
+
+### Completed: Next Stages Implementation Plan
+All 5 tasks from `docs/superpowers/plans/2026-04-29-next-stages.md` are done:
+
+1. **Task 1: Remove `num_cpus` dependency** — replaced with `std::thread::available_parallelism`
+2. **Task 2: File spilling for large sorted matrices** (2a–2e)
+   - Spill module with row serialization/deserialization and ChromTable interning
+   - HybridBucketCollector with chunked flush, double-buffer, and back-pressure
+   - finalize_sorted (ascend/descend) and finalize_keep_order with mmap readback
+   - Unified to two execution paths: StreamOrdered + HybridBucket (removed InMemory path)
+   - sort=No now uses per-group I/O sort to guarantee group-contiguous output
+   - FileCollector extended with inline auxiliary writers (outFileNameMatrix, outFileSortedRegions)
+   - Removed: MatrixData, GroupBucketCollector, InMemoryCollector, write_outputs(), RunOutcome::Matrix, spawn_writer_thread
+   - Integration tests with injectable threshold for spilling verification
+3. **Task 3: Matrix comparison dev binary** (`compare_matrix`) — supports plain/gzip/multi-member gzip, subcommands: header, values, diff
+4. **Task 4: Rust integration tests** — 10 Python compatibility scenarios in `tests/python_compatibility.rs` using `compare_matrix diff`
+5. **Task 5: Improve profile_bench.sh** — added warm-cache run with isolated output
+
+### Bug Fixes
+- Fixed `scale` header field serialization: now emits integer when value is whole number (matching Python)
+- Added u16 overflow protection to ChromTable::intern
+
+---
+
 ## Objectives
 - Maintain CLI parity with DeepTools `computeMatrix` (`reference-point` and `scale-regions`) including flag spelling, defaults, aliases, mutually exclusive groups, and help semantics. Any unavoidable deviation must be documented alongside user-visible implications.
 - Reproduce DeepTools matrix outputs numerically within an absolute tolerance of ≤5e-6 (JSON header + BED-like rows) for supported options so that downstream tools (`plotHeatmap`, `plotProfile`, `computeMatrixOperations`) remain interoperable.
