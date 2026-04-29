@@ -42,10 +42,6 @@ pub struct SharedBlockCache {
 }
 
 impl SharedBlockCache {
-    pub fn new() -> Self {
-        Self::with_capacity(DEFAULT_PER_FILE_BLOCK_CACHE_ENTRIES)
-    }
-
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             cache: (capacity > 0).then(|| Cache::new(capacity)),

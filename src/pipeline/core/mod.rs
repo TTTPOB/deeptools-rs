@@ -9,7 +9,7 @@ pub(crate) mod spill_format;
 pub mod traits;
 mod worker;
 
-pub use collector::{FileCollector, RowCollector};
+pub use collector::FileCollector;
 pub use executor::execute_mode;
 pub use regions::{
     Group, RegionTask, derive_sample_labels, load_groups, normalize_sort_sample_indices,

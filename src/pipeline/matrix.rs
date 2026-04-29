@@ -216,13 +216,6 @@ pub struct MatrixRow {
     pub exon_coords: Option<Vec<(u32, u32)>>,
 }
 
-impl MatrixRow {
-    /// Returns a clone of the flat values in sample-major order.
-    pub fn flattened_values(&self) -> Vec<f64> {
-        self.values.clone()
-    }
-}
-
 /// Compute cumulative group boundaries from per-group row counts.
 pub fn group_boundaries_from_counts(counts: &[usize]) -> Vec<usize> {
     let mut boundaries = Vec::with_capacity(counts.len() + 1);
@@ -240,18 +233,6 @@ pub fn sample_boundaries_uniform(sample_count: usize, bins_per_sample: usize) ->
     let mut boundaries = Vec::with_capacity(sample_count + 1);
     for index in 0..=sample_count {
         boundaries.push(index * bins_per_sample);
-    }
-    boundaries
-}
-
-/// Compute cumulative sample boundaries from per-sample bin counts.
-pub fn sample_boundaries_from_counts(bin_counts: &[usize]) -> Vec<usize> {
-    let mut boundaries = Vec::with_capacity(bin_counts.len() + 1);
-    let mut running = 0usize;
-    boundaries.push(0);
-    for count in bin_counts {
-        running += *count;
-        boundaries.push(running);
     }
     boundaries
 }

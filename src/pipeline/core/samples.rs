@@ -1,9 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 
-use crate::io::{BigWigReader, SharedBigWigReader};
+use crate::io::{BigWigFile, BigWigReader};
 
 pub struct Sample {
     path: PathBuf,
@@ -11,22 +11,8 @@ pub struct Sample {
 }
 
 impl Sample {
-    pub fn open(path: &Path) -> Result<Self> {
-        let reader = BigWigReader::open(path)
-            .with_context(|| format!("Failed to open bigWig file '{}'", path.display()))?;
-
-        Ok(Self {
-            path: path.to_path_buf(),
-            reader,
-        })
-    }
-
     pub fn path(&self) -> &Path {
         &self.path
-    }
-
-    pub fn reader(&self) -> &BigWigReader {
-        &self.reader
     }
 
     pub fn reader_mut(&mut self) -> &mut BigWigReader {
@@ -36,7 +22,7 @@ impl Sample {
     /// Create a Sample from an already-opened shared reader.  The underlying
     /// mmap and metadata are shared via Arc; only the per-worker caches are
     /// fresh.
-    pub fn from_shared(path: PathBuf, shared: Arc<SharedBigWigReader>) -> Self {
+    pub fn from_shared(path: PathBuf, shared: Arc<BigWigFile>) -> Self {
         Self {
             path,
             reader: BigWigReader::from_shared(shared),
@@ -69,30 +55,12 @@ pub struct WorkerSamples {
 }
 
 impl WorkerSamples {
-    pub fn new(paths: Arc<Vec<PathBuf>>) -> Self {
-        let samples = open_samples(paths.as_ref()).map_err(|err| err.to_string());
-        // Compute max uncompress_buf_size across all successfully opened samples
-        let max_buf_size = match &samples {
-            Ok(s) => s
-                .iter()
-                .map(|sample| sample.reader().shared().uncompress_buf_size())
-                .max()
-                .unwrap_or(0),
-            Err(_) => 0,
-        };
-        Self {
-            samples,
-            work_buf: Vec::with_capacity(max_buf_size),
-            decode_buf: Vec::new(),
-        }
-    }
-
     /// Create per-worker Sample instances from pre-opened shared readers.
     /// Each worker gets its own caches but shares the mmap-backed immutable
     /// state, avoiding redundant mmap entries per thread.
     pub fn from_shared(
         paths: Arc<Vec<PathBuf>>,
-        shared_readers: Arc<Vec<Arc<SharedBigWigReader>>>,
+        shared_readers: Arc<Vec<Arc<BigWigFile>>>,
     ) -> Self {
         let max_buf_size = shared_readers
             .iter()
@@ -111,13 +79,6 @@ impl WorkerSamples {
         }
     }
 
-    pub fn samples(&mut self) -> Result<&mut Vec<Sample>> {
-        match &mut self.samples {
-            Ok(samples) => Ok(samples),
-            Err(message) => Err(anyhow!(message.clone())),
-        }
-    }
-
     /// Return mutable references to both the sample list and the shared
     /// decompression buffers.  This avoids borrow-checker issues that
     /// would arise from separate accessors for samples and buffers.
@@ -127,12 +88,4 @@ impl WorkerSamples {
             Err(message) => Err(anyhow!(message.clone())),
         }
     }
-}
-
-fn open_samples(paths: &[PathBuf]) -> Result<Vec<Sample>> {
-    let mut samples = Vec::with_capacity(paths.len());
-    for path in paths {
-        samples.push(Sample::open(path)?);
-    }
-    Ok(samples)
 }

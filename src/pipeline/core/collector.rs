@@ -8,22 +8,6 @@ use crate::io::writers::StreamingMatrixWriter;
 use crate::io::writers::auxiliary::{write_plain_values_row, write_sorted_region_row};
 use crate::pipeline::matrix::{MatrixHeader, MatrixRow};
 
-pub trait RowCollector: Send {
-    type Output: Send;
-
-    fn on_row(&mut self, group_index: usize, row: MatrixRow) -> Result<()>;
-    fn finalize(self, header: MatrixHeader) -> Result<Self::Output>;
-
-    /// Discard this collector without finalising.  The default implementation
-    /// simply drops `self`, which is appropriate for in-memory collectors.
-    /// File-backed collectors should override this to release I/O resources.
-    fn abort(self)
-    where
-        Self: Sized,
-    {
-    }
-}
-
 /// Information needed to rewrite the values header line 1 at finalize time.
 struct ValuesHeaderInfo {
     /// Byte length of the original header line 1 (including newline).
@@ -101,12 +85,8 @@ impl FileCollector {
     pub fn abort(self) {
         self.writer.abort();
     }
-}
 
-impl RowCollector for FileCollector {
-    type Output = ();
-
-    fn on_row(&mut self, group_index: usize, row: MatrixRow) -> Result<()> {
+    pub fn on_row(&mut self, group_index: usize, row: MatrixRow) -> Result<()> {
         // Write main gzip row.
         self.writer.write_row(&row)?;
 
@@ -133,7 +113,7 @@ impl RowCollector for FileCollector {
         Ok(())
     }
 
-    fn finalize(mut self, header: MatrixHeader) -> Result<Self::Output> {
+    pub fn finalize(mut self, header: MatrixHeader) -> Result<()> {
         // Rewrite values header line 1 if needed.
         if let (Some(w), Some(info)) = (&mut self.values_writer, &self.values_header_info) {
             w.flush()?;
@@ -157,10 +137,6 @@ impl RowCollector for FileCollector {
 
         // Finalize main gzip.
         self.writer.finish(&header)
-    }
-
-    fn abort(self) {
-        self.writer.abort();
     }
 }
 

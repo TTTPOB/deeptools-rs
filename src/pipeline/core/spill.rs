@@ -68,10 +68,7 @@ struct FlushResult {
 /// Each row's `(orig_idx, sort_key, insertion_seq)` is recorded in the
 /// returned `SpillIndex` vector. The input Vec is cleared but its capacity
 /// is retained so the caller can reuse it as a spare buffer.
-fn flush_chunk(
-    mut rows: Vec<(usize, f64, u32, MatrixRow)>,
-    group_index: usize,
-) -> Result<FlushResult> {
+fn flush_chunk(mut rows: Vec<(usize, f64, u32, MatrixRow)>) -> Result<FlushResult> {
     let mut chrom_table = ChromTable::new();
     let mut indices = Vec::with_capacity(rows.len());
     let mut ser_buf = Vec::with_capacity(SPILL_BUF_CAPACITY);
@@ -92,7 +89,6 @@ fn flush_chunk(
 
         indices.push(SpillIndex {
             orig_idx,
-            group_index,
             sort_key,
             insertion_seq,
             file_offset,
@@ -206,8 +202,7 @@ impl CollectorBucket {
         let full_buf = std::mem::replace(&mut self.active, replacement);
         self.estimated_bytes = 0;
 
-        let group_index = self.group_index;
-        let handle = std::thread::spawn(move || flush_chunk(full_buf, group_index));
+        let handle = std::thread::spawn(move || flush_chunk(full_buf));
         self.flush_handles.push(handle);
 
         Ok(())
@@ -711,10 +706,10 @@ mod tests {
             "expected at least one flush with low threshold"
         );
 
-        // Verify that all spill indices have the correct group_index.
+        // Verify that all spill indices have valid orig_idx.
         for flush in &bucket.completed_flushes {
             for idx in &flush.indices {
-                assert_eq!(idx.group_index, 0);
+                assert!(idx.orig_idx < n_rows as usize, "orig_idx out of range");
             }
         }
 

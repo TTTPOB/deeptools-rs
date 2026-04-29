@@ -7,13 +7,13 @@ use rayon::prelude::*;
 
 use crate::config::{GeneralOptions, SortRegions};
 use crate::io::readers::block_cache::compute_per_file_block_cache_capacity;
-use crate::io::{BedRecord, SharedBigWigReader};
+use crate::io::{BedRecord, BigWigFile};
 use crate::pipeline::matrix::{MatrixHeader, compute_sort_metric};
 
 use super::coalesce::{
     COALESCE_CLAMP_MAX, CoalesceStrategy, create_batches, estimate_coalesce_gap,
 };
-use super::collector::{FileCollector, RowCollector};
+use super::collector::FileCollector;
 use super::regions::{RegionTask, normalize_sort_sample_indices};
 use super::samples::WorkerSamples;
 use super::spill::HybridBucketCollector;
@@ -167,7 +167,7 @@ where
             .map(|(sample_index, path)| {
                 let cache_capacity =
                     compute_per_file_block_cache_capacity(sample_count_for_cache, sample_index);
-                SharedBigWigReader::open_with_block_cache_capacity(path, cache_capacity)
+                BigWigFile::open_with_block_cache_capacity(path, cache_capacity)
                     .map(Arc::new)
                     .with_context(|| format!("Failed to open bigWig file '{}'", path.display()))
             })

@@ -16,9 +16,6 @@ use crate::pipeline::matrix::MatrixRow;
 pub(crate) struct SpillIndex {
     /// Original input order index (for keep-order emit).
     pub(crate) orig_idx: usize,
-    /// Which group bucket this row belongs to.
-    #[allow(dead_code)]
-    pub(crate) group_index: usize,
     /// Pre-computed sort key (e.g. mean of values for sort-by-mean).
     pub(crate) sort_key: f64,
     /// Per-bucket push order, used as a stable tie-break when sort keys are equal.

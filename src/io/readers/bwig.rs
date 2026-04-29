@@ -115,7 +115,7 @@ fn binary_search_chrom_length(chroms: &[ChromInfo], name: &str) -> Option<u32> {
         .map(|idx| chroms[idx].length)
 }
 
-pub struct SharedBigWigReader {
+pub struct BigWigFile {
     file: File,
     uncompress_buf_size: usize,
     chroms: Vec<ChromInfo>,
@@ -125,15 +125,7 @@ pub struct SharedBigWigReader {
     cir_cache: Cache<u64, Arc<CachedCirNode>>,
 }
 
-impl SharedBigWigReader {
-    /// Open a bigWig file with a private block cache using the default per-file capacity.
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, BigWigReadError> {
-        Self::open_with_block_cache_capacity(
-            path,
-            super::block_cache::DEFAULT_PER_FILE_BLOCK_CACHE_ENTRIES,
-        )
-    }
-
+impl BigWigFile {
     /// Open a bigWig file with a per-file block cache of the given capacity.
     pub fn open_with_block_cache_capacity(
         path: impl AsRef<Path>,
@@ -186,10 +178,6 @@ impl SharedBigWigReader {
             block_cache,
             cir_cache: Cache::new(SHARED_CIR_CACHE_ENTRIES),
         })
-    }
-
-    pub fn block_cache(&self) -> &Arc<SharedBlockCache> {
-        &self.block_cache
     }
 
     pub fn chroms(&self) -> &[ChromInfo] {
@@ -362,9 +350,9 @@ impl SharedBigWigReader {
 
 // ── Per-worker BigWig reader ──────────────────────────────────────────────
 // Each rayon worker gets its own instance with private caches while sharing
-// the file handle and parsed metadata via Arc<SharedBigWigReader>.
+// the file handle and parsed metadata via Arc<BigWigFile>.
 pub struct BigWigReader {
-    shared: Arc<SharedBigWigReader>,
+    shared: Arc<BigWigFile>,
     values_buf: Vec<BigWigValue>,
     blocks_buf: Vec<Block>,
     remaining_buf: VecDeque<u64>,
@@ -372,16 +360,10 @@ pub struct BigWigReader {
 }
 
 impl BigWigReader {
-    /// Open a bigWig file, wrapping it in a shared + per-worker pair.
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, BigWigReadError> {
-        let shared = SharedBigWigReader::open(path)?;
-        Ok(Self::from_shared(Arc::new(shared)))
-    }
-
     /// Create a per-worker reader sharing the file handle and metadata of an
-    /// already-opened [`SharedBigWigReader`]. Each worker gets its own
+    /// already-opened [`BigWigFile`]. Each worker gets its own
     /// CIR-node and block caches.
-    pub fn from_shared(shared: Arc<SharedBigWigReader>) -> Self {
+    pub fn from_shared(shared: Arc<BigWigFile>) -> Self {
         Self {
             shared,
             values_buf: Vec::new(),
@@ -391,11 +373,7 @@ impl BigWigReader {
         }
     }
 
-    pub fn chroms(&self) -> &[ChromInfo] {
-        self.shared.chroms()
-    }
-
-    pub fn shared(&self) -> &Arc<SharedBigWigReader> {
+    pub fn shared(&self) -> &Arc<BigWigFile> {
         &self.shared
     }
 
