@@ -134,7 +134,7 @@ mod tests {
 
     #[test]
     fn aggregate_slice_ignores_nans() {
-        let data = [1.0, f32::NAN, 3.0, 5.0];
+        let data = [1.0, f64::NAN, 3.0, 5.0];
         let mean = aggregate_slice(&data, AverageTypeBins::Mean).unwrap();
         assert!((mean - 3.0).abs() < 1e-6);
 
@@ -143,5 +143,17 @@ mod tests {
 
         let median = aggregate_slice(&data, AverageTypeBins::Median).unwrap();
         assert_eq!(median, 3.0);
+    }
+
+    #[test]
+    fn aggregate_mean_f64_precision() {
+        let val = 35.92f64;
+        let data = vec![val; 9];
+        let mean = aggregate_slice(&data, AverageTypeBins::Mean).unwrap();
+        assert!(
+            (mean - val).abs() < 1e-10,
+            "f64 mean drift too large: expected {val}, got {mean}, delta {}",
+            (mean - val).abs()
+        );
     }
 }

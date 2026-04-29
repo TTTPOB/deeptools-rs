@@ -11,11 +11,11 @@ use super::samples::Sample;
 use super::coalesce::CoalescedBatch;
 
 thread_local! {
-    static COVERAGE_POOL: std::cell::RefCell<Vec<Vec<f32>>> =
+    static COVERAGE_POOL: std::cell::RefCell<Vec<Vec<f64>>> =
         std::cell::RefCell::new(Vec::new());
 }
 
-fn take_coverage_buffers(sample_count: usize, window_len: usize, default_fill: f32) -> Vec<Vec<f32>> {
+fn take_coverage_buffers(sample_count: usize, window_len: usize, default_fill: f64) -> Vec<Vec<f64>> {
     COVERAGE_POOL.with(|pool| {
         let mut bufs = pool.borrow_mut();
         bufs.resize_with(sample_count, Vec::new);
@@ -27,7 +27,7 @@ fn take_coverage_buffers(sample_count: usize, window_len: usize, default_fill: f
     })
 }
 
-fn return_coverage_buffers(bufs: Vec<Vec<f32>>) {
+fn return_coverage_buffers(bufs: Vec<Vec<f64>>) {
     COVERAGE_POOL.with(|pool| {
         *pool.borrow_mut() = bufs;
     });
@@ -50,7 +50,7 @@ pub(super) fn index_from_coordinate(value: i64, base: i64, window_len: usize) ->
     idx.min(window_len)
 }
 
-pub(super) fn aggregate_slice(slice: &[f32], average_type: AverageTypeBins) -> Option<f32> {
+pub(super) fn aggregate_slice(slice: &[f64], average_type: AverageTypeBins) -> Option<f64> {
     let len = slice.len();
     if len == 0 {
         return None;
@@ -58,7 +58,7 @@ pub(super) fn aggregate_slice(slice: &[f32], average_type: AverageTypeBins) -> O
 
     match average_type {
         AverageTypeBins::Mean => {
-            let mut sum = 0.0f32;
+            let mut sum = 0.0f64;
             let mut count = 0u32;
             for &value in slice {
                 if !value.is_nan() {
@@ -66,10 +66,10 @@ pub(super) fn aggregate_slice(slice: &[f32], average_type: AverageTypeBins) -> O
                     count += 1;
                 }
             }
-            if count == 0 { None } else { Some(sum / count as f32) }
+            if count == 0 { None } else { Some(sum / count as f64) }
         }
         AverageTypeBins::Sum => {
-            let mut sum = 0.0f32;
+            let mut sum = 0.0f64;
             let mut found = false;
             for &value in slice {
                 if !value.is_nan() {
@@ -80,7 +80,7 @@ pub(super) fn aggregate_slice(slice: &[f32], average_type: AverageTypeBins) -> O
             if found { Some(sum) } else { None }
         }
         AverageTypeBins::Min => {
-            let mut min = f32::INFINITY;
+            let mut min = f64::INFINITY;
             let mut found = false;
             for &value in slice {
                 if !value.is_nan() {
@@ -91,7 +91,7 @@ pub(super) fn aggregate_slice(slice: &[f32], average_type: AverageTypeBins) -> O
             if found { Some(min) } else { None }
         }
         AverageTypeBins::Max => {
-            let mut max = f32::NEG_INFINITY;
+            let mut max = f64::NEG_INFINITY;
             let mut found = false;
             for &value in slice {
                 if !value.is_nan() {
@@ -102,7 +102,7 @@ pub(super) fn aggregate_slice(slice: &[f32], average_type: AverageTypeBins) -> O
             if found { Some(max) } else { None }
         }
         AverageTypeBins::Std => {
-            let mut sum = 0.0f32;
+            let mut sum = 0.0f64;
             let mut count = 0u32;
             for &value in slice {
                 if !value.is_nan() {
@@ -113,18 +113,18 @@ pub(super) fn aggregate_slice(slice: &[f32], average_type: AverageTypeBins) -> O
             if count == 0 {
                 return None;
             }
-            let mean = sum / count as f32;
+            let mean = sum / count as f64;
             let mut variance_sum = 0.0f64;
             for &value in slice {
                 if !value.is_nan() {
-                    let delta = value as f64 - mean as f64;
+                    let delta = value - mean;
                     variance_sum += delta * delta;
                 }
             }
-            Some((variance_sum / count as f64).sqrt() as f32)
+            Some((variance_sum / count as f64).sqrt())
         }
         AverageTypeBins::Median => {
-            let mut values: Vec<f32> = slice
+            let mut values: Vec<f64> = slice
                 .iter()
                 .copied()
                 .filter(|v| !v.is_nan())
@@ -143,7 +143,7 @@ pub(super) fn aggregate_slice(slice: &[f32], average_type: AverageTypeBins) -> O
     }
 }
 
-fn should_skip_row_flat(values: &[f32], general: &GeneralOptions) -> bool {
+fn should_skip_row_flat(values: &[f64], general: &GeneralOptions) -> bool {
     if general.skip_zeros {
         let mut all_zero = true;
         for &value in values {
@@ -164,7 +164,7 @@ fn should_skip_row_flat(values: &[f32], general: &GeneralOptions) -> bool {
         if values
             .iter()
             .filter(|value| !value.is_nan())
-            .any(|value| (*value as f64) <= min_threshold)
+            .any(|value| *value <= min_threshold)
         {
             return true;
         }
@@ -174,7 +174,7 @@ fn should_skip_row_flat(values: &[f32], general: &GeneralOptions) -> bool {
         if values
             .iter()
             .filter(|value| !value.is_nan())
-            .any(|value| (*value as f64) >= max_threshold)
+            .any(|value| *value >= max_threshold)
         {
             return true;
         }
@@ -189,30 +189,30 @@ fn compute_sample_bins<P: RegionPlan>(
     plan: &P,
     general: &GeneralOptions,
     nan_after_end: bool,
-) -> Result<Vec<f32>> {
+) -> Result<Vec<f64>> {
     let sample_path = sample.path().to_path_buf();
     let bin_count = plan.bins().len();
     let chrom_length = match sample.chrom_length(&record.chrom) {
         Some(length) => length,
         None => {
-            return Ok(vec![f32::NAN; bin_count]);
+            return Ok(vec![f64::NAN; bin_count]);
         }
     };
 
     let window_span = plan.window_end() - plan.window_start();
     if window_span <= 0 {
-        return Ok(vec![f32::NAN; bin_count]);
+        return Ok(vec![f64::NAN; bin_count]);
     }
 
     let window_len = usize::try_from(window_span).expect("region plan window span exceeds usize");
     let default_fill = if general.missing_data_as_zero {
-        0.0f32
+        0.0f64
     } else {
-        f32::NAN
+        f64::NAN
     };
 
     thread_local! {
-        static COVERAGE_BUF: std::cell::RefCell<Vec<f32>> = std::cell::RefCell::new(Vec::new());
+        static COVERAGE_BUF: std::cell::RefCell<Vec<f64>> = std::cell::RefCell::new(Vec::new());
     }
 
     let bins = COVERAGE_BUF.with(|cell| {
@@ -251,7 +251,7 @@ fn compute_sample_bins<P: RegionPlan>(
                         .expect("relative start offset exceeded usize");
                     let rel_end = usize::try_from(overlap_end - base_offset)
                         .expect("relative end offset exceeded usize");
-                    buf[rel_start..rel_end].fill(interval.value);
+                    buf[rel_start..rel_end].fill(f64::from(interval.value));
                 }
             }
         } else {
@@ -282,7 +282,7 @@ fn compute_sample_bins<P: RegionPlan>(
                         .expect("relative start offset exceeded usize");
                     let rel_end = usize::try_from(overlap_end - base_offset)
                         .expect("relative end offset exceeded usize");
-                    buf[rel_start..rel_end].fill(interval.value);
+                    buf[rel_start..rel_end].fill(f64::from(interval.value));
                 }
             }
         }
@@ -302,20 +302,20 @@ fn compute_sample_bins<P: RegionPlan>(
                 value = Some(0.0);
             }
 
-            let mut value = value.unwrap_or(f32::NAN);
+            let mut value = value.unwrap_or(f64::NAN);
 
             if nan_after_end && bin.beyond_region() {
-                value = f32::NAN;
+                value = f64::NAN;
             }
 
             if value.is_finite() {
-                value *= general.scale_factor as f32;
+                value *= general.scale_factor;
             }
 
             bins.push(value);
         }
 
-        Ok::<Vec<f32>, anyhow::Error>(bins)
+        Ok::<Vec<f64>, anyhow::Error>(bins)
     })?;
 
     Ok(bins)
@@ -327,7 +327,7 @@ pub fn compute_row<P: RegionPlan>(
     plan: &P,
     general: &GeneralOptions,
     nan_after_end: bool,
-) -> Result<Option<(Vec<f32>, usize, usize)>> {
+) -> Result<Option<(Vec<f64>, usize, usize)>> {
     let sample_count = samples.len();
     let bin_count = plan.bins().len();
     let mut all_values = Vec::with_capacity(sample_count * bin_count);
@@ -386,9 +386,9 @@ pub(super) fn process_batch<M: PipelineMode>(
         usize::try_from(window_span).context("batch window span exceeds usize")?;
 
     let default_fill = if general.missing_data_as_zero {
-        0.0f32
+        0.0f64
     } else {
-        f32::NAN
+        f64::NAN
     };
 
     let chrom = &batch.items[0].2.chrom;
@@ -433,7 +433,7 @@ pub(super) fn process_batch<M: PipelineMode>(
                 .min(window_span)
                 .max(0);
             if rs < re {
-                cov[rs as usize..re as usize].fill(v.value);
+                cov[rs as usize..re as usize].fill(f64::from(v.value));
             }
         }
     }
@@ -479,14 +479,14 @@ pub(super) fn process_batch<M: PipelineMode>(
                     value = Some(0.0);
                 }
 
-                let mut value = value.unwrap_or(f32::NAN);
+                let mut value = value.unwrap_or(f64::NAN);
 
                 if nan_after_end && bin.beyond_region() {
-                    value = f32::NAN;
+                    value = f64::NAN;
                 }
 
                 if value.is_finite() {
-                    value *= general.scale_factor as f32;
+                    value *= general.scale_factor;
                 }
 
                 all_values.push(value);

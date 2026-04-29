@@ -110,7 +110,7 @@ impl PipelineMode for ScaleRegionsMode {
     fn postprocess_row(
         &self,
         record: BedRecord,
-        mut values: Vec<f32>,
+        mut values: Vec<f64>,
         sample_count: usize,
         bin_count: usize,
         _metadata: &Self::Metadata,

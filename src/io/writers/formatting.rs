@@ -48,7 +48,7 @@ pub fn write_matrix_row<W: Write>(writer: &mut W, row: &MatrixRow) -> Result<()>
         if let Some(raw) = row.record.score_raw.as_deref() {
             buffer.extend_from_slice(raw.as_bytes());
         } else if let Some(score) = row.record.score {
-            write_matrix_value(&mut *buffer, score)?;
+            write_matrix_value(&mut *buffer, f64::from(score))?;
         } else {
             buffer.push(b'.');
         }
@@ -88,7 +88,7 @@ pub fn write_plain_row<W: Write>(writer: &mut W, row: &MatrixRow) -> Result<()> 
     Ok(())
 }
 
-pub fn write_matrix_value<W: Write>(writer: &mut W, value: f32) -> io::Result<()> {
+pub fn write_matrix_value<W: Write>(writer: &mut W, value: f64) -> io::Result<()> {
     if value.is_nan() {
         return writer.write_all(b"nan");
     }
@@ -101,12 +101,12 @@ pub fn write_matrix_value<W: Write>(writer: &mut W, value: f32) -> io::Result<()
         };
     }
 
-    if value.is_finite() && value > -1e7 && value < 1e7 {
-        let scaled = (value as f64 * 1_000_000.0).round_ties_even();
+    if value > -1e7 && value < 1e7 {
+        let scaled = (value * 1_000_000.0).round_ties_even();
         return write_scaled_i64(writer, scaled as i64);
     }
 
-    let scaled = (value as f64 * 1_000_000.0).round_ties_even();
+    let scaled = (value * 1_000_000.0).round_ties_even();
     if !scaled.is_finite() || scaled.abs() > i128::MAX as f64 {
         let fallback = format!("{value:.6}");
         return writer.write_all(fallback.as_bytes());
@@ -173,7 +173,7 @@ pub fn write_scaled_i128<W: Write>(writer: &mut W, scaled: i128) -> io::Result<(
     writer.write_all(&frac_digits)
 }
 
-pub fn format_plain_value(value: f32) -> String {
+pub fn format_plain_value(value: f64) -> String {
     if value.is_nan() {
         "nan".to_string()
     } else {
@@ -185,7 +185,7 @@ pub fn format_plain_value(value: f32) -> String {
 mod tests {
     use super::*;
 
-    fn fmt_value(value: f32) -> String {
+    fn fmt_value(value: f64) -> String {
         let mut buf = Vec::new();
         write_matrix_value(&mut buf, value).unwrap();
         String::from_utf8(buf).unwrap()
@@ -193,9 +193,9 @@ mod tests {
 
     #[test]
     fn nan_and_infinity() {
-        assert_eq!(fmt_value(f32::NAN), "nan");
-        assert_eq!(fmt_value(f32::INFINITY), "inf");
-        assert_eq!(fmt_value(f32::NEG_INFINITY), "-inf");
+        assert_eq!(fmt_value(f64::NAN), "nan");
+        assert_eq!(fmt_value(f64::INFINITY), "inf");
+        assert_eq!(fmt_value(f64::NEG_INFINITY), "-inf");
     }
 
     #[test]
@@ -220,7 +220,7 @@ mod tests {
 
     #[test]
     fn large_still_in_i64_range() {
-        let v = 9_999_999.0f32;
+        let v = 9_999_999.0f64;
         let result = fmt_value(v);
         assert!(result.starts_with("9999999"));
         assert!(result.ends_with("000000"));
@@ -228,7 +228,7 @@ mod tests {
 
     #[test]
     fn very_large_falls_back_to_i128() {
-        let v = 1e8f32;
+        let v = 1e8f64;
         let result = fmt_value(v);
         assert!(!result.contains("nan") && !result.contains("inf"));
     }

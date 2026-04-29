@@ -127,7 +127,7 @@ mod tests {
     use crate::pipeline::matrix::MatrixHeader;
     use std::sync::Arc;
 
-    fn dummy_row(name: &str, values: Vec<f32>) -> MatrixRow {
+    fn dummy_row(name: &str, values: Vec<f64>) -> MatrixRow {
         MatrixRow {
             record: BedRecord {
                 chrom: Arc::from("chr1"),

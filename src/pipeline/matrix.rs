@@ -199,7 +199,7 @@ impl<'a> MatrixHeaderBuilder<'a> {
 pub struct MatrixRow {
     pub record: BedRecord,
     /// Flattened values in sample-major order: sample 0 bins, sample 1 bins, ...
-    pub values: Vec<f32>,
+    pub values: Vec<f64>,
     pub sample_count: usize,
     pub bin_count: usize,
     /// When metagene mode is used, stores the exon coordinates as (start, end) pairs
@@ -209,7 +209,7 @@ pub struct MatrixRow {
 
 impl MatrixRow {
     /// Returns a clone of the flat values in sample-major order.
-    pub fn flattened_values(&self) -> Vec<f32> {
+    pub fn flattened_values(&self) -> Vec<f64> {
         self.values.clone()
     }
 }
@@ -299,7 +299,7 @@ impl MatrixData {
             }
         }
 
-        let metrics: Vec<f32> = self
+        let metrics: Vec<f64> = self
             .rows
             .iter()
             .map(|row| compute_sort_metric(row, sort_using, sample_list))
@@ -398,25 +398,25 @@ fn compute_sort_metric(
     row: &MatrixRow,
     sort_using: SortUsing,
     sample_list: Option<&[usize]>,
-) -> f32 {
+) -> f64 {
     match sort_using {
-        SortUsing::RegionLength => row.record.length() as f32,
+        SortUsing::RegionLength => row.record.length() as f64,
         SortUsing::Sum => {
             let values = collect_values(row, sample_list);
-            values.into_iter().fold(0.0f32, |acc, value| acc + value)
+            values.into_iter().fold(0.0f64, |acc, value| acc + value)
         }
         SortUsing::Mean => {
             let values = collect_values(row, sample_list);
             if values.is_empty() {
-                f32::NAN
+                f64::NAN
             } else {
-                values.iter().copied().sum::<f32>() / values.len() as f32
+                values.iter().copied().sum::<f64>() / values.len() as f64
             }
         }
         SortUsing::Median => {
             let mut values = collect_values(row, sample_list);
             if values.is_empty() {
-                f32::NAN
+                f64::NAN
             } else {
                 values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
                 let mid = values.len() / 2;
@@ -430,27 +430,27 @@ fn compute_sort_metric(
         SortUsing::Max => {
             let values = collect_values(row, sample_list);
             if values.is_empty() {
-                f32::NAN
+                f64::NAN
             } else {
                 values
                     .into_iter()
-                    .fold(f32::NEG_INFINITY, |acc, value| acc.max(value))
+                    .fold(f64::NEG_INFINITY, |acc, value| acc.max(value))
             }
         }
         SortUsing::Min => {
             let values = collect_values(row, sample_list);
             if values.is_empty() {
-                f32::NAN
+                f64::NAN
             } else {
                 values
                     .into_iter()
-                    .fold(f32::INFINITY, |acc, value| acc.min(value))
+                    .fold(f64::INFINITY, |acc, value| acc.min(value))
             }
         }
     }
 }
 
-fn collect_values(row: &MatrixRow, sample_list: Option<&[usize]>) -> Vec<f32> {
+fn collect_values(row: &MatrixRow, sample_list: Option<&[usize]>) -> Vec<f64> {
     let bin_count = row.bin_count;
     let mut values = Vec::new();
     match sample_list {
@@ -470,7 +470,7 @@ fn collect_values(row: &MatrixRow, sample_list: Option<&[usize]>) -> Vec<f32> {
     values
 }
 
-fn compare_ascending(left: f32, right: f32) -> Ordering {
+fn compare_ascending(left: f64, right: f64) -> Ordering {
     match (left.is_nan(), right.is_nan()) {
         (true, true) => Ordering::Equal,
         (true, false) => Ordering::Greater,
