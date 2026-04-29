@@ -12,10 +12,10 @@
 Each spilling bucket accumulates rows in memory up to ~4 GB, then flushes the chunk to a temp file via `std::thread::spawn` + move. A double-buffer scheme reuses the flushed Vec's capacity; back-pressure (join oldest flush handle) prevents unbounded memory growth on slow I/O (HDD). At finalize, temp files are mmap'd (`memmap2`) for zero-copy sorted readback.
 
 Auxiliary outputs (`--outFileNameMatrix`, `--outFileSortedRegions`) are supported in StreamOrdered, Spilling, and InMemory paths:
-- **`outFileSortedRegions`**: Static header written first, then row-by-row. Group label derived from `group_boundaries` + running row index (same algorithm as Python's `save_BED`: `flatnonzero(boundaries <= idx)[-1]`). This is safe because emit order is always group-contiguous: ascend/descend emits per-group buckets, keep emits by orig_idx which is group-contiguous (run.rs constructs tasks group-by-group).
-- **`outFileNameMatrix`**: Placeholder header (space-padded) written first, rows appended, then seek to offset 0 and overwrite with real header at `finish()`. Same strategy as the main `.mat.gz` streaming header rewrite, but simpler since the file is plain text (no gzip framing). No temp-file copy needed.
-- **StreamOrdered path**: `FileCollector` is extended with optional `BufWriter<File>` for each auxiliary output. `on_row()` writes to all active writers.
-- **Spilling path**: `SpillingOutputWriter` wraps the same set of writers. `emit_row()` writes to all.
+- **`outFileSortedRegions`**: Static BED header written first, then row-by-row. Group label is **passed explicitly** alongside each row — the emit interface is `emit_row(group_index, row)` (not derived from boundaries, because emit order is NOT always group-contiguous: sort=No + I/O coalescing can interleave groups).
+- **`outFileNameMatrix`**: Three-line header format. Only line 1 (`#Group1:N\tGroup2:M`) depends on final group counts. Lines 2-3 are parameter-derived and fixed. Placeholder trick: write line 1 using `group_capacity` (pre-filter counts) at creation, then seek to offset 0 and overwrite with actual counts at `finish()`. **Initial counts are always ≥ final counts** (filtering only removes rows), so the initial string is always ≥ the final string in byte length — pad the final string with trailing spaces before `\n` to match. Lines 2-3 are written once and never change.
+- **StreamOrdered path**: `FileCollector` is extended with optional auxiliary writers. `on_row(group_index, row)` writes to all active writers.
+- **Spilling path**: `SpillingOutputWriter` wraps the same set of writers. `emit_row(group_index, row)` writes to all.
 
 **Tech Stack:** Rust (edition 2024), `memmap2` for mmap, `clap` for the comparison binary CLI, existing `flate2`/`serde_json` for matrix I/O.
 
@@ -34,6 +34,9 @@ Current `sort_groups()` does: stable `sort_by(ascending)`, then `indices.reverse
 
 ### sortUsingSamples normalization
 The spilling path computes sort_key via `compute_sort_metric`. The 1-based `--sortUsingSamples` indices must be normalized to 0-based via `normalize_sort_sample_indices()` in the executor before computing sort keys, same as `run.rs` does for the InMemory path.
+
+### group_index travels with each row
+The emit interface is `emit_row(group_index, row)` — not derived from boundaries. This is required because emit order is NOT always group-contiguous: sort=No with I/O coalescing reorders work items by chrom/query, interleaving groups. The group_index is available from the executor's batch result tuple `(orig_idx, group_index, Option<MatrixRow>)` throughout the pipeline.
 
 ### ChromTable per chunk file
 Each flush produces its own `ChromTable`. Deserialization uses the matching chunk's table. Tables are tiny (~25 entries) and stay in memory alongside the mmap.
@@ -296,14 +299,13 @@ pub(crate) struct SpillingOutputWriter {
 }
 ```
 
-`new(io, group_labels, group_capacity)`: opens all required output files. For outFileSortedRegions, writes the static BED header immediately. For outFileNameMatrix, writes a space-padded placeholder header.
+`new(io, group_labels, group_capacity)`: opens all required output files. For outFileSortedRegions, writes the static BED header immediately. For outFileNameMatrix, writes line 1 placeholder using group_capacity, then writes lines 2-3 (fixed).
 
-`emit_row(&mut self, row: &MatrixRow)`: writes to main gzip + optional auxiliary.
-- `outFileSortedRegions`: derives group label from `group_boundaries` + `current_row_index` (same algorithm as Python `save_BED`). **Invariant**: rows are always emitted in group-contiguous order.
+`emit_row(&mut self, group_index: usize, row: &MatrixRow)`: writes to main gzip + optional auxiliary.
+- `outFileSortedRegions`: uses `self.group_labels[group_index]` directly — no boundary derivation needed.
 - `outFileNameMatrix`: writes plain values row.
-- Increments `current_row_index`.
 
-`finish(self, header: &MatrixHeader)`: sets final `group_boundaries` from header. Finalizes main gzip (rewrite header). For outFileNameMatrix: seek to 0, overwrite placeholder with real header. Flush and close all.
+`finish(self, header: &MatrixHeader)`: finalizes main gzip (rewrite header). For outFileNameMatrix: seek to 0, overwrite line 1 with actual group counts (space-padded to match initial length). Flush and close all.
 
 - [ ] **Step 2: Add `finalize_sorted`**
 
@@ -434,27 +436,40 @@ pub struct FileCollector {
     values_writer: Option<AuxValuesWriter>,    // outFileNameMatrix
     regions_writer: Option<BufWriter<File>>,    // outFileSortedRegions
     group_labels: Vec<String>,
-    group_boundaries: Vec<usize>,  // final boundaries (from header at finish())
-    current_row_index: usize,
 }
 ```
 
-`AuxValuesWriter` wraps a `BufWriter<File>` with a placeholder header (space-padded to reserved capacity). `on_row()` writes plain values row. `finish()` seeks to 0 and overwrites with real header. Same pattern as `StreamingMatrixWriter`'s gzip header rewrite.
+`AuxValuesWriter` wraps a `BufWriter<File>`. At creation: writes line 1 (placeholder with group_capacity counts), then lines 2-3 (fixed). At `finish()`: seeks to 0, overwrites line 1 with actual counts (space-padded to match initial byte length).
 
-`on_row()` for outFileSortedRegions: derive group label from `group_boundaries` + `current_row_index` using the same algorithm as Python's `save_BED` (`flatnonzero(boundaries <= idx)[-1]`). **Invariant**: emit order is always group-contiguous (StreamOrdered only applies when sort=keep/no, and tasks are group-contiguous by construction in run.rs).
-
-Note: `FileCollector::new()` receives `group_labels`, `group_boundaries` (estimated from `group_capacity`), and optional auxiliary paths. For outFileSortedRegions, writes the static BED header immediately. For outFileNameMatrix, writes placeholder header.
-
-At `finish()`, the real `MatrixHeader` provides final `group_boundaries`. Update the values header and finalize all writers.
-
-- [ ] **Step 4: Remove `should_use_streaming_for_plan` auxiliary guard**
-
-Remove from `src/io/writers/mod.rs`:
+**The `RowCollector` trait must change**: `on_row` gains a `group_index` parameter:
 ```rust
+pub trait RowCollector: Send {
+    type Output: Send;
+    fn on_row(&mut self, group_index: usize, row: MatrixRow) -> Result<()>;
+    fn finalize(self, header: MatrixHeader) -> Result<Self::Output>;
+    fn abort(self) where Self: Sized {}
+}
+```
+
+All existing callers in executor.rs already have `group_index` available from the batch result tuple `(orig_idx, group_index, Option<MatrixRow>)`.
+
+`on_row(group_index, row)` for outFileSortedRegions: writes BED line using `self.group_labels[group_index]` directly.
+
+Note: `FileCollector::new()` receives `group_labels`, `group_capacity`, and optional auxiliary paths. For outFileSortedRegions, writes the static BED header immediately. For outFileNameMatrix, writes placeholder line 1 + fixed lines 2-3.
+
+At `finish(header)`: overwrite outFileNameMatrix line 1 with actual group counts. Finalize all writers.
+
+- [ ] **Step 4: Remove `should_use_streaming_for_plan` auxiliary guard + fix `write_outputs()` early return**
+
+Remove from `src/io/writers/mod.rs` `should_use_streaming_for_plan`:
+```rust
+// Remove:
 if io.matrix_values_output.is_some() || io.sorted_regions_output.is_some() {
     return false;
 }
 ```
+
+Also fix `write_outputs()` (the InMemory fallback): its `should_use_streaming()` early-return currently skips auxiliary outputs. Since InMemory path is now only for small matrices, `should_use_streaming()` should rarely trigger here. But for safety, remove the streaming early-return from `write_outputs()` entirely — InMemory path always writes all outputs in-memory style. (The streaming path is handled by FileCollector in run.rs, not by write_outputs.)
 
 - [ ] **Step 5: Add per-row streaming functions to `auxiliary.rs`**
 
@@ -681,7 +696,7 @@ Tasks 1, 5, 3 can be parallelized. Task 2 subtasks are sequential. Task 4 should
 |---|---|
 | Many groups × 4 GB per bucket → OOM | Future: global memory budget across all buckets. Current: 4 GB per-bucket is acceptable for typical use (1-10 groups). |
 | Spill temp files leak on abort/panic | `HybridBucketCollector` implements `Drop` to join handles and remove temp files. `CollectorBucket::drop` removes `completed_flushes[*].temp_path`. |
-| `compare_matrix` built with normal `[[bin]]` even in production | Gate behind `required-features = ["dev-tools"]` in Cargo.toml. Default build excludes it. `cargo build --features dev-tools` or `cargo test` (which enables all features) includes it. |
+| `compare_matrix` built with normal `[[bin]]` even in production | Don't feature-gate. Binary is tiny (shares all deps with main binary), adds no overhead. `cargo install` users can `--bin compute_matrix_rs` to skip it. Simpler than feature gates that complicate `cargo test`. |
 
 ---
 
@@ -709,4 +724,10 @@ Tasks 1, 5, 3 can be parallelized. Task 2 subtasks are sequential. Task 4 should
 | 18 | outFileNameMatrix "seek prepend" impossible on plain file | Placeholder header + seek-overwrite (same as gzip path, simpler for plain text) |
 | 19 | Per-bucket 4GB may OOM with many groups | Documented as known risk; future: global memory budget |
 | 20 | Spill temp file leak on abort | HybridBucketCollector Drop impl cleans up |
-| 21 | compare_matrix built in production | `required-features = ["dev-tools"]` gate |
+| 21 | compare_matrix built in production | Not gated — shares deps, no overhead, simplifies `cargo test` |
+| 22 | group label derived from boundaries + row_index is wrong | emit interface passes `group_index` explicitly: `emit_row(group_index, row)` |
+| 23 | "emit order always group-contiguous" is false for sort=No | Confirmed: I/O coalescing interleaves groups. Group label must come from explicit group_index, not boundaries. |
+| 24 | outFileNameMatrix placeholder header format unclear | Only line 1 has variable counts. Initial counts (group_capacity) ≥ final counts → space-pad final to match. Lines 2-3 are fixed. |
+| 25 | write_outputs() early return skips auxiliary | Remove streaming early-return from write_outputs(); InMemory path always writes all outputs directly. |
+| 26 | Feature gate + cargo test contradiction | Dropped feature gate; binary shares all deps, no overhead. |
+| 27 | needs_spilling() conservatively spills keep+already_sorted | Acceptable: correct but suboptimal. Future: pass already_sorted hint from executor. |
