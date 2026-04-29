@@ -684,8 +684,7 @@ mod tests {
         let mut buf = Vec::new();
         serialize_row(&mut buf, &row, &mut chrom_table);
 
-        let payload = &buf[4..];
-        let restored = deserialize_row(payload, &chrom_table);
+        let restored = deserialize_row(&buf, &chrom_table);
 
         assert_eq!(restored.record.chrom.as_ref(), "chrX");
         assert_eq!(restored.record.name, None);
@@ -786,9 +785,18 @@ Append to the `impl HybridBucketCollector` block in `spill.rs`:
     where
         F: FnMut(MatrixRow) -> Result<()>,
     {
-        // Collect all spill indices + mmap all chunk files
-        let mut all_indices: Vec<SpillIndex> = Vec::new();
+        // Wrapper pairing a SpillIndex with its mmap index
+        struct SpillRef {
+            sort_key: f64,
+            mmap_idx: usize,
+            file_offset: u64,
+            row_byte_len: u32,
+        }
+
+        // Collect all spill refs + mmap all chunk files
+        let mut all_refs: Vec<SpillRef> = Vec::new();
         let mut mmaps: Vec<(Mmap, ChromTable)> = Vec::new();
+        let mut temp_paths: Vec<std::path::PathBuf> = Vec::new();
 
         for flush in bucket.completed_flushes {
             let file = File::open(&flush.temp_path)
@@ -797,13 +805,16 @@ Append to the `impl HybridBucketCollector` block in `spill.rs`:
                 .context("Failed to mmap spill file")?;
             let mmap_idx = mmaps.len();
 
-            // Remap indices to include mmap_idx (stored in group_index field
-            // temporarily — or use a wrapper struct)
-            for mut entry in flush.indices {
-                entry.group_index = mmap_idx; // reuse field as mmap index
-                all_indices.push(entry);
+            for entry in flush.indices {
+                all_refs.push(SpillRef {
+                    sort_key: entry.sort_key,
+                    mmap_idx,
+                    file_offset: entry.file_offset,
+                    row_byte_len: entry.row_byte_len,
+                });
             }
             mmaps.push((mmap, flush.chrom_table));
+            temp_paths.push(flush.temp_path);
         }
 
         // Merge in-memory rows: assign sort_key, add to a combined list
@@ -811,7 +822,7 @@ Append to the `impl HybridBucketCollector` block in `spill.rs`:
         let mut in_memory_rows = bucket.active;
 
         // Sort everything by sort_key
-        all_indices.sort_by(|a, b| {
+        all_refs.sort_by(|a, b| {
             let cmp = crate::pipeline::matrix::compare_ascending(a.sort_key, b.sort_key);
             if sort_ascending { cmp } else { cmp.reverse() }
         });
@@ -821,7 +832,7 @@ Append to the `impl HybridBucketCollector` block in `spill.rs`:
         });
 
         // Merge-emit spilled and in-memory rows in sorted order
-        let mut spill_iter = all_indices.iter().peekable();
+        let mut spill_iter = all_refs.iter().peekable();
         let mut mem_iter = in_memory_rows.into_iter().peekable();
 
         loop {
@@ -836,7 +847,7 @@ Append to the `impl HybridBucketCollector` block in `spill.rs`:
             };
             if pick_spill {
                 let entry = spill_iter.next().unwrap();
-                let (ref mmap, ref ct) = mmaps[entry.group_index];
+                let (ref mmap, ref ct) = mmaps[entry.mmap_idx];
                 let start = entry.file_offset as usize;
                 let end = start + entry.row_byte_len as usize;
                 emit(deserialize_row(&mmap[start..end], ct))?;
@@ -844,6 +855,12 @@ Append to the `impl HybridBucketCollector` block in `spill.rs`:
                 let (_, _, row) = mem_iter.next().unwrap();
                 emit(row)?;
             }
+        }
+
+        // Cleanup temp files
+        drop(mmaps);
+        for path in temp_paths {
+            let _ = std::fs::remove_file(path);
         }
 
         Ok(())
@@ -881,7 +898,7 @@ git commit -m "feat: add finalize_sorted with mmap readback for hybrid buckets"
 
 - [ ] **Step 1: Complete `finalize_keep_order` in `spill.rs`**
 
-Replace the `todo!()` in `finalize_keep_order` with the full implementation using the pre-allocated placement approach:
+Replace the `todo!()` in `finalize_keep_order` with the full implementation using the pre-allocated placement approach. This uses the new chunked-flush design — `bucket.active` for in-memory rows, `bucket.completed_flushes` for on-disk chunks (already joined by `join_all()` in the earlier block):
 
 ```rust
     pub(crate) fn finalize_keep_order<F>(
@@ -892,74 +909,45 @@ Replace the `todo!()` in `finalize_keep_order` with the full implementation usin
     where
         F: FnMut(MatrixRow) -> Result<()>,
     {
-        let group_counts: Vec<usize> = self
-            .buckets
-            .iter()
-            .map(|b| {
-                b.rows.len()
-                    + b.spill.as_ref().map_or(0, |s| s.index.len())
-            })
-            .collect();
+        // join_all() already called above — group_counts and header built
+        let mut group_counts = Vec::with_capacity(self.buckets.len());
+        for bucket in &mut self.buckets {
+            group_counts.push(bucket.join_all()?);
+        }
         let header = header_builder(group_counts)?;
         let total: usize = group_counts.iter().sum();
-
-        // Flush all spill writers
-        for bucket in &mut self.buckets {
-            if let Some(ref mut spill) = bucket.spill {
-                spill.writer.flush().context("Failed to flush spill file")?;
-            }
-        }
 
         // Pre-allocate placement array indexed by orig_idx
         let mut slots: Vec<Option<RowSlot>> = (0..total).map(|_| None).collect();
 
-        // Place in-memory rows and spill references
-        for bucket in &self.buckets {
-            for (orig_idx, _sort_key, _row) in &bucket.rows {
-                slots[*orig_idx] = Some(RowSlot::InMemoryPlaceholder);
-            }
-            if let Some(ref spill) = bucket.spill {
-                for entry in &spill.index {
-                    slots[entry.orig_idx] = Some(RowSlot::Spilled {
-                        bucket_spill_idx: 0, // resolved below
-                        offset: entry.file_offset,
-                        len: entry.row_byte_len,
-                    });
-                }
-            }
-        }
-
-        // Open mmaps for spilled buckets
-        let mut mmaps: Vec<Option<(Mmap, ChromTable)>> = Vec::new();
-        let mut in_memory_rows: Vec<Option<MatrixRow>> = Vec::new();
+        // Mmap all chunk files, record slot references
+        let mut mmaps: Vec<(Mmap, ChromTable)> = Vec::new();
+        let mut temp_paths: Vec<std::path::PathBuf> = Vec::new();
+        let mut in_memory_rows: Vec<Option<MatrixRow>> = Vec::with_capacity(total);
+        in_memory_rows.resize_with(total, || None);
 
         for bucket in self.buckets {
-            if let Some(spill) = bucket.spill {
-                let file = File::open(&spill.temp_path)
+            // Place spilled rows from completed flush chunks
+            for flush in bucket.completed_flushes {
+                let file = File::open(&flush.temp_path)
                     .context("Failed to reopen spill file for mmap")?;
                 let mmap = unsafe { Mmap::map(&file) }
                     .context("Failed to mmap spill file")?;
                 let mmap_idx = mmaps.len();
-                mmaps.push(Some((mmap, spill.chrom_table)));
 
-                // Update slots with correct mmap index
-                for entry in &spill.index {
+                for entry in &flush.indices {
                     slots[entry.orig_idx] = Some(RowSlot::Spilled {
-                        bucket_spill_idx: mmap_idx,
+                        mmap_idx,
                         offset: entry.file_offset,
                         len: entry.row_byte_len,
                     });
                 }
-            } else {
-                mmaps.push(None);
+                mmaps.push((mmap, flush.chrom_table));
+                temp_paths.push(flush.temp_path);
             }
 
-            // Move in-memory rows into flat lookup
-            for (orig_idx, _sort_key, row) in bucket.rows {
-                // Extend in_memory_rows if needed
-                if orig_idx >= in_memory_rows.len() {
-                    in_memory_rows.resize_with(orig_idx + 1, || None);
-                }
+            // Place in-memory rows (from the last unflushed active buffer)
+            for (orig_idx, _sort_key, row) in bucket.active {
                 in_memory_rows[orig_idx] = Some(row);
             }
         }
@@ -967,21 +955,25 @@ Replace the `todo!()` in `finalize_keep_order` with the full implementation usin
         // Emit in orig_idx order — O(n) scan, no sort needed
         for idx in 0..total {
             match &slots[idx] {
-                Some(RowSlot::Spilled { bucket_spill_idx, offset, len }) => {
-                    let (ref mmap, ref chrom_table) = mmaps[*bucket_spill_idx]
-                        .as_ref()
-                        .expect("mmap must exist for spilled slot");
+                Some(RowSlot::Spilled { mmap_idx, offset, len }) => {
+                    let (ref mmap, ref chrom_table) = mmaps[*mmap_idx];
                     let start = *offset as usize;
                     let end = start + *len as usize;
                     let row = deserialize_row(&mmap[start..end], chrom_table);
                     emit(row)?;
                 }
-                Some(RowSlot::InMemoryPlaceholder) | None => {
-                    if let Some(row) = in_memory_rows.get_mut(idx).and_then(|slot| slot.take()) {
+                None => {
+                    if let Some(row) = in_memory_rows[idx].take() {
                         emit(row)?;
                     }
                 }
             }
+        }
+
+        // Cleanup: drop mmaps first, then delete temp files
+        drop(mmaps);
+        for path in temp_paths {
+            let _ = std::fs::remove_file(path);
         }
 
         Ok(header)
@@ -992,9 +984,8 @@ Add the `RowSlot` enum:
 
 ```rust
 enum RowSlot {
-    InMemoryPlaceholder,
     Spilled {
-        bucket_spill_idx: usize,
+        mmap_idx: usize,
         offset: u64,
         len: u32,
     },
