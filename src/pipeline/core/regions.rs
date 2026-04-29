@@ -164,31 +164,22 @@ pub(crate) fn load_chrom_sizes(scores: &[PathBuf]) -> Result<HashMap<String, u32
 }
 
 /// Return blacklist intervals for `chrom`, matching both original and
-/// chr-prefix-toggled chromosome names. Uses partition_point for true
-/// lower/upper bound search in O(log n + k) time, avoiding the
-/// binary_search_by pitfall where the match position is not guaranteed
-/// to be the first equal element.
-fn blacklist_intervals_for_chrom<'a>(
-    blacklist: &'a [(Arc<str>, u32, u32)],
+/// chr-prefix-toggled chromosome names. Returns a Vec because matching
+/// entries may not be contiguous in the sorted blacklist — another
+/// chromosome name can sort lexicographically between the two accepted
+/// spellings (e.g. "10" between "1" and "chr1").
+fn blacklist_intervals_for_chrom(
+    blacklist: &[(Arc<str>, u32, u32)],
     chrom: &str,
-) -> &'a [(Arc<str>, u32, u32)] {
-    let [ref name_a, name_b] = normalize_chrom_name(chrom);
-
-    // find the first entry >= the lexicographically smaller variant
-    let candidate_a = name_a.as_str();
-    let candidate_b = name_b.as_str();
-    let probe = candidate_a.min(candidate_b);
-
-    let lo = blacklist.partition_point(|(c, _, _)| c.as_ref() < probe);
-
-    // scan forward to find the range matching either variant
-    let mut hi = lo;
-    while hi < blacklist.len()
-        && (blacklist[hi].0.as_ref() == name_a || blacklist[hi].0.as_ref() == name_b)
-    {
-        hi += 1;
+) -> Vec<(u32, u32)> {
+    let [ref name_a, ref name_b] = normalize_chrom_name(chrom);
+    let mut result = Vec::new();
+    for &(ref c, s, e) in blacklist {
+        if c.as_ref() == name_a || c.as_ref() == name_b {
+            result.push((s, e));
+        }
     }
-    &blacklist[lo..hi]
+    result
 }
 
 /// Subtract sorted, non-overlapping blacklist intervals from a genomic span.
@@ -241,12 +232,11 @@ pub(crate) fn record_passes_blacklist(
         None => return true,
     };
 
-    let bl_slice = blacklist_intervals_for_chrom(blacklist, &canonical_name);
-    if bl_slice.is_empty() {
+    let bl_intervals = blacklist_intervals_for_chrom(blacklist, &canonical_name);
+    if bl_intervals.is_empty() {
         return true;
     }
 
-    let bl_intervals: Vec<(u32, u32)> = bl_slice.iter().map(|(_, s, e)| (*s, *e)).collect();
     let allowed = subtract_blacklist((0, chrom_size), &bl_intervals);
 
     // A record is dispatched if its interval overlaps any allowed interval.
@@ -598,8 +588,7 @@ mod tests {
         let bl = make_blacklist(vec![("chr1", 10, 20), ("chr2", 30, 40)]);
         let result = blacklist_intervals_for_chrom(&bl, "chr1");
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].1, 10);
-        assert_eq!(result[0].2, 20);
+        assert_eq!(result[0], (10, 20));
     }
 
     #[test]
@@ -615,7 +604,7 @@ mod tests {
         ]);
         let result = blacklist_intervals_for_chrom(&bl, "chr1");
         assert_eq!(result.len(), 3);
-        let starts: Vec<u32> = result.iter().map(|(_, s, _)| *s).collect();
+        let starts: Vec<u32> = result.iter().map(|(s, _)| *s).collect();
         assert_eq!(starts, vec![10, 40, 90]);
     }
 
@@ -630,7 +619,26 @@ mod tests {
     fn blacklist_intervals_chr_prefix_toggle_match() {
         let bl = make_blacklist(vec![("1", 10, 20)]);
         let result = blacklist_intervals_for_chrom(&bl, "chr1");
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].1, 10);
+        assert_eq!(result, vec![(10, 20)]);
+    }
+
+    #[test]
+    fn blacklist_intervals_numeric_name_sorting_between_variants() {
+        // Regression: `partition_point` with probe=min(name_a, name_b) can
+        // land on a chromosome name that sorts BETWEEN the two accepted
+        // variants (e.g. "10" sorts between "1" and "chr1"). The scan must
+        // not stop there — it must continue past non-matching names.
+        // When "1" is NOT in the blacklist but "10" and "chr1" are,
+        // "10" sorts between "1" (the probe) and "chr1" (the target).
+        // A naive partition_point scan that stops at a non-matching name
+        // would miss the "chr1" entry.
+        let bl2 = make_blacklist(vec![("10", 30, 40), ("chr1", 50, 60)]);
+        let result = blacklist_intervals_for_chrom(&bl2, "chr1");
+        assert_eq!(
+            result.len(),
+            1,
+            "should find chr1 entry even with '10' sorting between '1' and 'chr1'"
+        );
+        assert_eq!(result[0], (50, 60));
     }
 }
