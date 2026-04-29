@@ -627,11 +627,15 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_min_negative_values() {
+        let result = aggregate_slice(&[-3.0, -1.0, -2.0], AverageTypeBins::Min);
+        assert_eq!(result, Some(-3.0));
+    }
+
+    #[test]
     fn aggregate_min_single() {
-        assert_eq!(
-            aggregate_slice(&[42.0], AverageTypeBins::Min),
-            Some(42.0)
-        );
+        let result = aggregate_slice(&[42.0], AverageTypeBins::Min);
+        assert_eq!(result, Some(42.0));
     }
 
     // ── aggregate_slice: Max ───────────────────────────────────────────────
@@ -662,10 +666,8 @@ mod tests {
 
     #[test]
     fn aggregate_max_single() {
-        assert_eq!(
-            aggregate_slice(&[42.0], AverageTypeBins::Max),
-            Some(42.0)
-        );
+        let result = aggregate_slice(&[42.0], AverageTypeBins::Max);
+        assert_eq!(result, Some(42.0));
     }
 
     // ── aggregate_slice: Std ───────────────────────────────────────────────
@@ -702,6 +704,12 @@ mod tests {
         // NaN values are ignored; std of [3, 3] is 0
         let result = aggregate_slice(&[f64::NAN, 3.0, 3.0], AverageTypeBins::Std);
         assert_eq!(result, Some(0.0));
+    }
+
+    #[test]
+    fn aggregate_std_mixed_nan_nontrivial() {
+        let result = aggregate_slice(&[f64::NAN, 1.0, 3.0], AverageTypeBins::Std);
+        assert!((result.unwrap() - 1.0).abs() < 1e-10);
     }
 
     // ── aggregate_slice: Median ────────────────────────────────────────────
@@ -751,6 +759,11 @@ mod tests {
     }
 
     #[test]
+    fn index_one_past_base_is_one() {
+        assert_eq!(index_from_coordinate(101, 100, 50), 1);
+    }
+
+    #[test]
     fn index_below_base_is_zero() {
         assert_eq!(index_from_coordinate(50, 100, 50), 0);
     }
@@ -780,6 +793,16 @@ mod tests {
     #[test]
     fn clamp_normal_value() {
         assert_eq!(clamp_coordinate(500, 1000), 500);
+    }
+
+    #[test]
+    fn clamp_exactly_zero() {
+        assert_eq!(clamp_coordinate(0, 1000), 0);
+    }
+
+    #[test]
+    fn clamp_exactly_at_chrom_length() {
+        assert_eq!(clamp_coordinate(1000, 1000), 1000);
     }
 
     // ── should_skip_row_flat ──────────────────────────────────────────────
@@ -846,6 +869,16 @@ mod tests {
             ..default_general()
         };
         assert!(should_skip_row_flat(&[8.0, 10.0], &general));
+    }
+
+    #[test]
+    fn skip_row_both_thresholds_min_triggers() {
+        let general = GeneralOptions {
+            min_threshold: Some(5.0),
+            max_threshold: Some(100.0),
+            ..default_general()
+        };
+        assert!(should_skip_row_flat(&[3.0, 50.0], &general));
     }
 
     #[test]
