@@ -5,6 +5,7 @@ pub(crate) mod spill;
 mod executor;
 mod collector;
 mod coalesce;
+mod aggregation;
 mod worker;
 
 pub use traits::{
@@ -26,7 +27,7 @@ mod tests {
 
     use super::executor::{WorkItem, input_order_is_compute_sorted};
     use super::traits::{RegionPlan, SignalBin};
-    use super::worker::{aggregate_slice, index_from_coordinate};
+    use super::aggregation::{aggregate_slice, index_from_coordinate};
     use crate::config::AverageTypeBins;
 
     fn work_item(idx: usize, chrom: &str, start: i64, end: i64) -> WorkItem {
