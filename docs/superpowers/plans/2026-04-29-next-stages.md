@@ -8,7 +8,7 @@
 1. **StreamOrdered**: sort=no (with per-group I/O sort), or sort=keep + already compute-sorted → rows piped directly to `FileCollector`.
 2. **HybridBucket**: any reordering needed (keep+coalesced / ascend / descend), any matrix size → `HybridBucketCollector` accumulates rows with chunked ~1 GB flush to temp files via writer threads. Small matrices stay entirely in memory (never trigger spill). At finalize, sorted rows are emitted through the same `FileCollector`.
 
-`InMemoryCollector`, `GroupBucketCollector`, `MatrixData.sort_groups()`, `MatrixData.prune_zero_rows()`, `write_outputs()`, `RunOutcome::Matrix`, and `spawn_writer_thread` become dead code and are removed. All output is written directly through `FileCollector`.
+`InMemoryCollector`, `GroupBucketCollector`, `MatrixData` (the struct bundling header + rows), `write_outputs()`, `RunOutcome::Matrix`, and `spawn_writer_thread` become dead code and are removed. `MatrixHeader` and `MatrixRow` are retained (used by all paths). All output is written directly through `FileCollector`.
 
 Each HybridBucket accumulates rows in memory up to ~1 GB (default, injectable for testing), then flushes the chunk to a temp file via `std::thread::spawn` + move. A double-buffer scheme reuses the flushed Vec's capacity; back-pressure (join oldest flush handle) prevents unbounded memory growth on slow I/O (HDD). At finalize, temp files are mmap'd (`memmap2`) for zero-copy sorted readback.
 
@@ -27,8 +27,8 @@ Both StreamOrdered and HybridBucket paths emit through the same `FileCollector`.
 
 ## Key Design Decisions & Constraints
 
-### HybridBucket emits through FileCollector — no MatrixData intermediate
-The HybridBucket path's `finalize_sorted`/`finalize_keep_order` emits rows through the same `FileCollector` used by StreamOrdered. `run.rs` always returns `RunOutcome::Streamed`. `MatrixData` is never constructed.
+### No MatrixData — rows flow through FileCollector
+Both paths emit `MatrixRow` through `FileCollector`. The `MatrixData` struct (which bundled header + all rows in memory) is deleted. `MatrixHeader` is built at finalize time from group counts; `MatrixRow` remains the per-row type.
 
 ### orig_idx is task index, not row index
 `orig_idx` is assigned as `task.index` in `run.rs` (0..task_count). Filtered rows (skipZeros, threshold) produce `None` from the worker — no MatrixRow is emitted for them. For `finalize_keep_order`, the placement array must be sized by `task_count` (not `group_counts.sum()`), with empty slots for filtered rows.
@@ -93,7 +93,7 @@ Each flush produces its own `ChromTable`. Deserialization uses the matching chun
 - Modify: `src/pipeline/core/mod.rs` (re-export)
 - Modify: `src/pipeline/core/executor.rs` (OutputStrategy: StreamOrdered + HybridBucket; executor decides internally)
 - Modify: `src/pipeline/core/collector.rs` (remove `InMemoryCollector` + `GroupBucketCollector`; extend `FileCollector` with AuxValuesWriter + regions writer; change `RowCollector::on_row` to include `group_index`)
-- Modify: `src/pipeline/matrix.rs` (`compute_sort_metric`, `compare_ascending` → `pub(crate)`; remove `sort_groups()`, `prune_zero_rows()`)
+- Modify: `src/pipeline/matrix.rs` (`compute_sort_metric`, `compare_ascending` → `pub(crate)`; remove `MatrixData` struct, `sort_groups()`, `prune_zero_rows()`, `GroupStats`; keep `MatrixHeader`, `MatrixRow`, `MatrixHeaderBuilder`, `LayoutVectors`)
 - Modify: `src/pipeline/run.rs` (always create FileCollector, always call execute_mode, remove InMemory path)
 - Modify: `src/pipeline/mod.rs` (remove `RunOutcome::Matrix`, `spawn_writer_thread`)
 - Modify: `src/io/writers/mod.rs` (remove `write_outputs()`, `should_use_streaming()`, auxiliary guard; re-export `STREAMING_CELL_THRESHOLD`)
