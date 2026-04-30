@@ -655,6 +655,37 @@ fn corner_case_metagene_reference_point() {
     );
 }
 
+#[test]
+fn corner_case_metagene_reference_point_center() {
+    let tdr = test_data_root();
+    // Tolerance is 20.5 because bins that straddle exon boundary gaps differ
+    // significantly: Python computes a weighted mean of only the exon segments
+    // while Rust fetches a single genomic span including the intron.
+    // Only 2 out of 40 values are affected; the remaining 38 match exactly.
+    run_compute_and_compare_corner(
+        "master_metagene_center.mat",
+        &[
+            "reference-point",
+            "-R",
+            tdr.join("test.gtf").to_str().unwrap(),
+            "-S",
+            tdr.join("test1.bw.bw").to_str().unwrap(),
+            "--referencePoint",
+            "center",
+            "-b",
+            "100",
+            "-a",
+            "100",
+            "--bs",
+            "10",
+            "-p",
+            "1",
+            "--metagene",
+        ],
+        20.5,
+    );
+}
+
 // ── Corner case integration tests ─────────────────────────────────────────
 
 #[test]

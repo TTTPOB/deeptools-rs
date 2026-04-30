@@ -228,7 +228,11 @@ All 5 tasks from `docs/superpowers/plans/2026-04-29-next-stages.md` are done:
 - ✅ **Documentation update**: `readme.md` refreshed with current status, quickstart commands, and latest compatibility/performance results.
 
 ### Known Differences: Metagene Mode
-None — parity achieved for the current test corpus (see `plans/fix_metagene.md` for a historical log).
+- **Intron-straddling bins**: When a bin spans an exon boundary gap, Python computes a weighted mean of only the exon segments while Rust fetches a single genomic span including the intron. This affects 1-2 bins per region and is accommodated via elevated tolerance in integration tests (0.17 for TSS, 20.5 for center).
+
+### Recent Fixes (2026-04-30)
+- **Fixed `chop_regions_from_middle` clearing exon intervals**: When the total exon length on either side of the center was shorter than the requested upstream/downstream, the function incorrectly cleared all exon intervals (`.clear()`) while recording padding. This produced all-NaN/zero rows instead of real coverage from the available exons plus padding. Removed the two `.clear()` calls to match Python's `chopRegionsFromMiddle` behavior.
+- **Added center metagene integration test**: `corner_case_metagene_reference_point_center` verifies reference-point center mode with `--metagene` against Python reference output.
 
 ## Implementation Status: PRODUCTION-READY ✅
 

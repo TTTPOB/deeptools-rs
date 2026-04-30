@@ -686,7 +686,7 @@ fn chop_regions_from_middle(
         }
     } else if left_sum < left as i64 {
         pad_left = left - left_sum as u32;
-        left_bins.clear();
+        // Do NOT clear left_bins — keep the exon intervals for coverage
     }
 
     let right_sum = intervals_total_length(&right_bins);
@@ -708,7 +708,7 @@ fn chop_regions_from_middle(
         }
     } else if right_sum < right as i64 {
         pad_right = right - right_sum as u32;
-        right_bins.clear();
+        // Do NOT clear right_bins — keep the exon intervals for coverage
     }
 
     (left_bins, right_bins, pad_left, pad_right)
