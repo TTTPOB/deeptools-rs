@@ -50,17 +50,15 @@ fn clamp_coordinate(value: i64, chrom_length: u32) -> u32 {
 
 fn should_skip_row_flat(values: &[f64], general: &GeneralOptions) -> bool {
     if general.skip_zeros {
-        // Python computes np.mean(row) across all values; if the mean
-        // is 0 or there are no non-NaN values the row is skipped.
-        let mut sum = 0.0f64;
-        let mut count = 0u64;
-        for &value in values {
-            if value.is_nan() {
-                continue;
-            }
-            sum += value;
-            count += 1;
+        // Python uses np.mean() which propagates NaN — if any value
+        // is NaN, the mean is NaN (masked) and the row is removed.
+        let has_nan = values.iter().any(|v| v.is_nan());
+        if has_nan {
+            return true;
         }
+        // For all-finite rows: skip if mean equals zero
+        let sum: f64 = values.iter().sum();
+        let count = values.len();
         if count == 0 || sum / (count as f64) == 0.0 {
             return true;
         }
@@ -718,12 +716,23 @@ mod tests {
 
     #[test]
     fn skip_zeros_nan_and_zeros_skipped() {
-        // mean of non-NaN values [0.0, 0.0] == 0.0 → skip
+        // Python np.mean([NaN, 0.0, 0.0]) = NaN → masked → skip
         let general = GeneralOptions {
             skip_zeros: true,
             ..default_general()
         };
         assert!(should_skip_row_flat(&[f64::NAN, 0.0, 0.0], &general));
+    }
+
+    #[test]
+    fn skip_zeros_nan_with_nonzero_skipped() {
+        // Python np.mean([NaN, 5.0, NaN]) = NaN → masked → skip
+        // Rust previously used nanmean: mean of [5.0] = 5.0 → kept
+        let general = GeneralOptions {
+            skip_zeros: true,
+            ..default_general()
+        };
+        assert!(should_skip_row_flat(&[f64::NAN, 5.0, f64::NAN], &general));
     }
 
     // ── Issue 1c: threshold NaN propagation ──────────────────────────────
