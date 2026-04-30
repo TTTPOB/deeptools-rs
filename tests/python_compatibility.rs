@@ -896,3 +896,117 @@ fn outfilename_matrix_header_consistent_after_skipzeros() {
         "header total {line1_total} != data rows {data_rows} in:\n{tab}"
     );
 }
+
+/// Runtime empty group: two groups, one entirely filtered by --skipZeros.
+/// Verifies that the zero-count group appears explicitly in both the gzip
+/// header (`group_boundaries`) and the `--outFileNameMatrix` tab header.
+#[test]
+fn runtime_empty_group_preserved_with_zero_count() {
+    use std::io::Write;
+
+    let dr = data_root();
+
+    // Group "genes": ch1:100-150 — has signal in test.bw, survives skipZeros.
+    let mut genes_bed = tempfile::NamedTempFile::new().unwrap();
+    writeln!(genes_bed, "ch1\t100\t150\thas_signal\t0\t+").unwrap();
+
+    // Group "peaks": ch1:300-350 — no signal in test.bw, filtered by skipZeros + missingDataAsZero.
+    let mut peaks_bed = tempfile::NamedTempFile::new().unwrap();
+    writeln!(peaks_bed, "ch1\t300\t350\tno_signal\t0\t+").unwrap();
+
+    let mat_tmp = tempfile::NamedTempFile::new().unwrap();
+    let tab_tmp = tempfile::NamedTempFile::new().unwrap();
+
+    let mut cmd = Command::new(compute_matrix_bin());
+    cmd.args([
+        "reference-point",
+        "-R",
+        genes_bed.path().to_str().unwrap(),
+        peaks_bed.path().to_str().unwrap(),
+        "--smartLabels",
+        "-S",
+        dr.join("test.bw").to_str().unwrap(),
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--bs",
+        "10",
+        "-p",
+        "1",
+        "--missingDataAsZero",
+        "--skipZeros",
+        "-o",
+        mat_tmp.path().to_str().unwrap(),
+        "--outFileNameMatrix",
+        tab_tmp.path().to_str().unwrap(),
+    ]);
+    let status = cmd.status().unwrap();
+    assert!(status.success());
+
+    // ── Verify tab file ──────────────────────────────────────────────
+    let tab = std::fs::read_to_string(tab_tmp.path()).unwrap();
+    let lines: Vec<&str> = tab.lines().collect();
+    assert!(
+        lines.len() >= 4,
+        "expected >=3 header lines + 1 data row, got {}",
+        lines.len()
+    );
+
+    // Line 1: #genes:1\tpeaks:0
+    let line1_stripped = lines[0]
+        .strip_prefix('#')
+        .unwrap_or_else(|| panic!("line 1 should start with '#': {}", lines[0]));
+    let line1_parts: Vec<&str> = line1_stripped.split('\t').collect();
+    assert_eq!(line1_parts.len(), 2);
+    let genes_count: usize = line1_parts[0].split(':').nth(1).unwrap().parse().unwrap();
+    let peaks_count: usize = line1_parts[1].split(':').nth(1).unwrap().parse().unwrap();
+    assert_eq!(genes_count, 1, "genes group should have 1 surviving row");
+    assert_eq!(
+        peaks_count, 0,
+        "peaks group should be empty after skipZeros"
+    );
+
+    // Line 3: genes:1\tpeaks:0\ttest\ttest\t...
+    let line3_parts: Vec<&str> = lines[2].split('\t').collect();
+    let line3_genes: usize = line3_parts[0].split(':').nth(1).unwrap().parse().unwrap();
+    let line3_peaks: usize = line3_parts[1].split(':').nth(1).unwrap().parse().unwrap();
+    assert_eq!(line3_genes, 1, "line 3 genes count should match line 1");
+    assert_eq!(line3_peaks, 0, "line 3 peaks count should match line 1");
+
+    // Data rows: only the genes row
+    let data_rows = lines.len() - 3;
+    assert_eq!(
+        data_rows, 1,
+        "should have exactly 1 data row, got {data_rows}"
+    );
+
+    // ── Verify gzip header ───────────────────────────────────────────
+    use std::io::BufRead;
+    let mat_bytes = std::fs::read(mat_tmp.path()).unwrap();
+    let decoder = flate2::read::GzDecoder::new(&mat_bytes[..]);
+    let mut reader = std::io::BufReader::new(decoder);
+    let mut header_line = String::new();
+    reader.read_line(&mut header_line).unwrap();
+    // Strip the leading '@' and trailing newline (plus padding spaces).
+    let json = header_line
+        .strip_prefix('@')
+        .unwrap()
+        .trim_end_matches(|c: char| c == '\n' || c == ' ');
+    let header: serde_json::Value = serde_json::from_str(json).unwrap();
+    let boundaries: Vec<usize> = header["group_boundaries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
+    // genes:1, peaks:0 → boundaries should be [0, 1, 1]
+    assert_eq!(boundaries, vec![0, 1, 1]);
+
+    let labels = header["group_labels"].as_array().unwrap();
+    assert_eq!(labels.len(), 2, "should have 2 group labels");
+    // With --smartLabels, labels are derived from BED file names.  Just
+    // verify they're non-empty — exact names depend on temp file paths.
+    assert!(!labels[0].as_str().unwrap().is_empty());
+    assert!(!labels[1].as_str().unwrap().is_empty());
+}
