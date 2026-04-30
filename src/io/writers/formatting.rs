@@ -215,18 +215,27 @@ pub fn format_plain_value(value: f64) -> String {
     }
 
     let abs = value.abs();
-    let raw_exp = abs.log10().floor() as i32;
 
-    // Round to 4 significant digits FIRST, then determine the exponent.
-    // This ensures that when rounding causes a boundary crossing (e.g.,
-    // 9999.5 → 10000, exp 3 → 4), we use the correct format.
-    let scale = 10f64.powi(3 - raw_exp);
-    let rounded_abs = (abs * scale).round() / scale;
-    let exp = rounded_abs.log10().floor() as i32;
+    // Use Rust's built-in formatting engine to round to 4 significant digits.
+    // This matches C printf rounding semantics, avoiding manual multiply/round/divide
+    // which can introduce floating-point errors on rounding boundaries.
+    let sci = format!("{abs:.3e}");
+
+    // Parse the exponent from the formatted string to determine format bucket.
+    let exp: i32 = sci
+        .split_once('e')
+        .expect("expected 'e' in scientific format")
+        .1
+        .parse()
+        .expect("expected integer exponent");
 
     if exp >= -4 && exp < 4 {
         // Fixed notation: number of decimal places = max(0, precision - 1 - exp)
         let decimals = (3 - exp).max(0) as usize;
+        // Re-round value to the correct number of decimal places for fixed output.
+        // Parse the rounded mantissa from the scientific string to avoid double-rounding.
+        let rounded_abs: f64 =
+            sci.split_once('e').unwrap().0.parse::<f64>().unwrap() * 10f64.powi(exp);
         let rounded_value = if value.is_sign_negative() {
             -rounded_abs
         } else {
@@ -235,8 +244,12 @@ pub fn format_plain_value(value: f64) -> String {
         let s = format!("{rounded_value:.prec$}", prec = decimals);
         strip_trailing_zeros_fixed(&s)
     } else {
-        // Scientific notation with 3 decimal places (4 sig digits - 1 leading)
-        let s = format!("{value:.3e}",);
+        // Scientific notation — reuse the already-formatted string
+        let s = if value.is_sign_negative() {
+            format!("-{sci}")
+        } else {
+            sci
+        };
         normalize_scientific_notation(&s)
     }
 }
@@ -488,9 +501,9 @@ mod tests {
 
     #[test]
     fn plain_value_small_scientific_no_boundary_cross() {
-        // 0.000099995 at exp=-5, rounds to 0.0001 → crosses to exp=-4 → fixed
-        // But 0.00009999 stays at exp=-5 → scientific
+        // 0.00009999 stays at exp=-5 → scientific
         assert_eq!(format_plain_value(0.00009999), "9.999e-05");
-        assert_eq!(format_plain_value(0.000099995), "0.0001");
+        // 0.000099995 IEEE 754 representation is 9.99949999...e-05, rounds down → scientific
+        assert_eq!(format_plain_value(0.000099995), "9.999e-05");
     }
 }
