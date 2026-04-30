@@ -113,7 +113,13 @@ fn compute_sample_bins<P: RegionPlan>(
     let chrom_length = match sample.chrom_length(&record.chrom) {
         Some(length) => length,
         None => {
-            return Ok(vec![f64::NAN; bin_count]);
+            // Python: returns np.zeros when missingDataAsZero, else NaN
+            let fill = if general.missing_data_as_zero {
+                0.0
+            } else {
+                f64::NAN
+            };
+            return Ok(vec![fill; bin_count]);
         }
     };
 
@@ -769,5 +775,38 @@ mod tests {
             ..default_general()
         };
         assert!(should_skip_row_flat(&[3.0, 7.0], &general));
+    }
+
+    // ── Issue 1d: chrom missing + missingDataAsZero ──────────────────────
+
+    #[test]
+    fn chrom_missing_fill_missing_data_as_zero_returns_zeros() {
+        // When missingDataAsZero=true and chromosome is not found,
+        // Python returns np.zeros(matrix_cols). Verify the fill value.
+        let general = GeneralOptions {
+            missing_data_as_zero: true,
+            ..default_general()
+        };
+        let fill = if general.missing_data_as_zero {
+            0.0
+        } else {
+            f64::NAN
+        };
+        let result = vec![fill; 5];
+        assert_eq!(result, vec![0.0; 5]);
+    }
+
+    #[test]
+    fn chrom_missing_fill_default_returns_nan() {
+        // When missingDataAsZero=false (default), fill should be NaN.
+        let general = default_general();
+        assert!(!general.missing_data_as_zero);
+        let fill = if general.missing_data_as_zero {
+            0.0
+        } else {
+            f64::NAN
+        };
+        let result = vec![fill; 5];
+        assert!(result.iter().all(|v| v.is_nan()));
     }
 }
