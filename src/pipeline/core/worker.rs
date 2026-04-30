@@ -123,7 +123,14 @@ fn compute_sample_bins<P: RegionPlan>(
     let bins = COVERAGE_BUF.with(|cell| {
         let mut buf = cell.borrow_mut();
         buf.clear();
-        buf.resize(window_len, default_fill);
+        // In metagene mode, intron positions must stay NaN even with
+        // missingDataAsZero — only exonic gaps get 0.0.
+        let fill = if plan.included_intervals().is_some() {
+            f64::NAN
+        } else {
+            default_fill
+        };
+        buf.resize(window_len, fill);
 
         if let Some(allowed) = plan.included_intervals() {
             let base_offset = plan.window_start();
@@ -132,6 +139,16 @@ fn compute_sample_bins<P: RegionPlan>(
                 let fetch_end = clamp_coordinate(*seg_end, chrom_length);
                 if fetch_start >= fetch_end {
                     continue;
+                }
+
+                // Pre-fill exonic range with 0.0 so uncovered exonic
+                // positions get 0.0 while introns stay NaN.
+                if general.missing_data_as_zero {
+                    let rs = (i64::from(fetch_start) - base_offset).max(0) as usize;
+                    let re = ((i64::from(fetch_end) - base_offset).max(0) as usize).min(window_len);
+                    if rs < re {
+                        buf[rs..re].fill(0.0);
+                    }
                 }
 
                 let intervals = sample
