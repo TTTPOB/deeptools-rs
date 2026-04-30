@@ -243,7 +243,16 @@ pub(crate) fn compute_sort_metric(
     sample_list: Option<&[usize]>,
 ) -> f64 {
     match sort_using {
-        SortUsing::RegionLength => row.record.length() as f64,
+        SortUsing::RegionLength => {
+            // Python sums the exon interval lengths for metagene regions;
+            // for plain regions the single (start, end) span is identical to
+            // `record.length()`.
+            if let Some(ref exons) = row.exon_coords {
+                exons.iter().map(|(s, e)| (e - s) as f64).sum()
+            } else {
+                row.record.length() as f64
+            }
+        }
         SortUsing::Sum => {
             let values = collect_values(row, sample_list);
             values.into_iter().fold(0.0f64, |acc, value| acc + value)
@@ -324,6 +333,124 @@ pub(crate) fn compare_ascending(left: f64, right: f64) -> Ordering {
         (true, false) => Ordering::Greater,
         (false, true) => Ordering::Less,
         (false, false) => left.partial_cmp(&right).unwrap_or_else(|| Ordering::Equal),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::io::{BedRecord, Strand};
+    use std::sync::Arc;
+
+    /// Helper to create a minimal MatrixRow for testing sort metrics.
+    fn make_row(
+        start: u32,
+        end: u32,
+        exon_coords: Option<Vec<(u32, u32)>>,
+        values: Vec<f64>,
+    ) -> MatrixRow {
+        MatrixRow {
+            record: BedRecord {
+                chrom: Arc::from("chr1"),
+                start,
+                end,
+                name: None,
+                score: None,
+                score_raw: None,
+                strand: Strand::Unstranded,
+                strand_raw: None,
+                extra_fields: Vec::new(),
+            },
+            sample_count: 1,
+            bin_count: values.len(),
+            values,
+            exon_coords,
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Issue 3a: sortUsing=region_length must sum exon lengths in metagene mode
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn region_length_without_exons_uses_genomic_span() {
+        // Plain region: 1000-5000 => length 4000
+        let row = make_row(1000, 5000, None, vec![1.0; 10]);
+        let metric = compute_sort_metric(&row, SortUsing::RegionLength, None);
+        assert_eq!(metric, 4000.0);
+    }
+
+    #[test]
+    fn region_length_with_exons_sums_exon_lengths() {
+        // Genomic span 1000-5000 (4000 bp), but only two exons:
+        //   exon1: 1000-2000 (1000 bp)
+        //   exon2: 3000-4000 (1000 bp)
+        // Total exon length = 2000, NOT 4000.
+        let exons = vec![(1000, 2000), (3000, 4000)];
+        let row = make_row(1000, 5000, Some(exons), vec![1.0; 10]);
+        let metric = compute_sort_metric(&row, SortUsing::RegionLength, None);
+        assert_eq!(metric, 2000.0);
+    }
+
+    #[test]
+    fn region_length_single_exon_matches_span() {
+        // When there's a single exon spanning the whole region, the sum
+        // equals the genomic span.
+        let exons = vec![(1000, 5000)];
+        let row = make_row(1000, 5000, Some(exons), vec![1.0; 10]);
+        let metric = compute_sort_metric(&row, SortUsing::RegionLength, None);
+        assert_eq!(metric, 4000.0);
+    }
+
+    #[test]
+    fn region_length_empty_exon_list_returns_zero() {
+        // Edge case: exon_coords is Some but empty.
+        let row = make_row(1000, 5000, Some(vec![]), vec![1.0; 10]);
+        let metric = compute_sort_metric(&row, SortUsing::RegionLength, None);
+        assert_eq!(metric, 0.0);
+    }
+
+    // ---------------------------------------------------------------
+    // Issue 3b: group_boundaries_from_counts with zero-count groups
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn group_boundaries_basic() {
+        // Two groups with 3 and 5 rows
+        let boundaries = group_boundaries_from_counts(&[3, 5]);
+        assert_eq!(boundaries, vec![0, 3, 8]);
+    }
+
+    #[test]
+    fn group_boundaries_with_empty_first_group() {
+        // First group has 0 rows (e.g. all filtered by skipZeros),
+        // second group has 5 rows.
+        let boundaries = group_boundaries_from_counts(&[0, 5]);
+        assert_eq!(boundaries, vec![0, 0, 5]);
+    }
+
+    #[test]
+    fn group_boundaries_with_empty_middle_group() {
+        let boundaries = group_boundaries_from_counts(&[3, 0, 5]);
+        assert_eq!(boundaries, vec![0, 3, 3, 8]);
+    }
+
+    #[test]
+    fn group_boundaries_all_empty() {
+        let boundaries = group_boundaries_from_counts(&[0, 0, 0]);
+        assert_eq!(boundaries, vec![0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn group_boundaries_single_group() {
+        let boundaries = group_boundaries_from_counts(&[10]);
+        assert_eq!(boundaries, vec![0, 10]);
+    }
+
+    #[test]
+    fn group_boundaries_no_groups() {
+        let boundaries = group_boundaries_from_counts(&[]);
+        assert_eq!(boundaries, vec![0]);
     }
 }
 
