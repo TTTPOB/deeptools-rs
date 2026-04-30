@@ -778,35 +778,9 @@ mod tests {
     }
 
     // ── Issue 1d: chrom missing + missingDataAsZero ──────────────────────
-
-    #[test]
-    fn chrom_missing_fill_missing_data_as_zero_returns_zeros() {
-        // When missingDataAsZero=true and chromosome is not found,
-        // Python returns np.zeros(matrix_cols). Verify the fill value.
-        let general = GeneralOptions {
-            missing_data_as_zero: true,
-            ..default_general()
-        };
-        let fill = if general.missing_data_as_zero {
-            0.0
-        } else {
-            f64::NAN
-        };
-        let result = vec![fill; 5];
-        assert_eq!(result, vec![0.0; 5]);
-    }
-
-    #[test]
-    fn chrom_missing_fill_default_returns_nan() {
-        // When missingDataAsZero=false (default), fill should be NaN.
-        let general = default_general();
-        assert!(!general.missing_data_as_zero);
-        let fill = if general.missing_data_as_zero {
-            0.0
-        } else {
-            f64::NAN
-        };
-        let result = vec![fill; 5];
-        assert!(result.iter().all(|v| v.is_nan()));
-    }
+    // compute_sample_bins returns 0-filled vec when missingDataAsZero=true
+    // and chrom is missing from the bigWig.  This requires a real BigWig
+    // handle so it is covered by integration tests (python_compatibility.rs)
+    // rather than unit tests.  The production code branch is at the top of
+    // compute_sample_bins (the chrom_length None arm).
 }
