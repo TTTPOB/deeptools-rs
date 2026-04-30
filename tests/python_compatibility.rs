@@ -25,6 +25,49 @@ fn blacklist_data_root() -> PathBuf {
     project_root().join("tests/data")
 }
 
+fn corner_case_root() -> PathBuf {
+    project_root().join("tests/data/corner_cases")
+}
+
+fn run_compute_and_compare_corner(reference_mat: &str, args: &[&str], tolerance: f64) {
+    let reference_path = corner_case_root().join(reference_mat);
+    run_compute_and_compare_at(reference_path, args, tolerance);
+}
+
+fn run_compute_and_compare_corner_ignore(
+    reference_mat: &str,
+    args: &[&str],
+    tolerance: f64,
+    ignore_fields: &[&str],
+) {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let output_path = tmp.path().to_path_buf();
+
+    let mut cmd = Command::new(compute_matrix_bin());
+    cmd.args(args);
+    cmd.arg("-o").arg(&output_path);
+    let status = cmd.status().expect("failed to run compute_matrix_rs");
+    assert!(status.success(), "compute_matrix_rs failed with {status}");
+
+    let reference_path = corner_case_root().join(reference_mat);
+    let mut compare_cmd = Command::new(compare_matrix_bin());
+    compare_cmd
+        .arg("diff")
+        .arg(&output_path)
+        .arg(&reference_path)
+        .arg("--tolerance")
+        .arg(format!("{tolerance}"));
+    for field in ignore_fields {
+        compare_cmd.arg("--ignore").arg(field);
+    }
+    let status = compare_cmd.status().expect("failed to run compare_matrix");
+    assert!(
+        status.success(),
+        "Matrix mismatch for {}! compare_matrix diff exited with {status}",
+        reference_path.display()
+    );
+}
+
 /// Run compute_matrix_rs with given args, write output to a temp file,
 /// then compare the output against `reference_mat` using compare_matrix diff.
 ///
@@ -607,6 +650,118 @@ fn metagene_missing_data_as_zero() {
             "1",
             "--metagene",
             "--missingDataAsZero",
+        ],
+        5e-6,
+    );
+}
+
+// ── Corner case integration tests ─────────────────────────────────────────
+
+#[test]
+fn corner_case_short_body_scale_regions() {
+    let dr = data_root();
+    run_compute_and_compare_corner(
+        "master_short_body.mat",
+        &[
+            "scale-regions",
+            "-R",
+            corner_case_root().join("short_body.bed").to_str().unwrap(),
+            "-S",
+            dr.join("test.bw").to_str().unwrap(),
+            "-m",
+            "100",
+            "-b",
+            "100",
+            "-a",
+            "100",
+            "--bs",
+            "10",
+            "-p",
+            "1",
+        ],
+        5e-6,
+    );
+}
+
+#[test]
+fn corner_case_short_body_missing_data_as_zero() {
+    let dr = data_root();
+    run_compute_and_compare_corner(
+        "master_short_body_nan_to_zero.mat",
+        &[
+            "scale-regions",
+            "-R",
+            corner_case_root().join("short_body.bed").to_str().unwrap(),
+            "-S",
+            dr.join("test.bw").to_str().unwrap(),
+            "-m",
+            "100",
+            "-b",
+            "100",
+            "-a",
+            "100",
+            "--bs",
+            "10",
+            "-p",
+            "1",
+            "--missingDataAsZero",
+        ],
+        5e-6,
+    );
+}
+
+#[test]
+fn corner_case_scale_with_max_threshold() {
+    let dr = data_root();
+    // Python checks thresholds pre-scale: raw max 3.0 < 4 → keep all rows.
+    // Old Rust checked post-scale: scaled max 6.0 >= 4 → would drop rows.
+    run_compute_and_compare_corner_ignore(
+        "master_scale_threshold.mat",
+        &[
+            "reference-point",
+            "-R",
+            dr.join("group1.bed").to_str().unwrap(),
+            "-S",
+            dr.join("test.bw").to_str().unwrap(),
+            "-b",
+            "100",
+            "-a",
+            "100",
+            "--bs",
+            "10",
+            "-p",
+            "1",
+            "--scale",
+            "2",
+            "--maxThreshold",
+            "4",
+        ],
+        5e-6,
+        &["proc number", "scale"],
+    );
+}
+
+#[test]
+fn corner_case_skipzeros_removes_zero_region() {
+    let dr = data_root();
+    run_compute_and_compare_corner(
+        "master_skipzeros.mat",
+        &[
+            "reference-point",
+            "-R",
+            corner_case_root().join("skipzeros.bed").to_str().unwrap(),
+            "-S",
+            dr.join("test.bw").to_str().unwrap(),
+            "-b",
+            "100",
+            "-a",
+            "100",
+            "--bs",
+            "10",
+            "-p",
+            "1",
+            "--missingDataAsZero",
+            "--skipZeros",
         ],
         5e-6,
     );
