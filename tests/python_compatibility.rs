@@ -768,6 +768,37 @@ fn corner_case_scale_with_max_threshold() {
 }
 
 #[test]
+fn corner_case_scale_zero_with_max_threshold() {
+    let dr = data_root();
+    // --scale 0 --maxThreshold 3: ch3 raw max 3.0 >= 3 → filtered out,
+    // ch1/ch2 kept with all values scaled to 0.  Old Rust scaled first
+    // (all values became 0), then threshold check saw 0 < 3 → kept all rows.
+    run_compute_and_compare_corner(
+        "master_scale_zero_threshold.mat",
+        &[
+            "reference-point",
+            "-R",
+            dr.join("group1.bed").to_str().unwrap(),
+            "-S",
+            dr.join("test.bw").to_str().unwrap(),
+            "-b",
+            "100",
+            "-a",
+            "100",
+            "--bs",
+            "10",
+            "-p",
+            "1",
+            "--scale",
+            "0",
+            "--maxThreshold",
+            "3",
+        ],
+        5e-6,
+    );
+}
+
+#[test]
 fn corner_case_skipzeros_removes_zero_region() {
     let dr = data_root();
     run_compute_and_compare_corner(
