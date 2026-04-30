@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use crate::config::{GeneralOptions, GtfOptions, IoOptions};
+use crate::config::{GeneralOptions, GtfOptions, IoOptions, SortRegions};
 use crate::io::writers;
 use crate::pipeline::core::{self, FileCollector, PipelineMode, RegionTask};
 use crate::pipeline::matrix::MatrixHeader;
@@ -75,19 +75,8 @@ where
         }
     }
 
-    // ── Validate no groups were emptied by blacklist filtering ────────
-    // NOTE: intentional behavior difference from Python deepTools.
-    // Python only errors on empty groups in the `--sortRegions keep`
-    // path (computeMatrixOperations.py:729) and silently drops empty
-    // groups for no/ascend/descend. We treat an empty group as an
-    // error for all sort modes because it likely indicates a user
-    // configuration mistake (blacklist too aggressive or wrong BED
-    // file). See "Known behavior differences" in readme.md.
+    // ── Validate blacklist didn't remove too many regions ─────────────
     if blacklist.is_some() {
-        let mut post_filter_counts = vec![0usize; group_labels.len()];
-        for task in &tasks {
-            post_filter_counts[task.group_index] += 1;
-        }
         if tasks.is_empty() {
             anyhow::bail!(
                 "No regions remain after blacklist filtering. \
@@ -95,12 +84,24 @@ where
                 group_capacity.iter().sum::<usize>()
             );
         }
-        for (i, &count) in post_filter_counts.iter().enumerate() {
-            if count == 0 {
-                anyhow::bail!(
-                    "No regions remain in group '{}' after blacklist filtering.",
-                    group_labels[i]
-                );
+        // Python only errors on empty groups under --sortRegions keep
+        // (computeMatrixOperations.py:729, via sortMatrix). For
+        // no/ascend/descend it silently produces 0-row groups.
+        // This is arguably a design gap — an empty group usually
+        // means the blacklist/BED pairing is wrong — but we match
+        // Python for output parity.
+        if matches!(general.sort_regions, SortRegions::Keep) {
+            let mut post_filter_counts = vec![0usize; group_labels.len()];
+            for task in &tasks {
+                post_filter_counts[task.group_index] += 1;
+            }
+            for (i, &count) in post_filter_counts.iter().enumerate() {
+                if count == 0 {
+                    anyhow::bail!(
+                        "No regions remain in group '{}' after blacklist filtering.",
+                        group_labels[i]
+                    );
+                }
             }
         }
     }

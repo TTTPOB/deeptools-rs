@@ -56,7 +56,7 @@ Remove dead code, eliminate stale abstractions, rename ambiguous types, and impl
 
    - **Applying blacklist:** Region-level pre-filtering in `run_pipeline()`, **not** signal-level masking in workers. Precompute allowed (non-blacklisted) intervals per chromosome by subtracting blacklist from chromosome spans. A region is kept only if its **start position** falls within an allowed interval (matching Python's `findOverlaps(..., trimOverlap=True)` semantics). Workers receive no blacklist — they compute signal normally on dispatched regions.
 
-   - **Empty group validation:** After filtering, error if all regions are removed or any individual group is emptied. **Intentional difference from Python:** Python only errors on empty groups under `--sortRegions keep`; we error for all sort modes because an empty group indicates a configuration problem.
+   - **Empty group validation:** After filtering, error if all regions are removed. Per-group empty check only triggers under `--sortRegions keep` (matching Python's `computeMatrixOperations.sortMatrix()` path). For `no`/`ascend`/`descend`, empty groups produce 0-row sections in the output matrix.
 
    - **Overlap helper:** `fn blacklist_intervals_for_chrom(blacklist, chrom) -> &[(u32, u32)]` using normalized HashMap lookup (O(1) per chrom).
 
