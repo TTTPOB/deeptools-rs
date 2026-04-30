@@ -282,6 +282,10 @@ impl BigWigFile {
     }
 
     /// Parse the chromosome B+ tree from the file.
+    ///
+    /// Supports multi-level B+ trees by iteratively traversing internal
+    /// (non-leaf) nodes via a stack, collecting chromosome entries only
+    /// from leaf nodes.
     fn parse_chrom_tree(
         file: &File,
         offset: u64,
@@ -295,50 +299,82 @@ impl BigWigFile {
         let key_size = read_u32(&mut s)?;
         let val_size = read_u32(&mut s)?;
 
-        // Read root node header (4 bytes) to determine number of entries
         let root_offset = offset + 32;
-        let mut root_header = [0u8; 4];
-        pread_exact(file, root_offset, &mut root_header).map_err(BigWigReadError::Io)?;
-        let count = u16::from_le_bytes([root_header[2], root_header[3]]) as usize;
-
-        let item_size = key_size as usize + val_size as usize;
-        let root_size = 4 + count * item_size;
-        let mut root_data = vec![0u8; root_size];
-        root_data[..4].copy_from_slice(&root_header);
-        if root_size > 4 {
-            pread_exact(file, root_offset + 4, &mut root_data[4..]).map_err(BigWigReadError::Io)?;
-        }
-
         let mut chroms = Vec::new();
         let mut id_by_name = Vec::new();
 
-        for i in 0..count {
-            let entry_start = 4 + i * item_size;
-            let key = &root_data[entry_start..entry_start + key_size as usize];
-            let name_end = key.iter().position(|&b| b == 0).unwrap_or(key.len());
-            let name = std::str::from_utf8(&key[..name_end])
-                .unwrap_or("")
-                .to_string();
+        // Stack-based traversal to support multi-level B+ trees.
+        // For single-level trees (the common case) this processes only
+        // the root node, matching the previous behaviour.
+        let mut stack = vec![root_offset];
+        while let Some(node_offset) = stack.pop() {
+            // Read node header (4 bytes): isLeaf(1) + reserved(1) + count(2 LE)
+            let mut node_header = [0u8; 4];
+            pread_exact(file, node_offset, &mut node_header).map_err(BigWigReadError::Io)?;
+            let is_leaf = node_header[0] != 0;
+            let count = u16::from_le_bytes([node_header[2], node_header[3]]) as usize;
 
-            let val_start = entry_start + key_size as usize;
-            let chrom_id = u32::from_le_bytes([
-                root_data[val_start],
-                root_data[val_start + 1],
-                root_data[val_start + 2],
-                root_data[val_start + 3],
-            ]);
-            let length = u32::from_le_bytes([
-                root_data[val_start + 4],
-                root_data[val_start + 5],
-                root_data[val_start + 6],
-                root_data[val_start + 7],
-            ]);
+            if is_leaf {
+                // Leaf node: each entry is keySize + valSize bytes
+                let item_size = key_size as usize + val_size as usize;
+                let node_size = 4 + count * item_size;
+                let mut node_data = vec![0u8; node_size];
+                node_data[..4].copy_from_slice(&node_header);
+                if node_size > 4 {
+                    pread_exact(file, node_offset + 4, &mut node_data[4..])
+                        .map_err(BigWigReadError::Io)?;
+                }
 
-            chroms.push(ChromInfo {
-                name: name.clone(),
-                length,
-            });
-            id_by_name.push((name, chrom_id));
+                for i in 0..count {
+                    let entry_start = 4 + i * item_size;
+                    let key = &node_data[entry_start..entry_start + key_size as usize];
+                    let name_end = key.iter().position(|&b| b == 0).unwrap_or(key.len());
+                    let name = std::str::from_utf8(&key[..name_end])
+                        .unwrap_or("")
+                        .to_string();
+
+                    let val_start = entry_start + key_size as usize;
+                    let chrom_id = u32::from_le_bytes([
+                        node_data[val_start],
+                        node_data[val_start + 1],
+                        node_data[val_start + 2],
+                        node_data[val_start + 3],
+                    ]);
+                    let length = u32::from_le_bytes([
+                        node_data[val_start + 4],
+                        node_data[val_start + 5],
+                        node_data[val_start + 6],
+                        node_data[val_start + 7],
+                    ]);
+
+                    chroms.push(ChromInfo {
+                        name: name.clone(),
+                        length,
+                    });
+                    id_by_name.push((name, chrom_id));
+                }
+            } else {
+                // Internal node: each entry is keySize + 8 bytes (child offset)
+                let item_size = key_size as usize + 8;
+                let node_size = 4 + count * item_size;
+                let mut node_data = vec![0u8; node_size];
+                node_data[..4].copy_from_slice(&node_header);
+                if node_size > 4 {
+                    pread_exact(file, node_offset + 4, &mut node_data[4..])
+                        .map_err(BigWigReadError::Io)?;
+                }
+
+                for i in 0..count {
+                    let entry_start = 4 + i * item_size;
+                    let child_offset_start = entry_start + key_size as usize;
+                    let child_offset = u64::from_le_bytes(
+                        node_data[child_offset_start..child_offset_start + 8]
+                            .try_into()
+                            .unwrap(),
+                    );
+                    stack.push(child_offset);
+                }
+            }
         }
 
         chroms.sort_by(|a, b| a.name.cmp(&b.name));
