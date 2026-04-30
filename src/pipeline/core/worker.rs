@@ -73,14 +73,26 @@ fn should_skip_row_flat(values: &[f64], general: &GeneralOptions) -> bool {
     let has_nan = values.iter().any(|v| v.is_nan());
 
     if !has_nan {
+        // Python checks thresholds on pre-scale coverage values.  The
+        // values passed here are already scaled, so un-scale them for
+        // threshold comparison when scale_factor != 1.0.
+        let sf = general.scale_factor;
+        let unscale = sf != 0.0 && sf != 1.0;
+
         if let Some(min_threshold) = general.min_threshold {
-            if values.iter().any(|value| *value <= min_threshold) {
+            if values.iter().any(|value| {
+                let raw = if unscale { *value / sf } else { *value };
+                raw <= min_threshold
+            }) {
                 return true;
             }
         }
 
         if let Some(max_threshold) = general.max_threshold {
-            if values.iter().any(|value| *value >= max_threshold) {
+            if values.iter().any(|value| {
+                let raw = if unscale { *value / sf } else { *value };
+                raw >= max_threshold
+            }) {
                 return true;
             }
         }
@@ -700,6 +712,60 @@ mod tests {
         // Without NaN, threshold still works: 3.0 <= 5 → skip
         let general = GeneralOptions {
             min_threshold: Some(5.0),
+            ..default_general()
+        };
+        assert!(should_skip_row_flat(&[3.0, 7.0], &general));
+    }
+
+    // ── Issue 1b: threshold vs scale ordering ────────────────────────────
+
+    #[test]
+    fn min_threshold_with_scale_factor_compares_prescale() {
+        // Raw value = 3.0, scale = 2.0, scaled value = 6.0
+        // Python checks threshold on raw value: 3.0 <= 5 → skip
+        // Rust receives scaled value 6.0 and must un-scale for comparison
+        let general = GeneralOptions {
+            min_threshold: Some(5.0),
+            scale_factor: 2.0,
+            ..default_general()
+        };
+        // Scaled values: [6.0, 14.0] → pre-scale: [3.0, 7.0]
+        // 3.0 <= 5.0 → skip
+        assert!(should_skip_row_flat(&[6.0, 14.0], &general));
+    }
+
+    #[test]
+    fn min_threshold_with_scale_factor_no_skip() {
+        // Raw values = [6.0, 7.0], scale = 2.0, scaled = [12.0, 14.0]
+        // Python: 6.0 <= 5.0? No, 7.0 <= 5.0? No → keep
+        let general = GeneralOptions {
+            min_threshold: Some(5.0),
+            scale_factor: 2.0,
+            ..default_general()
+        };
+        assert!(!should_skip_row_flat(&[12.0, 14.0], &general));
+    }
+
+    #[test]
+    fn max_threshold_with_negative_scale() {
+        // Raw value = 12.0, scale = -1.0, scaled = -12.0
+        // Python: max([12.0]) = 12.0 >= 10 → skip
+        let general = GeneralOptions {
+            max_threshold: Some(10.0),
+            scale_factor: -1.0,
+            ..default_general()
+        };
+        // Scaled value is -12.0, un-scale: -12.0 / -1.0 = 12.0
+        // 12.0 >= 10.0 → skip
+        assert!(should_skip_row_flat(&[-12.0], &general));
+    }
+
+    #[test]
+    fn threshold_scale_factor_one_unchanged() {
+        // With scale_factor=1.0 behavior should be unchanged
+        let general = GeneralOptions {
+            min_threshold: Some(5.0),
+            scale_factor: 1.0,
             ..default_general()
         };
         assert!(should_skip_row_flat(&[3.0, 7.0], &general));
