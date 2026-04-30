@@ -2,24 +2,7 @@ use std::cmp::Ordering;
 
 use crate::config::{GeneralOptions, SortUsing};
 use crate::io::BedRecord;
-use serde::{Serialize, Serializer};
-
-/// Serialize the `scale` field to match Python's JSON output.
-///
-/// Python's `--scale` has `default=1` (int) and `type=float`.  When not passed,
-/// `args.scale = 1` (int) → serialized as `1`.  When `--scale X` is passed,
-/// `args.scale = X` (float) → serialized as e.g. `2.0`.
-///
-/// We cannot distinguish the two cases at runtime, but `scale=1.0` is
-/// overwhelmingly the default, so we special-case it as int `1` and serialize
-/// everything else as float.
-fn serialize_scale<S: Serializer>(value: &f64, s: S) -> Result<S::Ok, S::Error> {
-    if *value == 1.0 {
-        s.serialize_i64(1)
-    } else {
-        s.serialize_f64(*value)
-    }
-}
+use serde::Serialize;
 
 /// Serializable metadata header mirroring the JSON preamble written by the
 /// Python implementation of `computeMatrix`.
@@ -48,7 +31,11 @@ pub struct MatrixHeader {
     pub min_threshold: Option<f64>,
     #[serde(rename = "max threshold")]
     pub max_threshold: Option<f64>,
-    #[serde(rename = "scale", serialize_with = "serialize_scale")]
+    // Python serializes scale as int when unset (default=1) and float when
+    // explicitly passed.  We always emit float.  No downstream consumer
+    // (plotHeatmap, plotProfile, computeMatrixOperations) reads this field
+    // back, so the type difference is harmless.  Integration tests ignore it.
+    #[serde(rename = "scale")]
     pub scale: f64,
     #[serde(rename = "skip zeros")]
     pub skip_zeros: bool,

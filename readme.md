@@ -24,6 +24,7 @@ Latest Compatibility & Performance (2025-12-01)
 - Performance: total Rust time 11.48s (0 cached, 10 fresh); slowest case `reference_point_basic` at 9.09s on the deepTools test corpus.
 
 Known Behavior Differences from Python deepTools
+- **Header `scale` field type:** Python serializes the `scale` value as int when it is not explicitly passed (the default `1` is a Python int) and as float when explicitly passed (`1.0`, `2.0`, …). Rust always emits a JSON float. This is harmless — no downstream consumer (`plotHeatmap`, `plotProfile`, `computeMatrixOperations`) reads the `scale` header field back after matrix generation; it is only used during `computeMatrix` execution itself. Integration tests skip this field.
 - **Blacklist + empty region group:** When `--blackListFileName` removes all regions in a group, Python deepTools only errors under `--sortRegions keep` (via `computeMatrixOperations.sortMatrix()`) and silently drops the empty group from the header for `no`/`ascend`/`descend`. We match this behavior for output parity, but note that silently dropping a group is arguably a design gap in deepTools — an empty group usually signals a blacklist/BED mismatch rather than intended behavior.
 
 ENCODE K562 ATAC Benchmark (4 cores)

@@ -28,7 +28,7 @@ All 5 tasks from `docs/superpowers/plans/2026-04-29-next-stages.md` are done:
 5. **Task 5: Improve profile_bench.sh** — added warm-cache run with isolated output
 
 ### Bug Fixes
-- Fixed `scale` header field serialization: now emits integer when value is whole number (matching Python)
+- Reverted `scale` header field int-special-casing: always emit float; no downstream tool reads this field (documented as known difference)
 - Added u16 overflow protection to ChromTable::intern
 
 ---
