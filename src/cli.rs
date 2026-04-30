@@ -196,8 +196,8 @@ struct GeneralArgs {
 
     #[arg(
         long = "smartLabels",
-        default_value_t = true,
-        help = "By default, labels use the file name after removing the path and extension. Set to false to use the full filename with extension."
+        action = ArgAction::SetTrue,
+        help = "Instead of manually specifying labels for the input bigWig and BED/GTF files, this causes deepTools to use the file name after removing the path and extension."
     )]
     smart_labels: bool,
 

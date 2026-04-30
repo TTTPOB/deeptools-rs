@@ -71,9 +71,11 @@ pub fn derive_sample_labels(paths: &[PathBuf], general: &GeneralOptions) -> Resu
         return Ok(labels.clone());
     }
 
+    // Python's heatmapper.py always calls smartLabels() for sample labels
+    // regardless of the --smartLabels CLI flag, so we always strip extensions.
     Ok(paths
         .iter()
-        .map(|path| label_from_path(path, general.smart_labels))
+        .map(|path| label_from_path(path, true))
         .collect())
 }
 
