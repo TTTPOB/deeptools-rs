@@ -11,3 +11,6 @@ deeptools = "==3.5.6"
 
 [pypi-dependencies]
 pyyaml = ">=6.0.3, <7"
+
+[tasks]
+verify-artifacts = "bash scripts/verify_reference_artifacts.sh"
