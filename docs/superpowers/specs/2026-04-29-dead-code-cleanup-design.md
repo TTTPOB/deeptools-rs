@@ -20,7 +20,7 @@ Remove dead code, eliminate stale abstractions, rename ambiguous types, and impl
   - Implements `Iterator<Item = Result<Group, BedReadError>>` where `Group { label: String, records: Vec<BedRecord> }`.
   - Handles `#` lines as group boundaries (current `finalize_group` logic).
   - Group labels emitted are **raw** (not deduplicated). Cross-file label deduplication remains in `load_groups()` via the existing shared `seen_labels: HashSet<String>`. This preserves the invariant that labels are globally unique across all input BED/GTF files.
-  - No blacklist filtering — blacklist is applied at the signal level (see Change 2).
+  - No blacklist filtering — blacklist is applied as region-level pre-filtering (see Change 2).
 - Refactor `regions.rs::parse_grouped_bed()` to use `GroupedBedReader`.
 - Move `Group` struct from `regions.rs` to `bed.rs` (it is the iterator's output type).
 
@@ -47,25 +47,18 @@ Remove dead code, eliminate stale abstractions, rename ambiguous types, and impl
    - Are fully-overlapping regions present or dropped?
    - How does `--missingDataAsZero` interact with blacklisted positions?
 
-3. **Implement to match observed behavior.** The most likely implementation:
+3. **Implement to match observed behavior.** Reference analysis confirmed Python's behavior is **region-level pre-filtering** (not signal-level masking):
 
-   - **Loading blacklist:** In `pipeline/mod.rs::execute()` (or `run_pipeline`), if `general.blacklist` is `Some`:
+   - **Loading blacklist:** In `run_pipeline()`, if `general.blacklist` is `Some`:
      - Read the blacklist BED file using `GroupedBedReader::open(path, "blacklist")`.
-     - Flatten all groups, discard labels, collect into `Vec<(Arc<str>, u32, u32)>` of (chrom, start, end).
-     - Sort by (chrom, start) and merge overlapping intervals.
-     - Store as `Arc<Vec<...>>` and pass through to the worker layer.
+     - Flatten all groups, discard labels, normalize chromosome names, collect into `HashMap<String, Vec<(u32, u32)>>` keyed by normalized chrom.
+     - Sort and merge overlapping intervals per chromosome.
 
-   - **Applying blacklist:** In `worker.rs`, mask blacklisted positions in the signal. The exact mechanism (coverage buffer zeroing, query range splitting, or region-level filtering) is determined by the reference analysis in step 2. All three worker paths must be covered:
-     - `compute_sample_bins` (per-item fallback path)
-     - `process_batch` coverage buffer path (Median/Std/Min/Max)
-     - `process_batch` direct aggregation path (Mean/Sum)
+   - **Applying blacklist:** Region-level pre-filtering in `run_pipeline()`, **not** signal-level masking in workers. Precompute allowed (non-blacklisted) intervals per chromosome by subtracting blacklist from chromosome spans. A region is kept only if its **start position** falls within an allowed interval (matching Python's `findOverlaps(..., trimOverlap=True)` semantics). Workers receive no blacklist — they compute signal normally on dispatched regions.
 
-   - **Threading blacklist to workers:** Add blacklist as a parameter to:
-     - `execute_mode()` — receives the loaded blacklist.
-     - `process_batch()` and `compute_row()` / `compute_sample_bins()` — receive a reference to the blacklist slice.
-     - The blacklist is shared via `Arc`, no per-worker copies.
+   - **Empty group validation:** After filtering, error if all regions are removed or any individual group is emptied (matching Python's behavior).
 
-   - **Overlap helper:** Add `fn blacklist_intervals_for_chrom(blacklist, chrom) -> &[(u32, u32)]` that binary-searches the sorted blacklist for the relevant chrom's intervals.
+   - **Overlap helper:** `fn blacklist_intervals_for_chrom(blacklist, chrom) -> &[(u32, u32)]` using normalized HashMap lookup (O(1) per chrom).
 
 4. **Validate** with parity tests (see Testing Strategy).
 
