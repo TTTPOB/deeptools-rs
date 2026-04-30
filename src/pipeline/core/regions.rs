@@ -781,4 +781,55 @@ mod tests {
         let record = make_record("ch1", 30, 50);
         assert!(record_passes_blacklist(&record, &bl, &ai, &cs));
     }
+
+    // ── load_groups cross-file label deduplication ─────────────────────────
+
+    #[test]
+    fn load_groups_deduplicates_same_label_across_files() {
+        use crate::config::GtfOptions;
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        // The `# label` line in BED format *terminates* (names) the preceding
+        // group of records. Records are written first, then the label line.
+        let mut file1 = NamedTempFile::with_suffix(".bed").unwrap();
+        writeln!(file1, "chr1\t100\t200").unwrap();
+        writeln!(file1, "chr1\t300\t400").unwrap();
+        writeln!(file1, "# promoters").unwrap();
+        file1.flush().unwrap();
+
+        let mut file2 = NamedTempFile::with_suffix(".bed").unwrap();
+        writeln!(file2, "chr2\t500\t600").unwrap();
+        writeln!(file2, "# promoters").unwrap();
+        file2.flush().unwrap();
+
+        let paths = vec![file1.path().to_path_buf(), file2.path().to_path_buf()];
+        let groups = load_groups(&paths, &GtfOptions::default()).unwrap();
+
+        assert_eq!(groups.len(), 2, "expected two groups");
+        assert_eq!(
+            groups[0].label, "promoters",
+            "first group should keep original label"
+        );
+        assert_eq!(
+            groups[1].label, "promoters_1",
+            "second group should get _1 suffix"
+        );
+        assert_eq!(
+            groups[0].records.len(),
+            2,
+            "first group should have 2 records"
+        );
+        assert_eq!(
+            groups[1].records.len(),
+            1,
+            "second group should have 1 record"
+        );
+        assert_eq!(groups[0].records[0].chrom.as_ref(), "chr1");
+        assert_eq!(groups[0].records[0].start, 100);
+        assert_eq!(groups[0].records[0].end, 200);
+        assert_eq!(groups[1].records[0].chrom.as_ref(), "chr2");
+        assert_eq!(groups[1].records[0].start, 500);
+        assert_eq!(groups[1].records[0].end, 600);
+    }
 }

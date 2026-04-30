@@ -47,6 +47,17 @@ pub struct GtfOptions {
     pub transcript_id_designator: String,
 }
 
+impl Default for GtfOptions {
+    fn default() -> Self {
+        Self {
+            keep_exons: false,
+            transcript_id: "transcript".to_string(),
+            exon_id: "exon".to_string(),
+            transcript_id_designator: "transcript_id".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ModeConfig {
     ScaleRegions(ScaleRegionsOptions),
