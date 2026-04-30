@@ -141,11 +141,12 @@ fn compute_sample_bins<P: RegionPlan>(
                     continue;
                 }
 
-                // Pre-fill exonic range with 0.0 so uncovered exonic
-                // positions get 0.0 while introns stay NaN.
+                // Pre-fill the full included-interval range with 0.0
+                // so uncovered positions (including those off the
+                // chromosome) get 0.0 while introns stay NaN.
                 if general.missing_data_as_zero {
-                    let rs = (i64::from(fetch_start) - base_offset).max(0) as usize;
-                    let re = ((i64::from(fetch_end) - base_offset).max(0) as usize).min(window_len);
+                    let rs = (*seg_start - base_offset).max(0) as usize;
+                    let re = ((*seg_end - base_offset).max(0) as usize).min(window_len);
                     if rs < re {
                         buf[rs..re].fill(0.0);
                     }
