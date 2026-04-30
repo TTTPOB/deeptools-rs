@@ -95,6 +95,9 @@ fn run_compute_and_compare_at(reference_path: PathBuf, args: &[&str], tolerance:
     assert!(status.success(), "compute_matrix_rs failed with {status}");
 
     // Run compare_matrix diff
+    // Ignore "proc number" (thread count varies) and "scale" (Python
+    // serializes the default int 1 vs float 1.0 depending on whether --scale
+    // was passed; matching this int/float distinction is impractical).
     let status = Command::new(compare_matrix_bin())
         .arg("diff")
         .arg(&output_path)
@@ -103,6 +106,8 @@ fn run_compute_and_compare_at(reference_path: PathBuf, args: &[&str], tolerance:
         .arg(format!("{tolerance}"))
         .arg("--ignore")
         .arg("proc number")
+        .arg("--ignore")
+        .arg("scale")
         .status()
         .expect("failed to run compare_matrix");
 

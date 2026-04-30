@@ -17,52 +17,55 @@ fn serialize_scale<S: Serializer>(value: &f64, s: S) -> Result<S::Ok, S::Error> 
 
 /// Serializable metadata header mirroring the JSON preamble written by the
 /// Python implementation of `computeMatrix`.
+///
+/// Field order matches Python's dict insertion order so that serde produces
+/// identical JSON key ordering.
 #[derive(Debug, Clone, Serialize)]
 pub struct MatrixHeader {
+    #[serde(rename = "upstream")]
+    pub upstream: Vec<u32>,
+    #[serde(rename = "downstream")]
+    pub downstream: Vec<u32>,
+    #[serde(rename = "body")]
+    pub body: Vec<u32>,
+    #[serde(rename = "bin size")]
+    pub bin_size: Vec<u32>,
+    #[serde(rename = "ref point")]
+    pub ref_point: Vec<Option<String>>,
     #[serde(rename = "verbose")]
     pub verbose: bool,
+    #[serde(rename = "bin avg type")]
+    pub bin_avg_type: String,
+    #[serde(rename = "missing data as zero")]
+    pub missing_data_as_zero: bool,
+    #[serde(rename = "min threshold")]
+    pub min_threshold: Option<f64>,
+    #[serde(rename = "max threshold")]
+    pub max_threshold: Option<f64>,
     #[serde(rename = "scale", serialize_with = "serialize_scale")]
     pub scale: f64,
     #[serde(rename = "skip zeros")]
     pub skip_zeros: bool,
     #[serde(rename = "nan after end")]
     pub nan_after_end: bool,
+    #[serde(rename = "proc number")]
+    pub proc_number: u32,
+    #[serde(rename = "sort regions")]
+    pub sort_regions: String,
     #[serde(rename = "sort using")]
     pub sort_using: String,
     #[serde(rename = "unscaled 5 prime")]
     pub unscaled_5_prime: Vec<u32>,
-    #[serde(rename = "body")]
-    pub body: Vec<u32>,
-    #[serde(rename = "sample_labels")]
-    pub sample_labels: Vec<String>,
-    #[serde(rename = "downstream")]
-    pub downstream: Vec<u32>,
     #[serde(rename = "unscaled 3 prime")]
     pub unscaled_3_prime: Vec<u32>,
     #[serde(rename = "group_labels")]
     pub group_labels: Vec<String>,
-    #[serde(rename = "bin size")]
-    pub bin_size: Vec<u32>,
-    #[serde(rename = "upstream")]
-    pub upstream: Vec<u32>,
     #[serde(rename = "group_boundaries")]
     pub group_boundaries: Vec<usize>,
+    #[serde(rename = "sample_labels")]
+    pub sample_labels: Vec<String>,
     #[serde(rename = "sample_boundaries")]
     pub sample_boundaries: Vec<usize>,
-    #[serde(rename = "missing data as zero")]
-    pub missing_data_as_zero: bool,
-    #[serde(rename = "ref point")]
-    pub ref_point: Vec<Option<String>>,
-    #[serde(rename = "min threshold")]
-    pub min_threshold: Option<f64>,
-    #[serde(rename = "sort regions")]
-    pub sort_regions: String,
-    #[serde(rename = "proc number")]
-    pub proc_number: u32,
-    #[serde(rename = "bin avg type")]
-    pub bin_avg_type: String,
-    #[serde(rename = "max threshold")]
-    pub max_threshold: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -176,28 +179,28 @@ impl<'a> MatrixHeaderBuilder<'a> {
         let group_boundaries = group_boundaries_from_counts(self.group_counts);
 
         MatrixHeader {
+            upstream: layout.upstream,
+            downstream: layout.downstream,
+            body: layout.body,
+            bin_size: layout.bin_size,
+            ref_point: layout.ref_point,
             verbose: self.general.verbose,
+            bin_avg_type: self.general.average_type_bins.to_string(),
+            missing_data_as_zero: self.general.missing_data_as_zero,
+            min_threshold: self.general.min_threshold,
+            max_threshold: self.general.max_threshold,
             scale: self.general.scale_factor,
             skip_zeros: self.general.skip_zeros,
             nan_after_end: self.nan_after_end,
+            proc_number: self.thread_count as u32,
+            sort_regions: self.general.sort_regions.to_string(),
             sort_using: self.general.sort_using.to_string(),
             unscaled_5_prime: layout.unscaled_5_prime,
-            body: layout.body,
-            sample_labels: self.sample_labels.to_vec(),
-            downstream: layout.downstream,
             unscaled_3_prime: layout.unscaled_3_prime,
             group_labels: self.group_labels.to_vec(),
-            bin_size: layout.bin_size,
-            upstream: layout.upstream,
             group_boundaries,
+            sample_labels: self.sample_labels.to_vec(),
             sample_boundaries,
-            missing_data_as_zero: self.general.missing_data_as_zero,
-            ref_point: layout.ref_point,
-            min_threshold: self.general.min_threshold,
-            sort_regions: self.general.sort_regions.to_string(),
-            proc_number: self.thread_count as u32,
-            bin_avg_type: self.general.average_type_bins.to_string(),
-            max_threshold: self.general.max_threshold,
         }
     }
 }
@@ -462,30 +465,30 @@ impl MatrixHeader {
             boundaries.push(boundaries.last().unwrap() + count);
         }
         Self {
+            upstream: vec![0],
+            downstream: vec![0],
+            body: vec![0],
+            bin_size: vec![10],
+            ref_point: vec![None],
             verbose: false,
+            bin_avg_type: "mean".into(),
+            missing_data_as_zero: false,
+            min_threshold: None,
+            max_threshold: None,
             scale: 1.0,
             skip_zeros: false,
             nan_after_end: false,
+            proc_number: 1,
+            sort_regions: "keep".into(),
             sort_using: "mean".into(),
             unscaled_5_prime: vec![0],
-            body: vec![0],
-            sample_labels: vec!["test".into()],
-            downstream: vec![0],
             unscaled_3_prime: vec![0],
             group_labels: (0..group_counts.len())
                 .map(|i| format!("group{i}"))
                 .collect(),
-            bin_size: vec![10],
-            upstream: vec![0],
             group_boundaries: boundaries,
+            sample_labels: vec!["test".into()],
             sample_boundaries: vec![0, 1],
-            missing_data_as_zero: false,
-            ref_point: vec![None],
-            min_threshold: None,
-            sort_regions: "keep".into(),
-            proc_number: 1,
-            bin_avg_type: "mean".into(),
-            max_threshold: None,
         }
     }
 }
