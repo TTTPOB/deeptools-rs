@@ -55,6 +55,11 @@ pub fn write_sorted_region_row<W: Write>(
             .iter()
             .map(|(s, e)| (e - s).to_string())
             .collect();
+        // blockStarts: standard BED12 uses offsets relative to chromStart (0 for
+        // single-block regions).  Python deepTools (via deeptoolsintervals) outputs
+        // absolute genomic coordinates here instead, which is non-standard.  We
+        // follow the BED12 specification; downstream tools that parse this column
+        // will get correct results.
         let block_starts: Vec<String> = exon_coords
             .iter()
             .map(|(s, _)| (s - start).to_string())
@@ -148,6 +153,8 @@ mod tests {
         assert_eq!(cols[8], "0"); // itemRGB
         assert_eq!(cols[9], "1"); // blockCount
         assert_eq!(cols[10], "50"); // blockSizes = end - start
+        // blockStarts follows BED12 spec (relative to chromStart), not the
+        // absolute-coordinate convention used by Python's deeptoolsintervals.
         assert_eq!(cols[11], "0"); // blockStarts
         assert_eq!(cols[12], "Group 1");
     }
@@ -164,6 +171,8 @@ mod tests {
         assert_eq!(cols[4], "5.0");
         assert_eq!(cols[9], "2"); // blockCount = 2 exons
         assert_eq!(cols[10], "20,10"); // blockSizes: 120-100, 150-140
+        // blockStarts follows BED12 spec (relative to chromStart), not the
+        // absolute-coordinate convention used by Python's deeptoolsintervals.
         assert_eq!(cols[11], "0,40"); // blockStarts: 100-100, 140-100
         assert_eq!(cols[12], "Group 2");
     }

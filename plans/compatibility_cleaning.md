@@ -76,6 +76,7 @@ Status: **done**
 | Area | Description |
 |------|-------------|
 | Missing-chrom region dispatch | Python's mapReduce dispatches regions by bigWig chromosomes — if a chromosome doesn't exist in any bigWig, the BED region is never processed (row omitted). Rust processes all BED regions and fills with NaN/0. Fixing this would require changes to the region dispatch architecture. |
+| outFileSortedRegions blockStarts | Python's deeptoolsintervals outputs absolute genomic coordinates in the blockStarts column. Rust follows the BED12 specification using offsets relative to chromStart. This is a deeptoolsintervals implementation detail, not a deepTools design choice. |
 
 ## Results
 
