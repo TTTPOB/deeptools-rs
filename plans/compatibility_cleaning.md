@@ -10,7 +10,7 @@ optimizations that preserve identical output are left alone.
 ## Phases
 
 ### Phase 1 — Worker computation fixes
-Status: **pending**
+Status: **done**
 
 Fixes in `src/pipeline/core/worker.rs` and related files:
 
@@ -22,7 +22,7 @@ Fixes in `src/pipeline/core/worker.rs` and related files:
 | 1d | Chromosome missing + missingDataAsZero | Python fills 0 when chrom missing and missingDataAsZero=true. Rust unconditionally returns NaN. |
 
 ### Phase 2 — Zone planning fixes
-Status: **pending**
+Status: **done**
 
 Fixes in `src/pipeline/zones/mod.rs` and `metagene.rs`:
 
@@ -32,7 +32,7 @@ Fixes in `src/pipeline/zones/mod.rs` and `metagene.rs`:
 | 2b | Metagene center padding | Rust clears left/right bins when exon length insufficient; Python preserves partial exon fragments and only records padding count. |
 
 ### Phase 3 — Matrix, sorting, group boundary fixes
-Status: **pending**
+Status: **done**
 
 Fixes in `src/pipeline/matrix.rs`, `executor.rs`, `run.rs`:
 
@@ -42,7 +42,7 @@ Fixes in `src/pipeline/matrix.rs`, `executor.rs`, `run.rs`:
 | 3b | Group boundaries after row filtering | skipZeros/threshold filtering can empty groups; Rust doesn't rebuild header group info post-filter. |
 
 ### Phase 4 — CLI defaults
-Status: **pending**
+Status: **done**
 
 Fixes in `src/cli.rs`:
 
@@ -51,7 +51,7 @@ Fixes in `src/cli.rs`:
 | 4a | smartLabels default | Rust defaults to true (strips extension); Python defaults to false (keeps extension). |
 
 ### Phase 5 — Output formatting fixes
-Status: **pending**
+Status: **done**
 
 Fixes in `src/io/writers/formatting.rs`, `auxiliary.rs`, `matrix_gz.rs`:
 
@@ -64,7 +64,7 @@ Fixes in `src/io/writers/formatting.rs`, `auxiliary.rs`, `matrix_gz.rs`:
 | 5e | outFileSortedRegions format | Python outputs 13-column BED-like with deepTools_group; Rust outputs 7 columns. |
 
 ### Phase 6 — Self-review & final verification
-Status: **pending**
+Status: **done**
 
 - Run full `cargo test`
 - Run `pixi run python scripts/custom_compare.py --mode python-compatibility`
@@ -76,6 +76,14 @@ Status: **pending**
 | Area | Description |
 |------|-------------|
 | Missing-chrom region dispatch | Python's mapReduce dispatches regions by bigWig chromosomes — if a chromosome doesn't exist in any bigWig, the BED region is never processed (row omitted). Rust processes all BED regions and fills with NaN/0. Fixing this would require changes to the region dispatch architecture. |
+
+## Results
+
+- 12 commits total
+- 8 behavioral fixes implemented
+- 4 corner case integration tests added with Python reference data
+- 269 unit tests + 23 integration tests passing
+- 7 deferred items documented (auxiliary output formats, architectural differences)
 
 ## Audit Sources
 
