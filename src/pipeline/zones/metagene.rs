@@ -153,22 +153,12 @@ fn build_tss(
 
     match record.strand {
         Strand::Negative => {
-            let upstream_intervals = if upstream_bins > 0 {
-                vec![(
-                    feature_end,
-                    feature_end + (bin_size as usize * upstream_bins) as i64,
-                )]
-            } else {
-                Vec::new()
-            };
-            append_reference_bins(
-                bins,
-                &upstream_intervals,
-                upstream_bins,
-                bin_size,
-                nan_after_end,
-            );
-
+            // Python builds zones in ascending genomic order for negative-
+            // strand TSS, then reverses the whole coverage array.  Match
+            // that layout so postprocess_row can do the same reversal.
+            //
+            // Python zones: [(exon_right_chopped, downstream_bins),
+            //                (feature_end_extension, upstream_bins)]
             let (mut downstream_intervals, pad) =
                 take_from_end(exons, downstream_bins as u32 * bin_size);
             if pad > 0 && !downstream_intervals.is_empty() && !nan_after_end {
@@ -182,6 +172,22 @@ fn build_tss(
                 bins,
                 &downstream_intervals,
                 downstream_bins,
+                bin_size,
+                nan_after_end,
+            );
+
+            let upstream_intervals = if upstream_bins > 0 {
+                vec![(
+                    feature_end,
+                    feature_end + (bin_size as usize * upstream_bins) as i64,
+                )]
+            } else {
+                Vec::new()
+            };
+            append_reference_bins(
+                bins,
+                &upstream_intervals,
+                upstream_bins,
                 bin_size,
                 nan_after_end,
             );
@@ -237,43 +243,15 @@ fn build_tes(
 
     match record.strand {
         Strand::Negative => {
-            let upstream_intervals = if upstream_bins > 0 {
+            // Python builds zones in ascending genomic order for negative-
+            // strand TES, then reverses the whole coverage array.
+            // TES for negative strand = biological start = genomic left (feature_start).
+            //
+            // Python zones: [(feature_start - downstream, feature_start),
+            //                (left_exon_portion by upstream)]
+            let upstream_intervals = if downstream_bins > 0 {
                 vec![(
-                    feature_end,
-                    feature_end + (bin_size as usize * upstream_bins) as i64,
-                )]
-            } else {
-                Vec::new()
-            };
-            append_reference_bins(
-                bins,
-                &upstream_intervals,
-                upstream_bins,
-                bin_size,
-                nan_after_end,
-            );
-
-            let (mut downstream_intervals, pad) =
-                take_from_end(exons, upstream_bins as u32 * bin_size);
-            if pad > 0 && !downstream_intervals.is_empty() && !nan_after_end {
-                let start = downstream_intervals
-                    .first()
-                    .map(|(start, _)| *start)
-                    .unwrap_or(feature_start);
-                downstream_intervals.insert(0, (start - pad as i64, start));
-            }
-            append_reference_bins(
-                bins,
-                &downstream_intervals,
-                downstream_bins,
-                bin_size,
-                nan_after_end,
-            );
-        }
-        _ => {
-            let upstream_intervals = if upstream_bins > 0 {
-                vec![(
-                    feature_start - (bin_size as usize * upstream_bins) as i64,
+                    feature_start - (bin_size as usize * downstream_bins) as i64,
                     feature_start,
                 )]
             } else {
@@ -282,7 +260,7 @@ fn build_tes(
             append_reference_bins(
                 bins,
                 &upstream_intervals,
-                upstream_bins,
+                downstream_bins,
                 bin_size,
                 nan_after_end,
             );
@@ -296,6 +274,43 @@ fn build_tes(
                     .unwrap_or(feature_end);
                 downstream_intervals.push((end, end + pad as i64));
             }
+            append_reference_bins(
+                bins,
+                &downstream_intervals,
+                upstream_bins,
+                bin_size,
+                nan_after_end,
+            );
+        }
+        _ => {
+            // Python TES positive: upstream = chopRegions(exons, right=upstream)
+            // (right portion of exons), downstream = extension beyond feature_end.
+            // zones = [(upstream, a), (downstream, e)] in ascending genomic order.
+            let (mut upstream_intervals, pad) =
+                take_from_end(exons, upstream_bins as u32 * bin_size);
+            if pad > 0 && !upstream_intervals.is_empty() && !nan_after_end {
+                let start = upstream_intervals
+                    .first()
+                    .map(|(start, _)| *start)
+                    .unwrap_or(feature_start);
+                upstream_intervals.insert(0, (start - pad as i64, start));
+            }
+            append_reference_bins(
+                bins,
+                &upstream_intervals,
+                upstream_bins,
+                bin_size,
+                nan_after_end,
+            );
+
+            let downstream_intervals = if downstream_bins > 0 {
+                vec![(
+                    feature_end,
+                    feature_end + (bin_size as usize * downstream_bins) as i64,
+                )]
+            } else {
+                Vec::new()
+            };
             append_reference_bins(
                 bins,
                 &downstream_intervals,
@@ -316,15 +331,30 @@ fn build_center(
     nan_after_end: bool,
     bins: &mut Vec<ReferenceBin>,
 ) {
-    let (mut left, mut right, pad_left, pad_right) = chop_regions_from_middle(
-        exons,
-        (upstream_bins as u32) * bin_size,
-        (downstream_bins as u32) * bin_size,
-    );
+    // Python for negative strand passes (left=downstream, right=upstream) to
+    // chopRegionsFromMiddle, whereas positive uses (left=upstream, right=downstream).
+    // Both produce zones in ascending genomic order; negative is later reversed.
+    let (left_param, right_param) = if record.strand == Strand::Negative {
+        (
+            (downstream_bins as u32) * bin_size,
+            (upstream_bins as u32) * bin_size,
+        )
+    } else {
+        (
+            (upstream_bins as u32) * bin_size,
+            (downstream_bins as u32) * bin_size,
+        )
+    };
+    let (mut left, mut right, pad_left, pad_right) =
+        chop_regions_from_middle(exons, left_param, right_param);
 
-    if record.strand == Strand::Negative {
-        std::mem::swap(&mut left, &mut right);
-    }
+    // Determine bin counts for left and right halves.
+    // For negative strand, left holds downstream_bins and right holds upstream_bins.
+    let (left_bins, right_bins) = if record.strand == Strand::Negative {
+        (downstream_bins, upstream_bins)
+    } else {
+        (upstream_bins, downstream_bins)
+    };
 
     if pad_left > 0 && !left.is_empty() && !nan_after_end {
         let start = left
@@ -341,8 +371,8 @@ fn build_center(
         right.push((end, end + pad_right as i64));
     }
 
-    append_reference_bins(bins, &left, upstream_bins, bin_size, nan_after_end);
-    append_reference_bins(bins, &right, downstream_bins, bin_size, nan_after_end);
+    append_reference_bins(bins, &left, left_bins, bin_size, nan_after_end);
+    append_reference_bins(bins, &right, right_bins, bin_size, nan_after_end);
 }
 
 fn append_reference_bins(

@@ -1,7 +1,7 @@
 use anyhow::{Result, bail};
 
 use crate::config::{GeneralOptions, GtfOptions, IoOptions, ReferencePointOptions};
-use crate::io::BedRecord;
+use crate::io::{BedRecord, Strand};
 use crate::pipeline::core::{self, ModeTag, PipelineMode};
 use crate::pipeline::matrix::{LayoutVectors, MatrixHeader, MatrixHeaderBuilder, MatrixRow};
 use crate::pipeline::zones::ReferencePointPlan;
@@ -88,11 +88,21 @@ impl PipelineMode for ReferencePointMode {
     fn postprocess_row(
         &self,
         record: BedRecord,
-        values: Vec<f64>,
+        mut values: Vec<f64>,
         sample_count: usize,
         bin_count: usize,
         _metadata: &Self::Metadata,
     ) -> MatrixRow {
+        // In metagene mode, bins are built in ascending genomic order.
+        // Python reverses the entire coverage array for negative strand
+        // (heatmapper.py:545-546). Match that behavior.
+        if self.keep_exons && matches!(record.strand, Strand::Negative) {
+            for sample_idx in 0..sample_count {
+                let start = sample_idx * bin_count;
+                values[start..start + bin_count].reverse();
+            }
+        }
+
         // Extract exon coordinates for metagene mode output
         let exon_coords = if self.keep_exons {
             record.exons()

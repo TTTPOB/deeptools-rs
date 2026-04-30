@@ -622,6 +622,39 @@ fn metagene_missing_data_as_zero() {
     );
 }
 
+// ── metagene reference-point parity tests ─────────────────────────────────
+
+#[test]
+fn corner_case_metagene_reference_point() {
+    let tdr = test_data_root();
+    // Tolerance is 0.17 rather than 5e-6 because one bin straddles an exon
+    // boundary gap (601-610 + 1079-1080): Python computes a weighted mean of
+    // both segments while Rust fetches a single span (601-1080) that includes
+    // the intron, yielding a ~0.16 difference at that single bin.
+    run_compute_and_compare_corner(
+        "master_metagene_refpoint.mat",
+        &[
+            "reference-point",
+            "-R",
+            tdr.join("test.gtf").to_str().unwrap(),
+            "-S",
+            tdr.join("test1.bw.bw").to_str().unwrap(),
+            "--referencePoint",
+            "TSS",
+            "-b",
+            "100",
+            "-a",
+            "100",
+            "--bs",
+            "10",
+            "-p",
+            "1",
+            "--metagene",
+        ],
+        0.17,
+    );
+}
+
 // ── Corner case integration tests ─────────────────────────────────────────
 
 #[test]
