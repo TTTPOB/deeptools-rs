@@ -66,23 +66,23 @@ fn should_skip_row_flat(values: &[f64], general: &GeneralOptions) -> bool {
         }
     }
 
-    if let Some(min_threshold) = general.min_threshold {
-        if values
-            .iter()
-            .filter(|value| !value.is_nan())
-            .any(|value| *value <= min_threshold)
-        {
-            return true;
-        }
-    }
+    // Python uses coverage.min()/max() which propagate NaN: if ANY
+    // value is NaN the comparison returns False and the threshold check
+    // passes (row is kept).  Match that by skipping thresholds entirely
+    // when a NaN value is present.
+    let has_nan = values.iter().any(|v| v.is_nan());
 
-    if let Some(max_threshold) = general.max_threshold {
-        if values
-            .iter()
-            .filter(|value| !value.is_nan())
-            .any(|value| *value >= max_threshold)
-        {
-            return true;
+    if !has_nan {
+        if let Some(min_threshold) = general.min_threshold {
+            if values.iter().any(|value| *value <= min_threshold) {
+                return true;
+            }
+        }
+
+        if let Some(max_threshold) = general.max_threshold {
+            if values.iter().any(|value| *value >= max_threshold) {
+                return true;
+            }
         }
     }
 
@@ -670,5 +670,38 @@ mod tests {
             ..default_general()
         };
         assert!(should_skip_row_flat(&[f64::NAN, 0.0, 0.0], &general));
+    }
+
+    // ── Issue 1c: threshold NaN propagation ──────────────────────────────
+
+    #[test]
+    fn min_threshold_nan_present_keeps_row() {
+        // Python: min([NaN, 3.0]) = NaN, NaN <= 5 is False → keep row
+        // Rust previously filtered NaN, found 3.0 <= 5 → skipped
+        let general = GeneralOptions {
+            min_threshold: Some(5.0),
+            ..default_general()
+        };
+        assert!(!should_skip_row_flat(&[f64::NAN, 3.0], &general));
+    }
+
+    #[test]
+    fn max_threshold_nan_present_keeps_row() {
+        // Python: max([NaN, 12.0]) = NaN, NaN >= 10 is False → keep row
+        let general = GeneralOptions {
+            max_threshold: Some(10.0),
+            ..default_general()
+        };
+        assert!(!should_skip_row_flat(&[f64::NAN, 12.0], &general));
+    }
+
+    #[test]
+    fn min_threshold_no_nan_still_skips() {
+        // Without NaN, threshold still works: 3.0 <= 5 → skip
+        let general = GeneralOptions {
+            min_threshold: Some(5.0),
+            ..default_general()
+        };
+        assert!(should_skip_row_flat(&[3.0, 7.0], &general));
     }
 }
