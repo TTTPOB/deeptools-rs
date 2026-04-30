@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use crate::config::{GeneralOptions, GtfOptions, IoOptions, SortRegions};
+use crate::config::{EmptyGroupPolicy, GeneralOptions, GtfOptions, IoOptions};
 use crate::io::writers;
 use crate::pipeline::core::{self, FileCollector, PipelineMode, RegionTask};
 use crate::pipeline::matrix::MatrixHeader;
@@ -93,42 +93,52 @@ where
         let has_empty_group = post_filter_counts.iter().any(|&c| c == 0);
 
         if has_empty_group {
-            if matches!(general.sort_regions, SortRegions::Keep) {
-                // Python errors on empty groups only under --sortRegions keep
-                // (computeMatrixOperations.py:729, via sortMatrix).
-                let empty = post_filter_counts
-                    .iter()
-                    .enumerate()
-                    .find(|(_, c)| **c == 0)
-                    .unwrap()
-                    .0;
-                anyhow::bail!(
-                    "No regions remain in group '{}' after blacklist filtering.",
-                    group_labels[empty]
-                );
-            }
-
-            // For no/ascend/descend, Python drops empty groups from the
-            // header entirely (they don't appear in group_labels or
-            // group_boundaries). Remap task group_index values and
-            // rebuild group_labels/group_capacity to match.
-            let mut old_to_new = vec![0usize; group_labels.len()];
-            let mut new_labels = Vec::new();
-            let mut new_capacity = Vec::new();
-            let mut new_idx = 0usize;
-            for (old_idx, &count) in post_filter_counts.iter().enumerate() {
-                if count > 0 {
-                    old_to_new[old_idx] = new_idx;
-                    new_labels.push(group_labels[old_idx].clone());
-                    new_capacity.push(count);
-                    new_idx += 1;
+            let policy = EmptyGroupPolicy::for_sort_regions(general.sort_regions);
+            match policy {
+                EmptyGroupPolicy::Error => {
+                    // Python errors on empty groups only under --sortRegions keep
+                    // (computeMatrixOperations.py:729, via sortMatrix).
+                    let empty = post_filter_counts
+                        .iter()
+                        .enumerate()
+                        .find(|(_, c)| **c == 0)
+                        .unwrap()
+                        .0;
+                    anyhow::bail!(
+                        "No regions remain in group '{}' after blacklist filtering.",
+                        group_labels[empty]
+                    );
+                }
+                EmptyGroupPolicy::Drop => {
+                    // For no/ascend/descend, Python drops empty groups from the
+                    // header entirely (they don't appear in group_labels or
+                    // group_boundaries). Remap task group_index values and
+                    // rebuild group_labels/group_capacity to match.
+                    let mut old_to_new = vec![0usize; group_labels.len()];
+                    let mut new_labels = Vec::new();
+                    let mut new_capacity = Vec::new();
+                    let mut new_idx = 0usize;
+                    for (old_idx, &count) in post_filter_counts.iter().enumerate() {
+                        if count > 0 {
+                            old_to_new[old_idx] = new_idx;
+                            new_labels.push(group_labels[old_idx].clone());
+                            new_capacity.push(count);
+                            new_idx += 1;
+                        }
+                    }
+                    for task in &mut tasks {
+                        task.group_index = old_to_new[task.group_index];
+                    }
+                    group_labels = new_labels;
+                    group_capacity = new_capacity;
+                }
+                EmptyGroupPolicy::PreserveWithZeroCount => {
+                    unreachable!(
+                        "blacklist filtering (pre-execution) cannot use \
+                         PreserveWithZeroCount — groups are not yet fixed"
+                    );
                 }
             }
-            for task in &mut tasks {
-                task.group_index = old_to_new[task.group_index];
-            }
-            group_labels = new_labels;
-            group_capacity = new_capacity;
         }
     }
 
@@ -155,6 +165,11 @@ where
         io.matrix_values_output.as_deref(),
     )?;
 
+    // Runtime row filtering (--skipZeros, --minThreshold, --maxThreshold)
+    // may produce zero-count groups; group structure is already fixed at this
+    // point so the only valid policy is PreserveWithZeroCount.
+    let runtime_empty_group_policy = EmptyGroupPolicy::PreserveWithZeroCount;
+
     let header_builder = {
         let general = general.clone();
         let sample_labels = sample_labels.clone();
@@ -162,6 +177,12 @@ where
         let metadata = Arc::clone(&metadata);
         let mode = mode.clone();
         move |group_counts: Vec<usize>| -> Result<MatrixHeader> {
+            // Explicitly validate against the runtime policy — zero-count
+            // groups are expected and allowed when filtering is active.
+            runtime_empty_group_policy
+                .validate(&group_counts, &group_labels)
+                .map_err(|msg| anyhow::anyhow!("{msg}"))?;
+
             Ok(mode.build_header(
                 &general,
                 metadata.as_ref(),

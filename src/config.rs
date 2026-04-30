@@ -121,6 +121,68 @@ pub enum AverageTypeBins {
     Sum,
 }
 
+/// Strategy for handling groups that become empty during the pipeline.
+///
+/// Two phases can produce empty groups:
+///
+/// **Pre-execution** (blacklist filtering): Occurs before output writers are
+/// created.  The policy is determined by `SortRegions` — `Keep` uses `Error`,
+/// all other modes use `Drop` (removing the empty group from `group_labels` and
+/// `group_boundaries`, remapping subsequent indices).
+///
+/// **Runtime** (`--skipZeros`, `--minThreshold`, `--maxThreshold`): Occurs
+/// while rows are being written.  Group structure is already fixed at output
+/// time, so empty groups are implicitly preserved with a count of 0
+/// (consecutive identical entries in `group_boundaries`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmptyGroupPolicy {
+    /// Remove empty groups from the header and remap subsequent group indices.
+    /// Only valid for pre-execution filtering.
+    Drop,
+    /// Abort with an error if any group becomes empty.
+    Error,
+    /// Keep the group in the output, represented by consecutive identical
+    /// boundaries (count = 0).  Implicit for runtime row filtering.
+    PreserveWithZeroCount,
+}
+
+impl EmptyGroupPolicy {
+    /// Policy for blacklist (pre-execution) filtering.
+    pub fn for_sort_regions(sort: SortRegions) -> Self {
+        match sort {
+            SortRegions::Keep => EmptyGroupPolicy::Error,
+            _ => EmptyGroupPolicy::Drop,
+        }
+    }
+
+    /// Validate group counts against this policy.  Called when group counts
+    /// are finalised, before building the output header.
+    ///
+    /// `Error` rejects any zero-count group.  `Drop` is invalid at runtime
+    /// (indices are already fixed in output).  `PreserveWithZeroCount`
+    /// explicitly allows zero-count groups.
+    pub fn validate(&self, group_counts: &[usize], group_labels: &[String]) -> Result<(), String> {
+        match self {
+            EmptyGroupPolicy::Error => {
+                if let Some(idx) = group_counts.iter().position(|c| *c == 0) {
+                    return Err(format!("Group '{}' is empty", group_labels[idx]));
+                }
+            }
+            EmptyGroupPolicy::Drop => {
+                return Err(
+                    "Drop policy cannot be applied at runtime — group indices are \
+                     already fixed in output. Use PreserveWithZeroCount."
+                        .into(),
+                );
+            }
+            EmptyGroupPolicy::PreserveWithZeroCount => {
+                // Zero-count groups are explicitly allowed.
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum ReferencePoint {
     Tss,
