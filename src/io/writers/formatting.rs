@@ -48,7 +48,7 @@ pub fn write_matrix_row<W: Write>(writer: &mut W, row: &MatrixRow) -> Result<()>
         if let Some(raw) = row.record.score_raw.as_deref() {
             buffer.extend_from_slice(raw.as_bytes());
         } else if let Some(score) = row.record.score {
-            write_matrix_value(&mut *buffer, f64::from(score))?;
+            write_score_value(&mut *buffer, f64::from(score))?;
         } else {
             buffer.push(b'.');
         }
@@ -85,6 +85,21 @@ pub fn write_plain_row<W: Write>(writer: &mut W, row: &MatrixRow) -> Result<()> 
         writer.write_all(format_plain_value(*value).as_bytes())?;
     }
     writer.write_all(b"\n")?;
+    Ok(())
+}
+
+/// Format an f64 to match Python's `str(float(x))` output.
+///
+/// Python 3 uses shortest-representation formatting, always including a
+/// decimal point: `0` → `"0.0"`, `1.5` → `"1.5"`, `0.123456789` →
+/// `"0.123456789"`.  Rust's `Display` for `f64` omits the fractional part
+/// for whole numbers, so we append `.0` when needed.
+pub fn write_score_value<W: Write>(writer: &mut W, value: f64) -> io::Result<()> {
+    let s = format!("{value}");
+    writer.write_all(s.as_bytes())?;
+    if !s.contains('.') {
+        writer.write_all(b".0")?;
+    }
     Ok(())
 }
 
@@ -185,10 +200,40 @@ pub fn format_plain_value(value: f64) -> String {
 mod tests {
     use super::*;
 
+    fn fmt_score(value: f64) -> String {
+        let mut buf = Vec::new();
+        write_score_value(&mut buf, value).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
     fn fmt_value(value: f64) -> String {
         let mut buf = Vec::new();
         write_matrix_value(&mut buf, value).unwrap();
         String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn score_integers() {
+        assert_eq!(fmt_score(0.0), "0.0");
+        assert_eq!(fmt_score(1.0), "1.0");
+        assert_eq!(fmt_score(5.0), "5.0");
+        assert_eq!(fmt_score(-3.0), "-3.0");
+    }
+
+    #[test]
+    fn score_fractional() {
+        assert_eq!(fmt_score(1.5), "1.5");
+        assert_eq!(fmt_score(0.123456789), "0.123456789");
+        assert_eq!(fmt_score(-0.5), "-0.5");
+    }
+
+    #[test]
+    fn score_special() {
+        // NaN and inf don't contain '.', so they get ".0" appended.
+        // These are not realistic BED scores, but verify the output is stable.
+        assert_eq!(fmt_score(f64::NAN), "NaN.0");
+        assert_eq!(fmt_score(f64::INFINITY), "inf.0");
+        assert_eq!(fmt_score(f64::NEG_INFINITY), "-inf.0");
     }
 
     #[test]
