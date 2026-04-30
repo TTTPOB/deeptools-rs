@@ -48,6 +48,17 @@ fn clamp_coordinate(value: i64, chrom_length: u32) -> u32 {
         .unwrap_or(0)
 }
 
+#[inline]
+fn apply_scaling(values: &mut [f64], scale_factor: f64) {
+    if scale_factor != 1.0 {
+        for v in values.iter_mut() {
+            if v.is_finite() {
+                *v *= scale_factor;
+            }
+        }
+    }
+}
+
 fn should_skip_row_flat(values: &[f64], general: &GeneralOptions) -> bool {
     if general.skip_zeros {
         // Python uses np.mean() which propagates NaN — if any value
@@ -281,14 +292,7 @@ pub fn compute_row<P: RegionPlan>(
 
     // Apply scaling after threshold check (Python checks thresholds on
     // raw values, then scales).
-    let sf = general.scale_factor;
-    if sf != 1.0 {
-        for v in &mut all_values {
-            if v.is_finite() {
-                *v *= sf;
-            }
-        }
-    }
+    apply_scaling(&mut all_values, general.scale_factor);
 
     Ok(Some((all_values, sample_count, bin_count)))
 }
@@ -451,14 +455,7 @@ pub(super) fn process_batch<M: PipelineMode>(
                 None
             } else {
                 // Apply scaling after threshold check.
-                let sf = general.scale_factor;
-                if sf != 1.0 {
-                    for v in &mut all_values {
-                        if v.is_finite() {
-                            *v *= sf;
-                        }
-                    }
-                }
+                apply_scaling(&mut all_values, general.scale_factor);
                 Some(mode.postprocess_row(
                     Arc::unwrap_or_clone(record),
                     all_values,
@@ -543,14 +540,7 @@ pub(super) fn process_batch<M: PipelineMode>(
         } else {
             // Apply scaling after threshold check (Python checks
             // thresholds on raw values, then scales).
-            let sf = general.scale_factor;
-            if sf != 1.0 {
-                for v in &mut all_values {
-                    if v.is_finite() {
-                        *v *= sf;
-                    }
-                }
-            }
+            apply_scaling(&mut all_values, general.scale_factor);
             Some(mode.postprocess_row(
                 Arc::unwrap_or_clone(record),
                 all_values,
@@ -887,4 +877,19 @@ mod tests {
     // handle so it is covered by integration tests (python_compatibility.rs)
     // rather than unit tests.  The production code branch is at the top of
     // compute_sample_bins (the chrom_length None arm).
+
+    // ── skip_zeros + scale_factor interaction ───────────────────────────
+
+    #[test]
+    fn skip_zeros_with_scale_zero_keeps_nonzero_raw() {
+        // Raw values [3.0, 4.0] are non-zero → skip_zeros does not trigger.
+        // After scaling by 0, output would be [0.0, 0.0], but skip_zeros
+        // is evaluated on raw values, matching Python.
+        let general = GeneralOptions {
+            skip_zeros: true,
+            scale_factor: 0.0,
+            ..default_general()
+        };
+        assert!(!should_skip_row_flat(&[3.0, 4.0], &general));
+    }
 }
