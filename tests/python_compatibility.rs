@@ -482,6 +482,48 @@ fn blacklist_empty_group_sort_descend() {
     );
 }
 
+// ── metagene + intron blacklist parity ──────────────────────────────────────
+// Spec requires: "scale-regions, BED12/GTF metagene: Blacklist falls in an
+// intron of a multi-exon region." The blacklist at 3R:200-300 falls inside
+// introns of both transcripts (exon gaps 50-400 and 150-500), so neither
+// metagene record is filtered.
+
+#[test]
+fn metagene_blacklist_intron() {
+    let tdr = test_data_root();
+    let bdr = blacklist_data_root();
+    run_compute_and_compare_blacklist(
+        "master_metagene_blacklist_intron.mat",
+        &[
+            "scale-regions",
+            "-R",
+            tdr.join("test.gtf").to_str().unwrap(),
+            "-S",
+            tdr.join("test1.bw.bw").to_str().unwrap(),
+            "-a",
+            "300",
+            "-b",
+            "500",
+            "--unscaled5prime",
+            "20",
+            "--unscaled3prime",
+            "50",
+            "--bs",
+            "10",
+            "-p",
+            "1",
+            "--metagene",
+            "--blackListFileName",
+            bdr.join("test_blacklist_intron.bed").to_str().unwrap(),
+        ],
+        5e-6,
+    );
+}
+
+// NOTE: metagene + missingDataAsZero + blacklist test omitted because
+// metagene + missingDataAsZero has a pre-existing 2-bin parity gap
+// (row=0 col=154, row=1 col=52) unrelated to blacklist.
+
 #[test]
 fn metagene() {
     let tdr = test_data_root();
