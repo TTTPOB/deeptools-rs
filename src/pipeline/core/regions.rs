@@ -607,7 +607,7 @@ mod tests {
         }
         for intervals in map.values_mut() {
             intervals.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-            // merge overlapping
+            // merge overlapping/adjacent
             let mut merged: Vec<(u32, u32)> = Vec::new();
             for &(start, end) in intervals.iter() {
                 if let Some(last) = merged.last_mut() {
@@ -770,6 +770,15 @@ mod tests {
         let cs = make_chrom_sizes(vec![("ch1", 400)]);
         let ai = precompute_allowed_intervals(&bl, &cs);
         let record = make_record("ch1", 109, 150);
+        assert!(record_passes_blacklist(&record, &bl, &ai, &cs));
+    }
+
+    #[test]
+    fn passes_blacklist_start_in_gap_between_two_blacklist_intervals() {
+        let bl = make_blacklist_map(vec![("ch1", 10, 20), ("ch1", 40, 60)]);
+        let cs = make_chrom_sizes(vec![("ch1", 400)]);
+        let ai = precompute_allowed_intervals(&bl, &cs);
+        let record = make_record("ch1", 30, 50);
         assert!(record_passes_blacklist(&record, &bl, &ai, &cs));
     }
 }
