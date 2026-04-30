@@ -188,12 +188,89 @@ pub fn write_scaled_i128<W: Write>(writer: &mut W, scaled: i128) -> io::Result<(
     writer.write_all(&frac_digits)
 }
 
+/// Format an f64 to match Python's `%.4g` format (4 significant digits,
+/// g-format: switches between fixed and scientific, strips trailing zeros).
+///
+/// Rules (matching C/Python `%.4g`):
+/// - NaN  → `"nan"`
+/// - ±Inf → `"inf"` / `"-inf"`
+/// - 0    → `"0"`
+/// - If exponent `e` satisfies `-4 <= e < 4`: fixed notation with
+///   `max(0, 3 - e)` decimal places, trailing zeros and trailing dot stripped.
+/// - Otherwise: scientific notation `X.XXXe±NN`, trailing zeros in the
+///   mantissa stripped, exponent always two-digit with explicit sign.
 pub fn format_plain_value(value: f64) -> String {
     if value.is_nan() {
-        "nan".to_string()
-    } else {
-        format!("{value:.4}")
+        return "nan".to_string();
     }
+    if value.is_infinite() {
+        return if value.is_sign_negative() {
+            "-inf".to_string()
+        } else {
+            "inf".to_string()
+        };
+    }
+    if value == 0.0 {
+        return "0".to_string();
+    }
+
+    let abs = value.abs();
+    let exp = abs.log10().floor() as i32;
+
+    if exp >= -4 && exp < 4 {
+        // Fixed notation: number of decimal places = max(0, precision - 1 - exp)
+        let decimals = (3 - exp).max(0) as usize;
+        let s = format!("{value:.prec$}", prec = decimals);
+        strip_trailing_zeros_fixed(&s)
+    } else {
+        // Scientific notation with 3 decimal places (4 sig digits - 1 leading)
+        let s = format!("{value:.3e}",);
+        normalize_scientific_notation(&s)
+    }
+}
+
+/// Strip trailing zeros after the decimal point in a fixed-notation string.
+/// Also strips the decimal point if it becomes the last character.
+fn strip_trailing_zeros_fixed(s: &str) -> String {
+    if !s.contains('.') {
+        return s.to_string();
+    }
+    let trimmed = s.trim_end_matches('0');
+    let trimmed = trimmed.trim_end_matches('.');
+    trimmed.to_string()
+}
+
+/// Normalize Rust's scientific notation output to match Python's `%.4g`.
+///
+/// Rust produces e.g. `1.235e4` or `1.235e-5`.
+/// Python produces `1.235e+04` or `1.235e-05`.
+///
+/// This function:
+/// 1. Strips trailing zeros from the mantissa (before 'e').
+/// 2. Strips a trailing decimal point from the mantissa.
+/// 3. Normalizes the exponent to always have a sign and at least 2 digits.
+fn normalize_scientific_notation(s: &str) -> String {
+    let (mantissa, exp_str) = s
+        .split_once('e')
+        .expect("expected 'e' in scientific format");
+
+    // Strip trailing zeros from mantissa
+    let mantissa = if mantissa.contains('.') {
+        let m = mantissa.trim_end_matches('0');
+        m.trim_end_matches('.')
+    } else {
+        mantissa
+    };
+
+    // Parse exponent and format with sign and at least 2 digits
+    let exp_val: i32 = exp_str.parse().expect("expected integer exponent");
+    let exp_formatted = if exp_val >= 0 {
+        format!("e+{:02}", exp_val)
+    } else {
+        format!("e-{:02}", exp_val.unsigned_abs())
+    };
+
+    format!("{mantissa}{exp_formatted}")
 }
 
 #[cfg(test)]
@@ -289,5 +366,81 @@ mod tests {
         assert_eq!(fmt_value(0.123456), "0.123456");
         assert_eq!(fmt_value(0.000001), "0.000001");
         assert_eq!(fmt_value(0.999999), "0.999999");
+    }
+
+    // ---------------------------------------------------------------
+    // format_plain_value: Python %.4g parity tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn plain_value_nan() {
+        assert_eq!(format_plain_value(f64::NAN), "nan");
+    }
+
+    #[test]
+    fn plain_value_inf() {
+        assert_eq!(format_plain_value(f64::INFINITY), "inf");
+        assert_eq!(format_plain_value(f64::NEG_INFINITY), "-inf");
+    }
+
+    #[test]
+    fn plain_value_zero() {
+        assert_eq!(format_plain_value(0.0), "0");
+    }
+
+    #[test]
+    fn plain_value_whole_numbers() {
+        assert_eq!(format_plain_value(1.0), "1");
+        assert_eq!(format_plain_value(2.0), "2");
+        assert_eq!(format_plain_value(9999.0), "9999");
+    }
+
+    #[test]
+    fn plain_value_simple_fractions() {
+        assert_eq!(format_plain_value(0.5), "0.5");
+        assert_eq!(format_plain_value(1.5), "1.5");
+        assert_eq!(format_plain_value(-0.5), "-0.5");
+    }
+
+    #[test]
+    fn plain_value_small_fixed() {
+        assert_eq!(format_plain_value(0.001), "0.001");
+        assert_eq!(format_plain_value(0.0001234), "0.0001234");
+    }
+
+    #[test]
+    fn plain_value_scientific_small() {
+        // exp = -5, outside [-4, 4) range → scientific
+        assert_eq!(format_plain_value(0.00009999), "9.999e-05");
+    }
+
+    #[test]
+    fn plain_value_scientific_large() {
+        // exp = 4, outside [-4, 4) range → scientific
+        assert_eq!(format_plain_value(10000.0), "1e+04");
+        assert_eq!(format_plain_value(12345.0), "1.234e+04");
+    }
+
+    #[test]
+    fn plain_value_rounding() {
+        // 123.456 → 4 sig digits → 123.5
+        assert_eq!(format_plain_value(123.456), "123.5");
+        // 12345.678 → 4 sig digits → 1.235e+04
+        assert_eq!(format_plain_value(12345.678), "1.235e+04");
+    }
+
+    #[test]
+    fn plain_value_negative() {
+        assert_eq!(format_plain_value(-1.0), "-1");
+        assert_eq!(format_plain_value(-123.456), "-123.5");
+        assert_eq!(format_plain_value(-0.00009999), "-9.999e-05");
+    }
+
+    #[test]
+    fn plain_value_strip_trailing_zeros() {
+        // 1200.0 → 4 sig digits → "1200" (no decimal)
+        assert_eq!(format_plain_value(1200.0), "1200");
+        // 1.500 → "1.5" (trailing zero stripped)
+        assert_eq!(format_plain_value(1.500), "1.5");
     }
 }

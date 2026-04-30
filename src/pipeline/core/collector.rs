@@ -183,14 +183,23 @@ fn write_values_header_lines_2_3<W: Write>(writer: &mut W, header: &MatrixHeader
         downstream, upstream, body, bin_size, unscaled5, unscaled3
     )?;
 
+    // Line 3: group labels with counts, then sample labels repeated per bin.
+    // Python format: "Group 1:N\tGroup 2:M\tsample\tsample\t..."
+    // Group label prefix entries come first (one per group), then
+    // sample labels expanded across all bins.
+    let group_counts = diff(&header.group_boundaries);
+    let mut line3_parts = Vec::new();
+    for (label, count) in header.group_labels.iter().zip(group_counts.iter()) {
+        line3_parts.push(format!("{}:{}", label, count));
+    }
+
     let sample_lengths = diff(&header.sample_boundaries);
-    let mut labels_expanded = Vec::new();
     for (label, length) in header.sample_labels.iter().zip(sample_lengths.iter()) {
         for _ in 0..*length {
-            labels_expanded.push(label.clone());
+            line3_parts.push(label.clone());
         }
     }
-    writeln!(writer, "{}", labels_expanded.join("\t"))?;
+    writeln!(writer, "{}", line3_parts.join("\t"))?;
 
     Ok(())
 }
