@@ -5,7 +5,9 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use crate::io::writers::StreamingMatrixWriter;
-use crate::io::writers::auxiliary::{write_plain_values_row, write_sorted_region_row};
+use crate::io::writers::auxiliary::{
+    SORTED_REGIONS_HEADER, write_plain_values_row, write_sorted_region_row,
+};
 use crate::pipeline::matrix::{MatrixHeader, MatrixRow};
 
 /// Information needed to rewrite the values header line 1 at finalize time.
@@ -42,7 +44,7 @@ impl FileCollector {
                 format!("Failed to create sorted regions file '{}'", path.display())
             })?;
             let mut w = BufWriter::new(file);
-            w.write_all(b"#chrom\tstart\tend\tname\tscore\tstrand\tgroup\n")?;
+            w.write_all(SORTED_REGIONS_HEADER)?;
             Some(w)
         } else {
             None
