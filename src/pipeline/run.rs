@@ -150,7 +150,6 @@ where
     let collector = FileCollector::new(
         writer,
         &group_labels,
-        &group_capacity,
         &header_estimate,
         io.sorted_regions_output.as_deref(),
         io.matrix_values_output.as_deref(),

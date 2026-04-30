@@ -10,10 +10,15 @@ use crate::io::writers::auxiliary::{
 };
 use crate::pipeline::matrix::{MatrixHeader, MatrixRow};
 
-/// Information needed to rewrite the values header line 1 at finalize time.
+/// Information needed to rewrite values header lines at finalize time.
 struct ValuesHeaderInfo {
     /// Byte length of the original header line 1 (including newline).
-    reserved_byte_len: usize,
+    line1_byte_len: usize,
+    /// Byte length of header line 2 (including newline).
+    /// Used to compute the seek offset for line 3 rewriting.
+    line2_byte_len: usize,
+    /// Byte length of the original header line 3 (including newline).
+    line3_byte_len: usize,
 }
 
 pub struct FileCollector {
@@ -22,8 +27,6 @@ pub struct FileCollector {
     regions_writer: Option<BufWriter<File>>,
     group_labels: Vec<String>,
     values_header_info: Option<ValuesHeaderInfo>,
-    /// Running per-group row counts (for rewriting values header).
-    group_counts: Vec<usize>,
 }
 
 impl FileCollector {
@@ -31,13 +34,10 @@ impl FileCollector {
     pub fn new(
         writer: StreamingMatrixWriter,
         group_labels: &[String],
-        group_capacity: &[usize],
         header_estimate: &MatrixHeader,
         sorted_regions_path: Option<&Path>,
         matrix_values_path: Option<&Path>,
     ) -> Result<Self> {
-        let group_count = group_labels.len();
-
         // Optionally open sorted-regions writer.
         let regions_writer = if let Some(path) = sorted_regions_path {
             let file = File::create(path).with_context(|| {
@@ -57,17 +57,23 @@ impl FileCollector {
             })?;
             let mut w = BufWriter::new(file);
 
-            // Write header line 1 using group_capacity counts (placeholder).
-            let line1 = build_values_header_line1(group_labels, group_capacity);
-            let reserved_byte_len = line1.len();
+            // Write header line 1 using group_capacity counts (placeholder only —
+            // will be rewritten at finalize time with actual counts).
+            let line1 = build_values_header_line1(header_estimate);
+            let line1_len = line1.len();
             w.write_all(line1.as_bytes())?;
 
-            // Write header lines 2 and 3 (these are final, not rewritten).
-            write_values_header_lines_2_3(&mut w, header_estimate)?;
+            // Write header lines 2 and 3.
+            // Line 3 contains group counts and will be rewritten at finalize time.
+            let (line2_len, line3_len) = write_values_header_lines_2_3(&mut w, header_estimate)?;
 
             w.flush()?;
 
-            let info = ValuesHeaderInfo { reserved_byte_len };
+            let info = ValuesHeaderInfo {
+                line1_byte_len: line1_len,
+                line2_byte_len: line2_len,
+                line3_byte_len: line3_len,
+            };
             (Some(w), Some(info))
         } else {
             (None, None)
@@ -79,7 +85,6 @@ impl FileCollector {
             regions_writer,
             group_labels: group_labels.to_vec(),
             values_header_info,
-            group_counts: vec![0usize; group_count],
         })
     }
 
@@ -107,25 +112,29 @@ impl FileCollector {
             write_sorted_region_row(w, &row, label)?;
         }
 
-        // Track per-group counts.
-        if group_index < self.group_counts.len() {
-            self.group_counts[group_index] += 1;
-        }
-
         Ok(())
     }
 
     pub fn finalize(mut self, header: MatrixHeader) -> Result<()> {
-        // Rewrite values header line 1 if needed.
+        // Rewrite values header lines 1 and 3 if needed (group counts may have
+        // changed due to --skipZeros / threshold filtering).
         if let (Some(w), Some(info)) = (&mut self.values_writer, &self.values_header_info) {
             w.flush()?;
             let inner = w.get_mut();
-            inner.seek(SeekFrom::Start(0))?;
 
-            let actual_line1 = build_values_header_line1(&self.group_labels, &self.group_counts);
-            // Pad to reserved length with spaces (before the newline).
-            let padded = pad_line_to_length(&actual_line1, info.reserved_byte_len);
+            // Rewrite line 1.
+            inner.seek(SeekFrom::Start(0))?;
+            let actual_line1 = build_values_header_line1(&header);
+            let padded = pad_line_to_length(&actual_line1, info.line1_byte_len);
             inner.write_all(padded.as_bytes())?;
+
+            // Rewrite line 3.
+            let line3_offset = (info.line1_byte_len + info.line2_byte_len) as u64;
+            inner.seek(SeekFrom::Start(line3_offset))?;
+            let actual_line3 = build_values_header_line3(&header);
+            let padded_line3 = pad_line_to_length(&actual_line3, info.line3_byte_len);
+            inner.write_all(padded_line3.as_bytes())?;
+
             inner.flush()?;
         }
 
@@ -143,9 +152,10 @@ impl FileCollector {
 }
 
 /// Build values header line 1: `#Group1:N\tGroup2:M\n`
-fn build_values_header_line1(group_labels: &[String], group_counts: &[usize]) -> String {
-    let mut parts = Vec::with_capacity(group_labels.len());
-    for (label, &count) in group_labels.iter().zip(group_counts.iter()) {
+fn build_values_header_line1(header: &MatrixHeader) -> String {
+    let counts = header.group_counts();
+    let mut parts = Vec::with_capacity(header.group_labels.len());
+    for (label, count) in header.group_labels.iter().zip(counts.iter()) {
         parts.push(format!("{}:{}", label, count));
     }
     format!("#{}\n", parts.join("\t"))
@@ -169,9 +179,11 @@ fn pad_line_to_length(line: &str, target_len: usize) -> String {
     result
 }
 
-/// Write values header lines 2 and 3 (these depend only on the header estimate
-/// and are not rewritten later).
-fn write_values_header_lines_2_3<W: Write>(writer: &mut W, header: &MatrixHeader) -> Result<()> {
+/// Write values header lines 2 and 3.  Returns `(line2_byte_len, line3_byte_len)`.
+fn write_values_header_lines_2_3<W: Write>(
+    writer: &mut W,
+    header: &MatrixHeader,
+) -> Result<(usize, usize)> {
     let downstream = header.downstream.first().copied().unwrap_or_default();
     let upstream = header.upstream.first().copied().unwrap_or_default();
     let body = header.body.first().copied().unwrap_or_default();
@@ -179,31 +191,38 @@ fn write_values_header_lines_2_3<W: Write>(writer: &mut W, header: &MatrixHeader
     let unscaled5 = header.unscaled_5_prime.first().copied().unwrap_or_default();
     let unscaled3 = header.unscaled_3_prime.first().copied().unwrap_or_default();
 
-    writeln!(
-        writer,
+    let line2 = format!(
         "#downstream:{}\tupstream:{}\tbody:{}\tbin size:{}\tunscaled 5 prime:{}\tunscaled 3 prime:{}",
         downstream, upstream, body, bin_size, unscaled5, unscaled3
-    )?;
+    );
+    writeln!(writer, "{}", line2)?;
+    let line2_byte_len = line2.len() + 1; // +1 for the newline from writeln!
 
     // Line 3: group labels with counts, then sample labels repeated per bin.
-    // Python format: "Group 1:N\tGroup 2:M\tsample\tsample\t..."
-    // Group label prefix entries come first (one per group), then
-    // sample labels expanded across all bins.
-    let group_counts = diff(&header.group_boundaries);
-    let mut line3_parts = Vec::new();
+    let line3 = build_values_header_line3(header);
+    writer.write_all(line3.as_bytes())?;
+    let line3_byte_len = line3.len();
+
+    Ok((line2_byte_len, line3_byte_len))
+}
+
+/// Build header line 3 for the matrix values file.
+///
+/// Format: `Group1:N\tGroup2:M\tsample1\tsample1\t...\tsample2\tsample2\t...\n`
+fn build_values_header_line3(header: &MatrixHeader) -> String {
+    let group_counts = header.group_counts();
+    let mut parts = Vec::new();
     for (label, count) in header.group_labels.iter().zip(group_counts.iter()) {
-        line3_parts.push(format!("{}:{}", label, count));
+        parts.push(format!("{}:{}", label, count));
     }
 
     let sample_lengths = diff(&header.sample_boundaries);
     for (label, length) in header.sample_labels.iter().zip(sample_lengths.iter()) {
         for _ in 0..*length {
-            line3_parts.push(label.clone());
+            parts.push(label.clone());
         }
     }
-    writeln!(writer, "{}", line3_parts.join("\t"))?;
-
-    Ok(())
+    format!("{}\n", parts.join("\t"))
 }
 
 fn diff(values: &[usize]) -> Vec<usize> {
@@ -219,10 +238,9 @@ mod tests {
 
     #[test]
     fn build_values_header_line1_basic() {
-        let labels = vec!["genes".to_string(), "peaks".to_string()];
-        let counts = vec![100, 50];
-        let line = build_values_header_line1(&labels, &counts);
-        assert_eq!(line, "#genes:100\tpeaks:50\n");
+        let header = MatrixHeader::default_for_test(vec![100, 50]);
+        let line = build_values_header_line1(&header);
+        assert_eq!(line, "#group0:100\tgroup1:50\n");
     }
 
     #[test]

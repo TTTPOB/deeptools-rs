@@ -450,6 +450,19 @@ mod tests {
     }
 }
 
+impl MatrixHeader {
+    /// Compute per-group row counts from the cumulative `group_boundaries`.
+    pub fn group_counts(&self) -> Vec<usize> {
+        if self.group_boundaries.len() < 2 {
+            return Vec::new();
+        }
+        self.group_boundaries
+            .windows(2)
+            .map(|pair| pair[1] - pair[0])
+            .collect()
+    }
+}
+
 #[cfg(test)]
 impl MatrixHeader {
     pub fn default_for_test(group_counts: Vec<usize>) -> Self {

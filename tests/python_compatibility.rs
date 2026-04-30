@@ -827,3 +827,72 @@ fn corner_case_skipzeros_removes_zero_region() {
         5e-6,
     );
 }
+
+#[test]
+fn outfilename_matrix_header_consistent_after_skipzeros() {
+    let dr = data_root();
+    let mat_tmp = tempfile::NamedTempFile::new().unwrap();
+    let tab_tmp = tempfile::NamedTempFile::new().unwrap();
+
+    let mut cmd = Command::new(compute_matrix_bin());
+    cmd.args([
+        "reference-point",
+        "-R",
+        corner_case_root().join("skipzeros.bed").to_str().unwrap(),
+        "-S",
+        dr.join("test.bw").to_str().unwrap(),
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--bs",
+        "10",
+        "-p",
+        "1",
+        "--missingDataAsZero",
+        "--skipZeros",
+        "-o",
+        mat_tmp.path().to_str().unwrap(),
+        "--outFileNameMatrix",
+        tab_tmp.path().to_str().unwrap(),
+    ]);
+    let status = cmd.status().unwrap();
+    assert!(status.success());
+
+    let tab = std::fs::read_to_string(tab_tmp.path()).unwrap();
+    let lines: Vec<&str> = tab.lines().collect();
+    assert!(
+        lines.len() >= 4,
+        "expected >=3 header lines + 1 data row, got {}",
+        lines.len()
+    );
+
+    // Parse group counts from line 1: "#Group1:N\tGroup2:M"
+    let line1_stripped = lines[0].strip_prefix('#').unwrap_or_else(|| {
+        panic!("line 1 should start with '#': {}", lines[0]);
+    });
+    let line1_counts: Vec<usize> = line1_stripped
+        .split('\t')
+        .map(|p| p.split(':').nth(1).unwrap().parse::<usize>().unwrap())
+        .collect();
+    let line1_total: usize = line1_counts.iter().sum();
+
+    // Parse group counts from line 3 first N entries
+    let line3_parts: Vec<&str> = lines[2].split('\t').collect();
+    let num_groups = line1_counts.len();
+    let line3_counts: Vec<usize> = line3_parts[..num_groups]
+        .iter()
+        .map(|p| p.split(':').nth(1).unwrap().parse::<usize>().unwrap())
+        .collect();
+
+    let data_rows = lines.len() - 3; // 3 header lines
+
+    assert_eq!(
+        line1_counts, line3_counts,
+        "line 1 and line 3 group counts diverge in:\n{tab}"
+    );
+    assert_eq!(
+        line1_total, data_rows,
+        "header total {line1_total} != data rows {data_rows} in:\n{tab}"
+    );
+}
