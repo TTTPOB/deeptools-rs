@@ -75,6 +75,29 @@ where
         }
     }
 
+    // ── Validate no groups were emptied by blacklist filtering ────────
+    if blacklist.is_some() {
+        let mut post_filter_counts = vec![0usize; group_labels.len()];
+        for task in &tasks {
+            post_filter_counts[task.group_index] += 1;
+        }
+        if tasks.is_empty() {
+            anyhow::bail!(
+                "No regions remain after blacklist filtering. \
+                 All {} regions were removed by the blacklist.",
+                group_capacity.iter().sum::<usize>()
+            );
+        }
+        for (i, &count) in post_filter_counts.iter().enumerate() {
+            if count == 0 {
+                anyhow::bail!(
+                    "No regions remain in group '{}' after blacklist filtering.",
+                    group_labels[i]
+                );
+            }
+        }
+    }
+
     let thread_count = std::cmp::max(1, general.number_of_processors.resolve() as usize);
     let task_count = tasks.len();
 
