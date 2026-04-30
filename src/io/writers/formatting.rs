@@ -215,12 +215,24 @@ pub fn format_plain_value(value: f64) -> String {
     }
 
     let abs = value.abs();
-    let exp = abs.log10().floor() as i32;
+    let raw_exp = abs.log10().floor() as i32;
+
+    // Round to 4 significant digits FIRST, then determine the exponent.
+    // This ensures that when rounding causes a boundary crossing (e.g.,
+    // 9999.5 → 10000, exp 3 → 4), we use the correct format.
+    let scale = 10f64.powi(3 - raw_exp);
+    let rounded_abs = (abs * scale).round() / scale;
+    let exp = rounded_abs.log10().floor() as i32;
 
     if exp >= -4 && exp < 4 {
         // Fixed notation: number of decimal places = max(0, precision - 1 - exp)
         let decimals = (3 - exp).max(0) as usize;
-        let s = format!("{value:.prec$}", prec = decimals);
+        let rounded_value = if value.is_sign_negative() {
+            -rounded_abs
+        } else {
+            rounded_abs
+        };
+        let s = format!("{rounded_value:.prec$}", prec = decimals);
         strip_trailing_zeros_fixed(&s)
     } else {
         // Scientific notation with 3 decimal places (4 sig digits - 1 leading)
@@ -442,5 +454,43 @@ mod tests {
         assert_eq!(format_plain_value(1200.0), "1200");
         // 1.500 → "1.5" (trailing zero stripped)
         assert_eq!(format_plain_value(1.500), "1.5");
+    }
+
+    // ---------------------------------------------------------------
+    // Rounding across exponent boundary tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn plain_value_rounding_crosses_fixed_to_scientific() {
+        // 9999.5 rounds to 10000 → exp crosses from 3 to 4 → scientific
+        assert_eq!(format_plain_value(9999.5), "1e+04");
+        // Negative version
+        assert_eq!(format_plain_value(-9999.5), "-1e+04");
+    }
+
+    #[test]
+    fn plain_value_rounding_crosses_scientific_to_fixed() {
+        // 0.000099999 rounds to 0.0001 → exp crosses from -5 to -4 → fixed
+        assert_eq!(format_plain_value(0.000099999), "0.0001");
+    }
+
+    #[test]
+    fn plain_value_rounding_stays_fixed_no_boundary_cross() {
+        // 99.95 stays at exp=1 after rounding → fixed
+        assert_eq!(format_plain_value(99.95), "99.95");
+    }
+
+    #[test]
+    fn plain_value_rounding_small_crosses_into_fixed() {
+        // 0.00099995 → rounds to 0.001, exp from -4 to -3 → stays in fixed range
+        assert_eq!(format_plain_value(0.00099995), "0.001");
+    }
+
+    #[test]
+    fn plain_value_small_scientific_no_boundary_cross() {
+        // 0.000099995 at exp=-5, rounds to 0.0001 → crosses to exp=-4 → fixed
+        // But 0.00009999 stays at exp=-5 → scientific
+        assert_eq!(format_plain_value(0.00009999), "9.999e-05");
+        assert_eq!(format_plain_value(0.000099995), "0.0001");
     }
 }
