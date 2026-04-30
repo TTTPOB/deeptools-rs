@@ -32,7 +32,7 @@ where
     // (deeptools/mapReduce.py:87-104,239-263), then computes signal without
     // a blacklist mask (deeptools/heatmapper.py:531-538). This is not the
     // cleanest design, but output parity depends on it.
-    let blacklist: Option<Vec<(std::sync::Arc<str>, u32, u32)>> =
+    let blacklist: Option<std::collections::HashMap<String, Vec<(u32, u32)>>> =
         if let Some(ref bl_path) = general.blacklist {
             Some(core::regions::load_blacklist(bl_path)?)
         } else {
@@ -45,6 +45,13 @@ where
         None
     };
 
+    let allowed_intervals: Option<std::collections::HashMap<String, Vec<(u32, u32)>>> =
+        if let (Some(bl), Some(cs)) = (&blacklist, &chrom_sizes) {
+            Some(core::regions::precompute_allowed_intervals(bl, cs))
+        } else {
+            None
+        };
+
     // ── Generate tasks (with blacklist filtering) ───────────────────────
     let mut tasks = Vec::new();
     for (group_index, group) in groups.into_iter().enumerate() {
@@ -53,6 +60,7 @@ where
                 if !core::regions::record_passes_blacklist(
                     &record,
                     bl,
+                    allowed_intervals.as_ref().unwrap(),
                     chrom_sizes.as_ref().unwrap(),
                 ) {
                     continue;

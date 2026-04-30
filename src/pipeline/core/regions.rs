@@ -106,49 +106,55 @@ pub fn normalize_sort_sample_indices(
 
 // ── chromosome name normalization ──────────────────────────────────────────
 
-/// Return both the original name and a chr-prefix-toggled variant so that
-/// names like `chr1` and `1` can be matched against each other.  The first
-/// element is the raw name; the second is the toggled version.
-fn normalize_chrom_name(name: &str) -> [String; 2] {
-    if name.starts_with("chr") {
-        [name.to_string(), name[3..].to_string()]
+/// Normalize a chromosome name to a canonical form for HashMap indexing.
+/// Strips `chr` prefix if present, then maps `M` → `MT` so both `chrM` and `MT` converge.
+fn normalize_chrom(name: &str) -> String {
+    let stripped = if let Some(rest) = name.strip_prefix("chr") {
+        rest
     } else {
-        [name.to_string(), format!("chr{}", name)]
+        name
+    };
+    if stripped == "M" {
+        "MT".to_string()
+    } else {
+        stripped.to_string()
     }
 }
 
 // ── blacklist helpers ──────────────────────────────────────────────────────
 
-/// Load a blacklist BED file, flatten all groups, sort by (chrom, start), and
-/// merge overlapping/adjacent intervals.
-pub(crate) fn load_blacklist(path: &Path) -> Result<Vec<(Arc<str>, u32, u32)>> {
+/// Load a blacklist BED file, flatten all groups, and return a HashMap
+/// keyed by normalized chromosome name with sorted, merged intervals.
+pub(crate) fn load_blacklist(path: &Path) -> Result<HashMap<String, Vec<(u32, u32)>>> {
     let reader = GroupedBedReader::open(path, "blacklist".to_string())?;
-    let mut intervals: Vec<(Arc<str>, u32, u32)> = Vec::new();
+    let mut map: HashMap<String, Vec<(u32, u32)>> = HashMap::new();
     for group in reader {
         let group = group?;
         for record in group.records {
-            intervals.push((record.chrom, record.start, record.end));
+            let key = normalize_chrom(&record.chrom);
+            map.entry(key).or_default().push((record.start, record.end));
         }
     }
-    if intervals.is_empty() {
-        return Ok(Vec::new());
-    }
-    intervals.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-    let mut merged: Vec<(Arc<str>, u32, u32)> = Vec::new();
-    for (chrom, start, end) in intervals {
-        if let Some(last) = merged.last_mut() {
-            if last.0 == chrom && start <= last.2 {
-                last.2 = last.2.max(end);
-                continue;
+    // Sort and merge per chromosome
+    for intervals in map.values_mut() {
+        intervals.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        let mut merged: Vec<(u32, u32)> = Vec::new();
+        for &(start, end) in intervals.iter() {
+            if let Some(last) = merged.last_mut() {
+                if start <= last.1 {
+                    last.1 = last.1.max(end);
+                    continue;
+                }
             }
+            merged.push((start, end));
         }
-        merged.push((chrom, start, end));
+        *intervals = merged;
     }
-    Ok(merged)
+    Ok(map)
 }
 
 /// Load chromosome sizes from bigWig score files. Chromosome names are
-/// stored as-is (original form from the bigWig header).
+/// normalized via `normalize_chrom()` so lookups are alias-agnostic.
 pub(crate) fn load_chrom_sizes(scores: &[PathBuf]) -> Result<HashMap<String, u32>> {
     let mut sizes: HashMap<String, u32> = HashMap::new();
     for path in scores {
@@ -156,30 +162,21 @@ pub(crate) fn load_chrom_sizes(scores: &[PathBuf]) -> Result<HashMap<String, u32
             anyhow::anyhow!("Failed to open bigWig file '{}': {}", path.display(), e)
         })?;
         for info in bw.chroms() {
-            let [canonical_name, _] = normalize_chrom_name(&info.name);
-            sizes.entry(canonical_name).or_insert(info.length);
+            let key = normalize_chrom(&info.name);
+            sizes.entry(key).or_insert(info.length);
         }
     }
     Ok(sizes)
 }
 
-/// Return blacklist intervals for `chrom`, matching both original and
-/// chr-prefix-toggled chromosome names. Returns a Vec because matching
-/// entries may not be contiguous in the sorted blacklist — another
-/// chromosome name can sort lexicographically between the two accepted
-/// spellings (e.g. "10" between "1" and "chr1").
-fn blacklist_intervals_for_chrom(
-    blacklist: &[(Arc<str>, u32, u32)],
+/// Return blacklist intervals for `chrom` via normalized HashMap lookup.
+/// The returned slice is already sorted and merged.
+fn blacklist_intervals_for_chrom<'a>(
+    blacklist: &'a HashMap<String, Vec<(u32, u32)>>,
     chrom: &str,
-) -> Vec<(u32, u32)> {
-    let [ref name_a, ref name_b] = normalize_chrom_name(chrom);
-    let mut result = Vec::new();
-    for &(ref c, s, e) in blacklist {
-        if c.as_ref() == name_a || c.as_ref() == name_b {
-            result.push((s, e));
-        }
-    }
-    result
+) -> &'a [(u32, u32)] {
+    let key = normalize_chrom(chrom);
+    blacklist.get(&key).map(|v| v.as_slice()).unwrap_or(&[])
 }
 
 /// Subtract sorted, non-overlapping blacklist intervals from a genomic span.
@@ -212,7 +209,28 @@ pub fn subtract_blacklist(span: (u32, u32), blacklist: &[(u32, u32)]) -> Vec<(u3
     result
 }
 
-/// Determine whether a BED record should be dispatched given the blacklist.
+/// Precompute allowed (non-blacklisted) intervals per chromosome.
+/// This avoids recomputing `subtract_blacklist` for every record.
+pub(crate) fn precompute_allowed_intervals(
+    blacklist: &HashMap<String, Vec<(u32, u32)>>,
+    chrom_sizes: &HashMap<String, u32>,
+) -> HashMap<String, Vec<(u32, u32)>> {
+    let mut allowed_map = HashMap::new();
+    for (chrom, size) in chrom_sizes {
+        let bl_intervals = blacklist_intervals_for_chrom(blacklist, chrom);
+        if bl_intervals.is_empty() {
+            continue;
+        }
+        let allowed = subtract_blacklist((0, *size), bl_intervals);
+        if !allowed.is_empty() {
+            allowed_map.insert(chrom.clone(), allowed);
+        }
+    }
+    allowed_map
+}
+
+/// Determine whether a BED record should be dispatched given precomputed
+/// allowed intervals and the set of chromosomes that have blacklist entries.
 ///
 /// Keep deepTools compatibility: Python subtracts blacklist intervals from
 /// mapReduce genome chunks before region dispatch
@@ -221,28 +239,29 @@ pub fn subtract_blacklist(span: (u32, u32), blacklist: &[(u32, u32)]) -> Vec<(u3
 /// design, but output parity depends on it.
 pub(crate) fn record_passes_blacklist(
     record: &BedRecord,
-    blacklist: &[(Arc<str>, u32, u32)],
+    blacklist: &HashMap<String, Vec<(u32, u32)>>,
+    allowed_intervals: &HashMap<String, Vec<(u32, u32)>>,
     chrom_sizes: &HashMap<String, u32>,
 ) -> bool {
-    let [canonical_name, _] = normalize_chrom_name(&record.chrom);
-    let chrom_size = match chrom_sizes.get(&canonical_name) {
-        Some(s) => *s,
-        // Chromosome not in score files: allow dispatch (it will produce NaN
-        // rows downstream, matching Python behavior).
-        None => return true,
-    };
-
-    let bl_intervals = blacklist_intervals_for_chrom(blacklist, &canonical_name);
-    if bl_intervals.is_empty() {
+    let key = normalize_chrom(&record.chrom);
+    if !chrom_sizes.contains_key(&key) {
         return true;
     }
 
-    let allowed = subtract_blacklist((0, chrom_size), &bl_intervals);
+    let has_blacklist = blacklist.contains_key(&key);
+    if !has_blacklist {
+        return true;
+    }
 
-    // A record is dispatched if its interval overlaps any allowed interval.
-    allowed
-        .iter()
-        .any(|&(a_start, a_end)| record.start < a_end && a_start < record.end)
+    let allowed = match allowed_intervals.get(&key) {
+        Some(intervals) => intervals.as_slice(),
+        // Chromosome fully covered by blacklist
+        None => return false,
+    };
+
+    // Binary search for first allowed interval that could overlap the record
+    let i = allowed.partition_point(|&(_, a_end)| a_end <= record.start);
+    i < allowed.len() && allowed[i].0 < record.end
 }
 
 fn parse_grouped_bed(path: &Path, default_label: String) -> Result<Vec<Group>, BedReadError> {
@@ -489,27 +508,29 @@ mod tests {
         assert_eq!(label, "genes");
     }
 
-    // ── normalize_chrom_name ───────────────────────────────────────────────
+    // ── normalize_chrom ────────────────────────────────────────────────────
 
     #[test]
-    fn normalize_chrom_with_prefix() {
-        let [a, b] = normalize_chrom_name("chr1");
-        assert_eq!(a, "chr1");
-        assert_eq!(b, "1");
+    fn normalize_chrom_strips_chr_prefix() {
+        assert_eq!(normalize_chrom("chr1"), "1");
+        assert_eq!(normalize_chrom("chrX"), "X");
     }
 
     #[test]
-    fn normalize_chrom_without_prefix() {
-        let [a, b] = normalize_chrom_name("1");
-        assert_eq!(a, "1");
-        assert_eq!(b, "chr1");
+    fn normalize_chrom_no_prefix_unchanged() {
+        assert_eq!(normalize_chrom("1"), "1");
+        assert_eq!(normalize_chrom("X"), "X");
     }
 
     #[test]
-    fn normalize_chrom_empty() {
-        let [a, b] = normalize_chrom_name("");
-        assert_eq!(a, "");
-        assert_eq!(b, "chr");
+    fn normalize_chrom_chrm_and_mt_converge() {
+        assert_eq!(normalize_chrom("chrM"), "MT");
+        assert_eq!(normalize_chrom("MT"), "MT");
+    }
+
+    #[test]
+    fn normalize_chrom_empty_string() {
+        assert_eq!(normalize_chrom(""), "");
     }
 
     // ── subtract_blacklist ─────────────────────────────────────────────────
@@ -576,69 +597,78 @@ mod tests {
 
     // ── blacklist_intervals_for_chrom ────────────────────────────────────────
 
-    fn make_blacklist(entries: Vec<(&str, u32, u32)>) -> Vec<(Arc<str>, u32, u32)> {
-        entries
-            .into_iter()
-            .map(|(c, s, e)| (Arc::from(c), s, e))
-            .collect()
+    fn make_blacklist_map(entries: Vec<(&str, u32, u32)>) -> HashMap<String, Vec<(u32, u32)>> {
+        let mut map: HashMap<String, Vec<(u32, u32)>> = HashMap::new();
+        for (c, s, e) in entries {
+            let key = normalize_chrom(c);
+            map.entry(key).or_default().push((s, e));
+        }
+        for intervals in map.values_mut() {
+            intervals.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+            // merge overlapping
+            let mut merged: Vec<(u32, u32)> = Vec::new();
+            for &(start, end) in intervals.iter() {
+                if let Some(last) = merged.last_mut() {
+                    if start <= last.1 {
+                        last.1 = last.1.max(end);
+                        continue;
+                    }
+                }
+                merged.push((start, end));
+            }
+            *intervals = merged;
+        }
+        map
     }
 
     #[test]
     fn blacklist_intervals_single_interval_per_chrom() {
-        let bl = make_blacklist(vec![("chr1", 10, 20), ("chr2", 30, 40)]);
+        let bl = make_blacklist_map(vec![("chr1", 10, 20), ("chr2", 30, 40)]);
         let result = blacklist_intervals_for_chrom(&bl, "chr1");
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0], (10, 20));
+        assert_eq!(result, &[(10, 20)]);
     }
 
     #[test]
     fn blacklist_intervals_multiple_intervals_same_chrom() {
-        // Regression: binary_search_by does not guarantee the first match.
-        // With 3 intervals on chr1, the search must return all 3, not a
-        // suffix starting from a later interval.
-        let bl = make_blacklist(vec![
+        let bl = make_blacklist_map(vec![
             ("chr1", 10, 20),
             ("chr1", 40, 60),
             ("chr1", 90, 95),
             ("chr2", 30, 40),
         ]);
         let result = blacklist_intervals_for_chrom(&bl, "chr1");
-        assert_eq!(result.len(), 3);
-        let starts: Vec<u32> = result.iter().map(|(s, _)| *s).collect();
-        assert_eq!(starts, vec![10, 40, 90]);
+        assert_eq!(result, &[(10, 20), (40, 60), (90, 95)]);
     }
 
     #[test]
     fn blacklist_intervals_chrom_not_in_blacklist_returns_empty() {
-        let bl = make_blacklist(vec![("chr1", 10, 20)]);
+        let bl = make_blacklist_map(vec![("chr1", 10, 20)]);
         let result = blacklist_intervals_for_chrom(&bl, "chrX");
         assert!(result.is_empty());
     }
 
     #[test]
     fn blacklist_intervals_chr_prefix_toggle_match() {
-        let bl = make_blacklist(vec![("1", 10, 20)]);
+        let bl = make_blacklist_map(vec![("1", 10, 20)]);
         let result = blacklist_intervals_for_chrom(&bl, "chr1");
-        assert_eq!(result, vec![(10, 20)]);
+        assert_eq!(result, &[(10, 20)]);
     }
 
     #[test]
-    fn blacklist_intervals_numeric_name_sorting_between_variants() {
-        // Regression: `partition_point` with probe=min(name_a, name_b) can
-        // land on a chromosome name that sorts BETWEEN the two accepted
-        // variants (e.g. "10" sorts between "1" and "chr1"). The scan must
-        // not stop there — it must continue past non-matching names.
-        // When "1" is NOT in the blacklist but "10" and "chr1" are,
-        // "10" sorts between "1" (the probe) and "chr1" (the target).
-        // A naive partition_point scan that stops at a non-matching name
-        // would miss the "chr1" entry.
-        let bl2 = make_blacklist(vec![("10", 30, 40), ("chr1", 50, 60)]);
-        let result = blacklist_intervals_for_chrom(&bl2, "chr1");
-        assert_eq!(
-            result.len(),
-            1,
-            "should find chr1 entry even with '10' sorting between '1' and 'chr1'"
-        );
-        assert_eq!(result[0], (50, 60));
+    fn blacklist_mixed_chr_alias_merges_correctly() {
+        // Regression: entries with mixed `1` and `chr1` must merge into one bucket
+        let bl = make_blacklist_map(vec![("1", 100, 200), ("chr1", 150, 250), ("1", 300, 400)]);
+        let result = blacklist_intervals_for_chrom(&bl, "chr1");
+        // (100,200) and (150,250) overlap → merged to (100,250); (300,400) separate
+        assert_eq!(result, &[(100, 250), (300, 400)]);
+    }
+
+    #[test]
+    fn blacklist_chrm_mt_alias_merges() {
+        let bl = make_blacklist_map(vec![("chrM", 100, 200), ("MT", 150, 250)]);
+        let result = blacklist_intervals_for_chrom(&bl, "chrM");
+        assert_eq!(result, &[(100, 250)]);
+        let result2 = blacklist_intervals_for_chrom(&bl, "MT");
+        assert_eq!(result2, &[(100, 250)]);
     }
 }
