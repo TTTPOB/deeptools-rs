@@ -50,17 +50,18 @@ fn clamp_coordinate(value: i64, chrom_length: u32) -> u32 {
 
 fn should_skip_row_flat(values: &[f64], general: &GeneralOptions) -> bool {
     if general.skip_zeros {
-        let mut all_zero = true;
+        // Python computes np.mean(row) across all values; if the mean
+        // is 0 or there are no non-NaN values the row is skipped.
+        let mut sum = 0.0f64;
+        let mut count = 0u64;
         for &value in values {
             if value.is_nan() {
                 continue;
             }
-            if value != 0.0 {
-                all_zero = false;
-                break;
-            }
+            sum += value;
+            count += 1;
         }
-        if all_zero {
+        if count == 0 || sum / (count as f64) == 0.0 {
             return true;
         }
     }
@@ -637,5 +638,37 @@ mod tests {
     fn no_thresholds_returns_false() {
         let general = default_general();
         assert!(!should_skip_row_flat(&[1.0, 2.0, 3.0], &general));
+    }
+
+    // ── Issue 1a: skipZeros uses mean semantics ──────────────────────────
+
+    #[test]
+    fn skip_zeros_mean_zero_positive_negative_cancel() {
+        // Python: mean([1.0, -1.0]) == 0.0 → skip
+        let general = GeneralOptions {
+            skip_zeros: true,
+            ..default_general()
+        };
+        assert!(should_skip_row_flat(&[1.0, -1.0], &general));
+    }
+
+    #[test]
+    fn skip_zeros_mean_nonzero_not_skipped() {
+        // mean([2.0, -1.0]) == 0.5 → don't skip
+        let general = GeneralOptions {
+            skip_zeros: true,
+            ..default_general()
+        };
+        assert!(!should_skip_row_flat(&[2.0, -1.0], &general));
+    }
+
+    #[test]
+    fn skip_zeros_nan_and_zeros_skipped() {
+        // mean of non-NaN values [0.0, 0.0] == 0.0 → skip
+        let general = GeneralOptions {
+            skip_zeros: true,
+            ..default_general()
+        };
+        assert!(should_skip_row_flat(&[f64::NAN, 0.0, 0.0], &general));
     }
 }
