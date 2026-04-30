@@ -4,12 +4,18 @@ use crate::config::{GeneralOptions, SortUsing};
 use crate::io::BedRecord;
 use serde::{Serialize, Serializer};
 
-/// Serialize a f64 as an integer when its value is a whole number, otherwise
-/// as a float.  This matches the Python JSON output where `scale=1` is written
-/// as `1` rather than `1.0`.
+/// Serialize the `scale` field to match Python's JSON output.
+///
+/// Python's `--scale` has `default=1` (int) and `type=float`.  When not passed,
+/// `args.scale = 1` (int) → serialized as `1`.  When `--scale X` is passed,
+/// `args.scale = X` (float) → serialized as e.g. `2.0`.
+///
+/// We cannot distinguish the two cases at runtime, but `scale=1.0` is
+/// overwhelmingly the default, so we special-case it as int `1` and serialize
+/// everything else as float.
 fn serialize_scale<S: Serializer>(value: &f64, s: S) -> Result<S::Ok, S::Error> {
-    if value.fract() == 0.0 && value.is_finite() {
-        s.serialize_i64(*value as i64)
+    if *value == 1.0 {
+        s.serialize_i64(1)
     } else {
         s.serialize_f64(*value)
     }

@@ -34,40 +34,6 @@ fn run_compute_and_compare_corner(reference_mat: &str, args: &[&str], tolerance:
     run_compute_and_compare_at(reference_path, args, tolerance);
 }
 
-fn run_compute_and_compare_corner_ignore(
-    reference_mat: &str,
-    args: &[&str],
-    tolerance: f64,
-    ignore_fields: &[&str],
-) {
-    let tmp = tempfile::NamedTempFile::new().unwrap();
-    let output_path = tmp.path().to_path_buf();
-
-    let mut cmd = Command::new(compute_matrix_bin());
-    cmd.args(args);
-    cmd.arg("-o").arg(&output_path);
-    let status = cmd.status().expect("failed to run compute_matrix_rs");
-    assert!(status.success(), "compute_matrix_rs failed with {status}");
-
-    let reference_path = corner_case_root().join(reference_mat);
-    let mut compare_cmd = Command::new(compare_matrix_bin());
-    compare_cmd
-        .arg("diff")
-        .arg(&output_path)
-        .arg(&reference_path)
-        .arg("--tolerance")
-        .arg(format!("{tolerance}"));
-    for field in ignore_fields {
-        compare_cmd.arg("--ignore").arg(field);
-    }
-    let status = compare_cmd.status().expect("failed to run compare_matrix");
-    assert!(
-        status.success(),
-        "Matrix mismatch for {}! compare_matrix diff exited with {status}",
-        reference_path.display()
-    );
-}
-
 /// Run compute_matrix_rs with given args, write output to a temp file,
 /// then compare the output against `reference_mat` using compare_matrix diff.
 ///
@@ -95,9 +61,7 @@ fn run_compute_and_compare_at(reference_path: PathBuf, args: &[&str], tolerance:
     assert!(status.success(), "compute_matrix_rs failed with {status}");
 
     // Run compare_matrix diff
-    // Ignore "proc number" (thread count varies) and "scale" (Python
-    // serializes the default int 1 vs float 1.0 depending on whether --scale
-    // was passed; matching this int/float distinction is impractical).
+    // Ignore "proc number" (thread count varies between machines).
     let status = Command::new(compare_matrix_bin())
         .arg("diff")
         .arg(&output_path)
@@ -106,8 +70,6 @@ fn run_compute_and_compare_at(reference_path: PathBuf, args: &[&str], tolerance:
         .arg(format!("{tolerance}"))
         .arg("--ignore")
         .arg("proc number")
-        .arg("--ignore")
-        .arg("scale")
         .status()
         .expect("failed to run compare_matrix");
 
@@ -720,7 +682,7 @@ fn corner_case_scale_with_max_threshold() {
     let dr = data_root();
     // Python checks thresholds pre-scale: raw max 3.0 < 4 → keep all rows.
     // Old Rust checked post-scale: scaled max 6.0 >= 4 → would drop rows.
-    run_compute_and_compare_corner_ignore(
+    run_compute_and_compare_corner(
         "master_scale_threshold.mat",
         &[
             "reference-point",
@@ -742,7 +704,6 @@ fn corner_case_scale_with_max_threshold() {
             "4",
         ],
         5e-6,
-        &["proc number", "scale"],
     );
 }
 
