@@ -71,26 +71,16 @@ fn should_skip_row_flat(values: &[f64], general: &GeneralOptions) -> bool {
     let has_nan = values.iter().any(|v| v.is_nan());
 
     if !has_nan {
-        // Python checks thresholds on pre-scale coverage values.  The
-        // values passed here are already scaled, so un-scale them for
-        // threshold comparison when scale_factor != 1.0.
-        let sf = general.scale_factor;
-        let unscale = sf != 0.0 && sf != 1.0;
-
+        // Values passed here are raw (pre-scale).  Threshold comparison
+        // is done on raw values to match Python behaviour.
         if let Some(min_threshold) = general.min_threshold {
-            if values.iter().any(|value| {
-                let raw = if unscale { *value / sf } else { *value };
-                raw <= min_threshold
-            }) {
+            if values.iter().any(|value| *value <= min_threshold) {
                 return true;
             }
         }
 
         if let Some(max_threshold) = general.max_threshold {
-            if values.iter().any(|value| {
-                let raw = if unscale { *value / sf } else { *value };
-                raw >= max_threshold
-            }) {
+            if values.iter().any(|value| *value >= max_threshold) {
                 return true;
             }
         }
@@ -260,10 +250,7 @@ fn compute_sample_bins<P: RegionPlan>(
                 value = f64::NAN;
             }
 
-            if value.is_finite() {
-                value *= general.scale_factor;
-            }
-
+            // Scaling is deferred to compute_row, after threshold checks.
             bins.push(value);
         }
 
@@ -290,6 +277,17 @@ pub fn compute_row<P: RegionPlan>(
 
     if should_skip_row_flat(&all_values, general) {
         return Ok(None);
+    }
+
+    // Apply scaling after threshold check (Python checks thresholds on
+    // raw values, then scales).
+    let sf = general.scale_factor;
+    if sf != 1.0 {
+        for v in &mut all_values {
+            if v.is_finite() {
+                *v *= sf;
+            }
+        }
     }
 
     Ok(Some((all_values, sample_count, bin_count)))
@@ -448,10 +446,19 @@ pub(super) fn process_batch<M: PipelineMode>(
                 f64::NAN
             };
             let bin_count = plan.bins().len();
-            let all_values = vec![fill; sample_count * bin_count];
+            let mut all_values = vec![fill; sample_count * bin_count];
             let row = if should_skip_row_flat(&all_values, general) {
                 None
             } else {
+                // Apply scaling after threshold check.
+                let sf = general.scale_factor;
+                if sf != 1.0 {
+                    for v in &mut all_values {
+                        if v.is_finite() {
+                            *v *= sf;
+                        }
+                    }
+                }
                 Some(mode.postprocess_row(
                     Arc::unwrap_or_clone(record),
                     all_values,
@@ -497,10 +504,7 @@ pub(super) fn process_batch<M: PipelineMode>(
                         value = f64::NAN;
                     }
 
-                    if value.is_finite() {
-                        value *= general.scale_factor;
-                    }
-
+                    // Scaling is deferred until after threshold checks.
                     all_values.push(value);
                 }
             }
@@ -528,10 +532,7 @@ pub(super) fn process_batch<M: PipelineMode>(
                         value = f64::NAN;
                     }
 
-                    if value.is_finite() {
-                        value *= general.scale_factor;
-                    }
-
+                    // Scaling is deferred until after threshold checks.
                     all_values.push(value);
                 }
             }
@@ -540,6 +541,16 @@ pub(super) fn process_batch<M: PipelineMode>(
         let row = if should_skip_row_flat(&all_values, general) {
             None
         } else {
+            // Apply scaling after threshold check (Python checks
+            // thresholds on raw values, then scales).
+            let sf = general.scale_factor;
+            if sf != 1.0 {
+                for v in &mut all_values {
+                    if v.is_finite() {
+                        *v *= sf;
+                    }
+                }
+            }
             Some(mode.postprocess_row(
                 Arc::unwrap_or_clone(record),
                 all_values,
@@ -772,43 +783,41 @@ mod tests {
 
     #[test]
     fn min_threshold_with_scale_factor_compares_prescale() {
-        // Raw value = 3.0, scale = 2.0, scaled value = 6.0
+        // should_skip_row_flat now receives raw (pre-scale) values.
+        // Raw values: [3.0, 7.0], scale = 2.0
         // Python checks threshold on raw value: 3.0 <= 5 → skip
-        // Rust receives scaled value 6.0 and must un-scale for comparison
         let general = GeneralOptions {
             min_threshold: Some(5.0),
             scale_factor: 2.0,
             ..default_general()
         };
-        // Scaled values: [6.0, 14.0] → pre-scale: [3.0, 7.0]
-        // 3.0 <= 5.0 → skip
-        assert!(should_skip_row_flat(&[6.0, 14.0], &general));
+        // Raw values: 3.0 <= 5.0 → skip
+        assert!(should_skip_row_flat(&[3.0, 7.0], &general));
     }
 
     #[test]
     fn min_threshold_with_scale_factor_no_skip() {
-        // Raw values = [6.0, 7.0], scale = 2.0, scaled = [12.0, 14.0]
+        // Raw values = [6.0, 7.0], scale = 2.0
         // Python: 6.0 <= 5.0? No, 7.0 <= 5.0? No → keep
         let general = GeneralOptions {
             min_threshold: Some(5.0),
             scale_factor: 2.0,
             ..default_general()
         };
-        assert!(!should_skip_row_flat(&[12.0, 14.0], &general));
+        assert!(!should_skip_row_flat(&[6.0, 7.0], &general));
     }
 
     #[test]
     fn max_threshold_with_negative_scale() {
-        // Raw value = 12.0, scale = -1.0, scaled = -12.0
+        // Raw value = 12.0, scale = -1.0
         // Python: max([12.0]) = 12.0 >= 10 → skip
         let general = GeneralOptions {
             max_threshold: Some(10.0),
             scale_factor: -1.0,
             ..default_general()
         };
-        // Scaled value is -12.0, un-scale: -12.0 / -1.0 = 12.0
-        // 12.0 >= 10.0 → skip
-        assert!(should_skip_row_flat(&[-12.0], &general));
+        // Raw value 12.0 >= 10.0 → skip
+        assert!(should_skip_row_flat(&[12.0], &general));
     }
 
     #[test]
@@ -820,6 +829,56 @@ mod tests {
             ..default_general()
         };
         assert!(should_skip_row_flat(&[3.0, 7.0], &general));
+    }
+
+    // ── Issue 2: --scale 0 with threshold check ─────────────────────────
+
+    #[test]
+    fn scale_zero_max_threshold_skips_when_raw_exceeds() {
+        // --scale 0 --maxThreshold 5 with raw values [3.0, 6.0]
+        // Python: 6.0 >= 5 → skip row
+        let general = GeneralOptions {
+            max_threshold: Some(5.0),
+            scale_factor: 0.0,
+            ..default_general()
+        };
+        assert!(should_skip_row_flat(&[3.0, 6.0], &general));
+    }
+
+    #[test]
+    fn scale_zero_max_threshold_keeps_when_raw_below() {
+        // --scale 0 --maxThreshold 5 with raw values [3.0, 4.0]
+        // Python: neither >= 5 → keep row
+        let general = GeneralOptions {
+            max_threshold: Some(5.0),
+            scale_factor: 0.0,
+            ..default_general()
+        };
+        assert!(!should_skip_row_flat(&[3.0, 4.0], &general));
+    }
+
+    #[test]
+    fn scale_zero_min_threshold_skips_when_raw_below() {
+        // --scale 0 --minThreshold 2 with raw values [1.0, 3.0]
+        // Python: 1.0 <= 2 → skip row
+        let general = GeneralOptions {
+            min_threshold: Some(2.0),
+            scale_factor: 0.0,
+            ..default_general()
+        };
+        assert!(should_skip_row_flat(&[1.0, 3.0], &general));
+    }
+
+    #[test]
+    fn scale_zero_min_threshold_keeps_when_raw_above() {
+        // --scale 0 --minThreshold 2 with raw values [3.0, 4.0]
+        // Python: neither <= 2 → keep row
+        let general = GeneralOptions {
+            min_threshold: Some(2.0),
+            scale_factor: 0.0,
+            ..default_general()
+        };
+        assert!(!should_skip_row_flat(&[3.0, 4.0], &general));
     }
 
     // ── Issue 1d: chrom missing + missingDataAsZero ──────────────────────
