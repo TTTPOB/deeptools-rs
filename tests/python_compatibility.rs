@@ -419,6 +419,69 @@ fn scale_regions_blacklist_missing_data_as_zero() {
     );
 }
 
+// ── blacklist + empty group parity (non-keep sortRegions) ──────────────────
+// When blacklist empties a group, Python drops it from the header for
+// no/ascend/descend modes. These tests verify the group remap produces
+// matching headers and values.
+
+#[test]
+fn blacklist_empty_group_sort_no() {
+    let dr = data_root();
+    let bdr = blacklist_data_root();
+    run_compute_and_compare_blacklist(
+        "master_blacklist_empty_group_no.mat",
+        &[
+            "reference-point",
+            "-R",
+            bdr.join("test_blacklist_empty_group.bed").to_str().unwrap(),
+            "-S",
+            dr.join("test.bw").to_str().unwrap(),
+            "-b",
+            "100",
+            "-a",
+            "100",
+            "--bs",
+            "1",
+            "-p",
+            "1",
+            "--sortRegions",
+            "no",
+            "--blackListFileName",
+            bdr.join("test_blacklist.bed").to_str().unwrap(),
+        ],
+        5e-6,
+    );
+}
+
+#[test]
+fn blacklist_empty_group_sort_descend() {
+    let dr = data_root();
+    let bdr = blacklist_data_root();
+    run_compute_and_compare_blacklist(
+        "master_blacklist_empty_group_descend.mat",
+        &[
+            "reference-point",
+            "-R",
+            bdr.join("test_blacklist_empty_group.bed").to_str().unwrap(),
+            "-S",
+            dr.join("test.bw").to_str().unwrap(),
+            "-b",
+            "100",
+            "-a",
+            "100",
+            "--bs",
+            "1",
+            "-p",
+            "1",
+            "--sortRegions",
+            "descend",
+            "--blackListFileName",
+            bdr.join("test_blacklist.bed").to_str().unwrap(),
+        ],
+        5e-6,
+    );
+}
+
 #[test]
 fn metagene() {
     let tdr = test_data_root();

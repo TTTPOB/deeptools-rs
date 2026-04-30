@@ -23,8 +23,8 @@ where
     let sample_count = sample_labels.len();
 
     let groups = core::load_groups(&io.regions, gtf)?;
-    let group_labels: Vec<String> = groups.iter().map(|g| g.label.clone()).collect();
-    let group_capacity: Vec<usize> = groups.iter().map(|g| g.records.len()).collect();
+    let mut group_labels: Vec<String> = groups.iter().map(|g| g.label.clone()).collect();
+    let mut group_capacity: Vec<usize> = groups.iter().map(|g| g.records.len()).collect();
 
     // ── Load blacklist & chromosome sizes ───────────────────────────────
     // Keep deepTools compatibility: Python subtracts blacklist intervals
@@ -75,7 +75,7 @@ where
         }
     }
 
-    // ── Validate blacklist didn't remove too many regions ─────────────
+    // ── Validate and remap groups after blacklist filtering ────────────
     if blacklist.is_some() {
         if tasks.is_empty() {
             anyhow::bail!(
@@ -84,25 +84,51 @@ where
                 group_capacity.iter().sum::<usize>()
             );
         }
-        // Python only errors on empty groups under --sortRegions keep
-        // (computeMatrixOperations.py:729, via sortMatrix). For
-        // no/ascend/descend it silently produces 0-row groups.
-        // This is arguably a design gap — an empty group usually
-        // means the blacklist/BED pairing is wrong — but we match
-        // Python for output parity.
-        if matches!(general.sort_regions, SortRegions::Keep) {
-            let mut post_filter_counts = vec![0usize; group_labels.len()];
-            for task in &tasks {
-                post_filter_counts[task.group_index] += 1;
+
+        let mut post_filter_counts = vec![0usize; group_labels.len()];
+        for task in &tasks {
+            post_filter_counts[task.group_index] += 1;
+        }
+
+        let has_empty_group = post_filter_counts.iter().any(|&c| c == 0);
+
+        if has_empty_group {
+            if matches!(general.sort_regions, SortRegions::Keep) {
+                // Python errors on empty groups only under --sortRegions keep
+                // (computeMatrixOperations.py:729, via sortMatrix).
+                let empty = post_filter_counts
+                    .iter()
+                    .enumerate()
+                    .find(|(_, c)| **c == 0)
+                    .unwrap()
+                    .0;
+                anyhow::bail!(
+                    "No regions remain in group '{}' after blacklist filtering.",
+                    group_labels[empty]
+                );
             }
-            for (i, &count) in post_filter_counts.iter().enumerate() {
-                if count == 0 {
-                    anyhow::bail!(
-                        "No regions remain in group '{}' after blacklist filtering.",
-                        group_labels[i]
-                    );
+
+            // For no/ascend/descend, Python drops empty groups from the
+            // header entirely (they don't appear in group_labels or
+            // group_boundaries). Remap task group_index values and
+            // rebuild group_labels/group_capacity to match.
+            let mut old_to_new = vec![0usize; group_labels.len()];
+            let mut new_labels = Vec::new();
+            let mut new_capacity = Vec::new();
+            let mut new_idx = 0usize;
+            for (old_idx, &count) in post_filter_counts.iter().enumerate() {
+                if count > 0 {
+                    old_to_new[old_idx] = new_idx;
+                    new_labels.push(group_labels[old_idx].clone());
+                    new_capacity.push(count);
+                    new_idx += 1;
                 }
             }
+            for task in &mut tasks {
+                task.group_index = old_to_new[task.group_index];
+            }
+            group_labels = new_labels;
+            group_capacity = new_capacity;
         }
     }
 
