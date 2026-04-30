@@ -12,7 +12,7 @@ pub fn reference_bins(
     upstream_bins: usize,
     downstream_bins: usize,
     nan_after_end: bool,
-) -> Option<Vec<ReferenceBin>> {
+) -> Option<(Vec<ReferenceBin>, Vec<(i64, i64)>)> {
     let mut exons = record
         .exons()?
         .into_iter()
@@ -24,6 +24,7 @@ pub fn reference_bins(
     exons.sort_by_key(|(start, _)| *start);
 
     let mut bins = Vec::with_capacity(upstream_bins + downstream_bins);
+    let mut included = Vec::new();
 
     match reference_point {
         ReferencePoint::Tss => build_tss(
@@ -34,6 +35,7 @@ pub fn reference_bins(
             downstream_bins,
             nan_after_end,
             &mut bins,
+            &mut included,
         ),
         ReferencePoint::Tes => build_tes(
             record,
@@ -43,6 +45,7 @@ pub fn reference_bins(
             downstream_bins,
             nan_after_end,
             &mut bins,
+            &mut included,
         ),
         ReferencePoint::Center => build_center(
             record,
@@ -52,11 +55,12 @@ pub fn reference_bins(
             downstream_bins,
             nan_after_end,
             &mut bins,
+            &mut included,
         ),
     }
 
     if bins.len() == upstream_bins + downstream_bins {
-        Some(bins)
+        Some((bins, included))
     } else {
         None
     }
@@ -147,6 +151,7 @@ fn build_tss(
     downstream_bins: usize,
     nan_after_end: bool,
     bins: &mut Vec<ReferenceBin>,
+    included: &mut Vec<(i64, i64)>,
 ) {
     let feature_start = exons.first().map(|(start, _)| *start).unwrap_or(0);
     let feature_end = exons.last().map(|(_, end)| *end).unwrap_or(0);
@@ -168,6 +173,7 @@ fn build_tss(
                     .unwrap_or(feature_start);
                 downstream_intervals.insert(0, (start - pad as i64, start));
             }
+            included.extend_from_slice(&downstream_intervals);
             append_reference_bins(
                 bins,
                 &downstream_intervals,
@@ -184,6 +190,7 @@ fn build_tss(
             } else {
                 Vec::new()
             };
+            included.extend_from_slice(&upstream_intervals);
             append_reference_bins(
                 bins,
                 &upstream_intervals,
@@ -201,6 +208,7 @@ fn build_tss(
             } else {
                 Vec::new()
             };
+            included.extend_from_slice(&upstream_intervals);
             append_reference_bins(
                 bins,
                 &upstream_intervals,
@@ -218,6 +226,7 @@ fn build_tss(
                     .unwrap_or(feature_end);
                 downstream_intervals.push((end, end + pad as i64));
             }
+            included.extend_from_slice(&downstream_intervals);
             append_reference_bins(
                 bins,
                 &downstream_intervals,
@@ -237,6 +246,7 @@ fn build_tes(
     downstream_bins: usize,
     nan_after_end: bool,
     bins: &mut Vec<ReferenceBin>,
+    included: &mut Vec<(i64, i64)>,
 ) {
     let feature_start = exons.first().map(|(start, _)| *start).unwrap_or(0);
     let feature_end = exons.last().map(|(_, end)| *end).unwrap_or(0);
@@ -257,6 +267,7 @@ fn build_tes(
             } else {
                 Vec::new()
             };
+            included.extend_from_slice(&upstream_intervals);
             append_reference_bins(
                 bins,
                 &upstream_intervals,
@@ -274,6 +285,7 @@ fn build_tes(
                     .unwrap_or(feature_end);
                 downstream_intervals.push((end, end + pad as i64));
             }
+            included.extend_from_slice(&downstream_intervals);
             append_reference_bins(
                 bins,
                 &downstream_intervals,
@@ -295,6 +307,7 @@ fn build_tes(
                     .unwrap_or(feature_start);
                 upstream_intervals.insert(0, (start - pad as i64, start));
             }
+            included.extend_from_slice(&upstream_intervals);
             append_reference_bins(
                 bins,
                 &upstream_intervals,
@@ -311,6 +324,7 @@ fn build_tes(
             } else {
                 Vec::new()
             };
+            included.extend_from_slice(&downstream_intervals);
             append_reference_bins(
                 bins,
                 &downstream_intervals,
@@ -330,6 +344,7 @@ fn build_center(
     downstream_bins: usize,
     nan_after_end: bool,
     bins: &mut Vec<ReferenceBin>,
+    included: &mut Vec<(i64, i64)>,
 ) {
     // Python for negative strand passes (left=downstream, right=upstream) to
     // chopRegionsFromMiddle, whereas positive uses (left=upstream, right=downstream).
@@ -371,7 +386,9 @@ fn build_center(
         right.push((end, end + pad_right as i64));
     }
 
+    included.extend_from_slice(&left);
     append_reference_bins(bins, &left, left_bins, bin_size, nan_after_end);
+    included.extend_from_slice(&right);
     append_reference_bins(bins, &right, right_bins, bin_size, nan_after_end);
 }
 

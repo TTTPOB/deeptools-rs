@@ -20,6 +20,7 @@ pub struct ReferencePointPlan {
     pub window_start: i64,
     pub window_end: i64,
     pub bins: Vec<ReferenceBin>,
+    pub included_intervals: Option<Vec<(i64, i64)>>,
 }
 
 impl SignalBin for ReferenceBin {
@@ -50,6 +51,10 @@ impl RegionPlan for ReferencePointPlan {
     fn bins(&self) -> &[Self::Bin] {
         &self.bins
     }
+
+    fn included_intervals(&self) -> Option<&[(i64, i64)]> {
+        self.included_intervals.as_deref()
+    }
 }
 
 impl ReferencePointPlan {
@@ -63,7 +68,7 @@ impl ReferencePointPlan {
         nan_after_end: bool,
     ) -> Self {
         let reference = reference_coordinate(record, reference_point);
-        let bins = if keep_exons {
+        let (bins, included_intervals) = if keep_exons {
             metagene::reference_bins(
                 record,
                 reference_point,
@@ -72,11 +77,18 @@ impl ReferencePointPlan {
                 downstream_bins,
                 nan_after_end,
             )
+            .map(|(b, intervals)| (b, Some(intervals)))
             .unwrap_or_else(|| {
-                build_bins(record, reference, bin_size, upstream_bins, downstream_bins)
+                (
+                    build_bins(record, reference, bin_size, upstream_bins, downstream_bins),
+                    None,
+                )
             })
         } else {
-            build_bins(record, reference, bin_size, upstream_bins, downstream_bins)
+            (
+                build_bins(record, reference, bin_size, upstream_bins, downstream_bins),
+                None,
+            )
         };
 
         let window_start = bins.iter().map(|bin| bin.start).min().unwrap_or(reference);
@@ -87,6 +99,7 @@ impl ReferencePointPlan {
             window_start,
             window_end,
             bins,
+            included_intervals,
         }
     }
 }
@@ -505,6 +518,7 @@ mod tests {
         assert_eq!(plan.bins[0].end, 90);
         assert_eq!(plan.bins[3].start, 110);
         assert_eq!(plan.bins[3].end, 120);
+        assert!(plan.included_intervals().is_none());
     }
 
     #[test]
@@ -641,6 +655,11 @@ mod tests {
         assert_eq!(plan.bins[0].end, 150);
         assert_eq!(plan.bins[1].start, 250);
         assert_eq!(plan.bins[1].end, 300);
+
+        let included = plan.included_intervals().unwrap();
+        assert_eq!(included.len(), 2);
+        assert_eq!(included[0], (100, 150));
+        assert_eq!(included[1], (250, 300));
     }
 
     // ── Issue 2a: body_too_short flag ────────────────────────────────────
