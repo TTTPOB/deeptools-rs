@@ -23,6 +23,9 @@ Latest Compatibility & Performance (2025-12-01)
 - Result: 10/10 tests passed (tolerance ≤5e-6)
 - Performance: total Rust time 11.48s (0 cached, 10 fresh); slowest case `reference_point_basic` at 9.09s on the deepTools test corpus.
 
+Known Behavior Differences from Python deepTools
+- **Blacklist + empty region group:** When `--blackListFileName` removes all regions in a group, this tool errors for every `--sortRegions` mode. Python deepTools only errors under `--sortRegions keep` (via `computeMatrixOperations.sortMatrix()`) and silently drops the empty group for `no`/`ascend`/`descend`. We consider an empty group a user-facing configuration problem that should surface immediately rather than produce a quietly incomplete matrix.
+
 ENCODE K562 ATAC Benchmark (4 cores)
 - Dataset/command hash cached under `target/*-regression/.cache`.
 - Reference-point (`center`, ±100 bp, bin 10): Python 171.35s vs Rust 17.90s → **9.57× faster**.

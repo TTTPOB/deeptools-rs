@@ -76,6 +76,13 @@ where
     }
 
     // ── Validate no groups were emptied by blacklist filtering ────────
+    // NOTE: intentional behavior difference from Python deepTools.
+    // Python only errors on empty groups in the `--sortRegions keep`
+    // path (computeMatrixOperations.py:729) and silently drops empty
+    // groups for no/ascend/descend. We treat an empty group as an
+    // error for all sort modes because it likely indicates a user
+    // configuration mistake (blacklist too aggressive or wrong BED
+    // file). See "Known behavior differences" in readme.md.
     if blacklist.is_some() {
         let mut post_filter_counts = vec![0usize; group_labels.len()];
         for task in &tasks {

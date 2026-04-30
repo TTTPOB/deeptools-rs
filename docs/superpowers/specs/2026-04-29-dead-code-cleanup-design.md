@@ -56,7 +56,7 @@ Remove dead code, eliminate stale abstractions, rename ambiguous types, and impl
 
    - **Applying blacklist:** Region-level pre-filtering in `run_pipeline()`, **not** signal-level masking in workers. Precompute allowed (non-blacklisted) intervals per chromosome by subtracting blacklist from chromosome spans. A region is kept only if its **start position** falls within an allowed interval (matching Python's `findOverlaps(..., trimOverlap=True)` semantics). Workers receive no blacklist — they compute signal normally on dispatched regions.
 
-   - **Empty group validation:** After filtering, error if all regions are removed or any individual group is emptied (matching Python's behavior).
+   - **Empty group validation:** After filtering, error if all regions are removed or any individual group is emptied. **Intentional difference from Python:** Python only errors on empty groups under `--sortRegions keep`; we error for all sort modes because an empty group indicates a configuration problem.
 
    - **Overlap helper:** `fn blacklist_intervals_for_chrom(blacklist, chrom) -> &[(u32, u32)]` using normalized HashMap lookup (O(1) per chrom).
 
@@ -133,8 +133,8 @@ Also remove:
 - **Blacklist parity tests (mandatory, not deferred):**
   - Reuse existing heatmapper test data (`test.bw` with ch1/ch2/ch3 @ 400bp, `test.bed`/`test2.bed`).
   - Create a synthetic blacklist BED file `test_blacklist.bed` with two intervals:
-    - `ch1 110 130` — partial overlap with the ch1 region (100-150), masks part of the signal at 100-125.
-    - `ch2 140 180` — full overlap with the ch2 region (150-175), masks all signal for that region.
+    - `ch1 110 130` — partial overlap with the ch1 region (100-150). The ch1 100-150 record is kept because its start (100) falls in the allowed interval [0, 110).
+    - `ch2 140 180` — full overlap with the ch2 region (150-175). The ch2 150-175 record is removed because its start (150) falls in the blacklisted interval [140, 180).
   - Generate reference output using pixi + deeptools 3.5.6:
     1. `computeMatrix reference-point -S test.bw -R test2.bed -b 100 -a 100 -bs 1 --blackListFileName test_blacklist.bed` → `master_blacklist.mat`
     2. `computeMatrix scale-regions -S test.bw -R test2.bed -b 100 -a 100 -m 100 -bs 1 --blackListFileName test_blacklist.bed` → `master_scale_reg_blacklist.mat`
