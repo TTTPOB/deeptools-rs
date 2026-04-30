@@ -123,11 +123,19 @@ pub fn scale_bins(
         window.1 = record.end as i64;
     }
 
+    // Python: if body > 0 and body_length < bin_size, skip entire row.
+    // For metagene, body_length = total exon length - unscaled regions.
+    let exon_total = intervals_total_length(&exons);
+    let scalable_body =
+        exon_total - options.unscaled_5_prime as i64 - options.unscaled_3_prime as i64;
+    let body_too_short = options.region_body_length > 0 && scalable_body < bin_size as i64;
+
     Some(ScaleRegionsPlan {
         window_start: window.0,
         window_end: window.1,
         bins,
         included_intervals: Some(included_intervals),
+        body_too_short,
     })
 }
 

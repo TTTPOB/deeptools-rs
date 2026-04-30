@@ -128,6 +128,18 @@ fn compute_sample_bins<P: RegionPlan>(
         return Ok(vec![f64::NAN; bin_count]);
     }
 
+    // Python short-circuits the entire row when the region body (after
+    // subtracting unscaled regions) is shorter than a single bin
+    // (heatmapper.py:402-411).
+    if plan.body_too_short() {
+        let fill = if general.missing_data_as_zero {
+            0.0
+        } else {
+            f64::NAN
+        };
+        return Ok(vec![fill; bin_count]);
+    }
+
     let window_len = usize::try_from(window_span).expect("region plan window span exceeds usize");
     let default_fill = if general.missing_data_as_zero {
         0.0f64
@@ -426,6 +438,30 @@ pub(super) fn process_batch<M: PipelineMode>(
             let row = maybe_values.map(|(flat, sc, bc)| {
                 mode.postprocess_row(Arc::unwrap_or_clone(record), flat, sc, bc, metadata)
             });
+            results.push((orig_idx, group_index, row));
+            continue;
+        }
+
+        // Python short-circuits rows whose region body is too short.
+        if plan.body_too_short() {
+            let fill = if general.missing_data_as_zero {
+                0.0
+            } else {
+                f64::NAN
+            };
+            let bin_count = plan.bins().len();
+            let all_values = vec![fill; sample_count * bin_count];
+            let row = if should_skip_row_flat(&all_values, general) {
+                None
+            } else {
+                Some(mode.postprocess_row(
+                    Arc::unwrap_or_clone(record),
+                    all_values,
+                    sample_count,
+                    bin_count,
+                    metadata,
+                ))
+            };
             results.push((orig_idx, group_index, row));
             continue;
         }

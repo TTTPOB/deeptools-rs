@@ -106,6 +106,10 @@ pub struct ScaleRegionsPlan {
     pub window_end: i64,
     pub bins: Vec<ScaleBin>,
     pub included_intervals: Option<Vec<(i64, i64)>>,
+    /// When true the region body (after subtracting unscaled regions) is
+    /// shorter than a single bin.  Python short-circuits the entire row
+    /// to zeros/NaN in this case (heatmapper.py:402-411).
+    pub body_too_short: bool,
 }
 
 impl SignalBin for ScaleBin {
@@ -139,6 +143,10 @@ impl RegionPlan for ScaleRegionsPlan {
 
     fn included_intervals(&self) -> Option<&[(i64, i64)]> {
         self.included_intervals.as_deref()
+    }
+
+    fn body_too_short(&self) -> bool {
+        self.body_too_short
     }
 }
 
@@ -223,11 +231,16 @@ impl ScaleRegionsPlan {
             .max()
             .unwrap_or(end);
 
+        // Python: if body > 0 and body_length < bin_size, skip entire row
+        let scalable_body = region_len - unscaled5_len - unscaled3_len;
+        let body_too_short = options.region_body_length > 0 && scalable_body < bin_size as i64;
+
         Self {
             window_start,
             window_end,
             bins,
             included_intervals: None,
+            body_too_short,
         }
     }
 }
@@ -628,5 +641,177 @@ mod tests {
         assert_eq!(plan.bins[0].end, 150);
         assert_eq!(plan.bins[1].start, 250);
         assert_eq!(plan.bins[1].end, 300);
+    }
+
+    // ── Issue 2a: body_too_short flag ────────────────────────────────────
+
+    #[test]
+    fn body_too_short_when_scalable_body_less_than_bin_size() {
+        // region: [100, 115), length = 15
+        // unscaled5 = 5, unscaled3 = 5
+        // scalable body = 15 - 5 - 5 = 5, bin_size = 10 → too short
+        let record = build_record(Strand::Positive, 100, 115);
+        let options = ScaleRegionsOptions {
+            region_body_length: 50,
+            start_label: "TSS".to_string(),
+            end_label: "TES".to_string(),
+            upstream: 0,
+            downstream: 0,
+            unscaled_5_prime: 5,
+            unscaled_3_prime: 5,
+        };
+        let plan = ScaleRegionsPlan::scale_regions(&record, &options, 10, false);
+        assert!(
+            plan.body_too_short,
+            "expected body_too_short when scalable body (5) < bin_size (10)"
+        );
+    }
+
+    #[test]
+    fn body_not_too_short_when_scalable_body_equals_bin_size() {
+        // region: [100, 120), length = 20
+        // unscaled5 = 5, unscaled3 = 5
+        // scalable body = 20 - 5 - 5 = 10, bin_size = 10 → NOT too short
+        let record = build_record(Strand::Positive, 100, 120);
+        let options = ScaleRegionsOptions {
+            region_body_length: 50,
+            start_label: "TSS".to_string(),
+            end_label: "TES".to_string(),
+            upstream: 0,
+            downstream: 0,
+            unscaled_5_prime: 5,
+            unscaled_3_prime: 5,
+        };
+        let plan = ScaleRegionsPlan::scale_regions(&record, &options, 10, false);
+        assert!(
+            !plan.body_too_short,
+            "body should NOT be too short when scalable body (10) == bin_size (10)"
+        );
+    }
+
+    #[test]
+    fn body_not_too_short_when_region_body_length_is_zero() {
+        // region_body_length = 0 → body parameter not set, should NOT
+        // trigger the short-circuit even if region is tiny
+        let record = build_record(Strand::Positive, 100, 101);
+        let options = ScaleRegionsOptions {
+            region_body_length: 0,
+            start_label: "TSS".to_string(),
+            end_label: "TES".to_string(),
+            upstream: 0,
+            downstream: 0,
+            unscaled_5_prime: 0,
+            unscaled_3_prime: 0,
+        };
+        let plan = ScaleRegionsPlan::scale_regions(&record, &options, 10, false);
+        assert!(
+            !plan.body_too_short,
+            "body_too_short should be false when region_body_length == 0"
+        );
+    }
+
+    #[test]
+    fn body_too_short_negative_strand() {
+        // Same logic should apply to negative strand
+        let record = build_record(Strand::Negative, 100, 115);
+        let options = ScaleRegionsOptions {
+            region_body_length: 50,
+            start_label: "TSS".to_string(),
+            end_label: "TES".to_string(),
+            upstream: 0,
+            downstream: 0,
+            unscaled_5_prime: 5,
+            unscaled_3_prime: 5,
+        };
+        let plan = ScaleRegionsPlan::scale_regions(&record, &options, 10, false);
+        assert!(
+            plan.body_too_short,
+            "body_too_short should apply to negative strand as well"
+        );
+    }
+
+    #[test]
+    fn body_too_short_no_unscaled_regions() {
+        // region: [100, 105), length = 5, no unscaled regions
+        // scalable body = 5, bin_size = 10 → too short
+        let record = build_record(Strand::Positive, 100, 105);
+        let options = ScaleRegionsOptions {
+            region_body_length: 50,
+            start_label: "TSS".to_string(),
+            end_label: "TES".to_string(),
+            upstream: 20,
+            downstream: 20,
+            unscaled_5_prime: 0,
+            unscaled_3_prime: 0,
+        };
+        let plan = ScaleRegionsPlan::scale_regions(&record, &options, 10, false);
+        assert!(
+            plan.body_too_short,
+            "body_too_short should be true when region (5bp) < bin_size (10)"
+        );
+    }
+
+    #[test]
+    fn body_too_short_metagene_exon_total_less_than_bin_size() {
+        // Two exons: [100,103) and [200,202) → total = 5
+        // unscaled5 = 0, unscaled3 = 0
+        // scalable body = 5, bin_size = 10 → too short
+        let record = bed12_record(Strand::Positive, &[(100, 103), (200, 202)]);
+        let options = ScaleRegionsOptions {
+            region_body_length: 50,
+            start_label: "TSS".to_string(),
+            end_label: "TES".to_string(),
+            upstream: 0,
+            downstream: 0,
+            unscaled_5_prime: 0,
+            unscaled_3_prime: 0,
+        };
+        let plan = ScaleRegionsPlan::scale_regions(&record, &options, 10, true);
+        assert!(
+            plan.body_too_short,
+            "metagene: body_too_short when exon total (5) < bin_size (10)"
+        );
+    }
+
+    #[test]
+    fn body_not_too_short_metagene_exon_total_sufficient() {
+        // Two exons: [100,150) and [200,250) → total = 100
+        // unscaled5 = 10, unscaled3 = 10
+        // scalable body = 100 - 10 - 10 = 80, bin_size = 10 → NOT too short
+        let record = bed12_record(Strand::Positive, &[(100, 150), (200, 250)]);
+        let options = ScaleRegionsOptions {
+            region_body_length: 50,
+            start_label: "TSS".to_string(),
+            end_label: "TES".to_string(),
+            upstream: 0,
+            downstream: 0,
+            unscaled_5_prime: 10,
+            unscaled_3_prime: 10,
+        };
+        let plan = ScaleRegionsPlan::scale_regions(&record, &options, 10, true);
+        assert!(
+            !plan.body_too_short,
+            "metagene: body should NOT be too short when exon total (80) >= bin_size (10)"
+        );
+    }
+
+    #[test]
+    fn reference_point_plan_body_too_short_default_false() {
+        // ReferencePointPlan uses the default trait impl which returns false
+        use crate::pipeline::core::RegionPlan;
+        let record = build_record(Strand::Positive, 100, 200);
+        let plan = ReferencePointPlan::reference_point(
+            &record,
+            ReferencePoint::Tss,
+            10,
+            2,
+            2,
+            false,
+            false,
+        );
+        assert!(
+            !plan.body_too_short(),
+            "ReferencePointPlan should always return false for body_too_short"
+        );
     }
 }

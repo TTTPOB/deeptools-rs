@@ -55,6 +55,14 @@ pub trait RegionPlan {
     fn included_intervals(&self) -> Option<&[(i64, i64)]> {
         None
     }
+
+    /// Whether the region body is too short (less than bin_size after
+    /// subtracting unscaled regions).  When true, the entire row should
+    /// be filled with zeros (missingDataAsZero) or NaN, matching the
+    /// Python short-circuit at heatmapper.py:402-411.
+    fn body_too_short(&self) -> bool {
+        false
+    }
 }
 
 pub trait PipelineMode: Sync {
