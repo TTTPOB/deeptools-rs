@@ -259,9 +259,11 @@ pub(crate) fn record_passes_blacklist(
         None => return false,
     };
 
-    // Binary search for first allowed interval that could overlap the record
+    // Python uses findOverlaps(..., trimOverlap=True) which drops any
+    // region whose start falls before the allowed chunk start. Match this
+    // by requiring record.start to be contained within an allowed interval.
     let i = allowed.partition_point(|&(_, a_end)| a_end <= record.start);
-    i < allowed.len() && allowed[i].0 < record.end
+    i < allowed.len() && allowed[i].0 <= record.start
 }
 
 fn parse_grouped_bed(path: &Path, default_label: String) -> Result<Vec<Group>, BedReadError> {
@@ -670,5 +672,104 @@ mod tests {
         assert_eq!(result, &[(100, 250)]);
         let result2 = blacklist_intervals_for_chrom(&bl, "MT");
         assert_eq!(result2, &[(100, 250)]);
+    }
+
+    // ── record_passes_blacklist ─────────────────────────────────────────────
+
+    fn make_record(chrom: &str, start: u32, end: u32) -> BedRecord {
+        use crate::io::readers::bed::Strand;
+        BedRecord {
+            chrom: Arc::from(chrom),
+            start,
+            end,
+            name: None,
+            score: None,
+            score_raw: None,
+            strand: Strand::Unstranded,
+            strand_raw: None,
+            extra_fields: Vec::new(),
+        }
+    }
+
+    fn make_chrom_sizes(entries: Vec<(&str, u32)>) -> HashMap<String, u32> {
+        entries
+            .into_iter()
+            .map(|(c, s)| (normalize_chrom(c), s))
+            .collect()
+    }
+
+    #[test]
+    fn passes_blacklist_start_in_allowed_interval() {
+        let bl = make_blacklist_map(vec![("ch1", 110, 130)]);
+        let cs = make_chrom_sizes(vec![("ch1", 400)]);
+        let ai = precompute_allowed_intervals(&bl, &cs);
+        let record = make_record("ch1", 100, 150);
+        assert!(record_passes_blacklist(&record, &bl, &ai, &cs));
+    }
+
+    #[test]
+    fn fails_blacklist_start_inside_blacklisted_region() {
+        // Regression: ch1 115-150 + blacklist ch1 110-130.
+        // record.start=115 falls in [110,130) which is blacklisted.
+        // Python drops this via trimOverlap=True; Rust must match.
+        let bl = make_blacklist_map(vec![("ch1", 110, 130)]);
+        let cs = make_chrom_sizes(vec![("ch1", 400)]);
+        let ai = precompute_allowed_intervals(&bl, &cs);
+        let record = make_record("ch1", 115, 150);
+        assert!(!record_passes_blacklist(&record, &bl, &ai, &cs));
+    }
+
+    #[test]
+    fn fails_blacklist_start_at_blacklist_start_boundary() {
+        let bl = make_blacklist_map(vec![("ch1", 110, 130)]);
+        let cs = make_chrom_sizes(vec![("ch1", 400)]);
+        let ai = precompute_allowed_intervals(&bl, &cs);
+        let record = make_record("ch1", 110, 150);
+        assert!(!record_passes_blacklist(&record, &bl, &ai, &cs));
+    }
+
+    #[test]
+    fn passes_blacklist_start_at_blacklist_end_boundary() {
+        let bl = make_blacklist_map(vec![("ch1", 110, 130)]);
+        let cs = make_chrom_sizes(vec![("ch1", 400)]);
+        let ai = precompute_allowed_intervals(&bl, &cs);
+        let record = make_record("ch1", 130, 150);
+        assert!(record_passes_blacklist(&record, &bl, &ai, &cs));
+    }
+
+    #[test]
+    fn passes_blacklist_no_blacklist_for_chrom() {
+        let bl = make_blacklist_map(vec![("ch2", 110, 130)]);
+        let cs = make_chrom_sizes(vec![("ch1", 400), ("ch2", 400)]);
+        let ai = precompute_allowed_intervals(&bl, &cs);
+        let record = make_record("ch1", 115, 150);
+        assert!(record_passes_blacklist(&record, &bl, &ai, &cs));
+    }
+
+    #[test]
+    fn passes_blacklist_chrom_not_in_scores() {
+        let bl = make_blacklist_map(vec![("ch1", 110, 130)]);
+        let cs = make_chrom_sizes(vec![("ch1", 400)]);
+        let ai = precompute_allowed_intervals(&bl, &cs);
+        let record = make_record("chrUn", 0, 100);
+        assert!(record_passes_blacklist(&record, &bl, &ai, &cs));
+    }
+
+    #[test]
+    fn fails_blacklist_fully_covered_chrom() {
+        let bl = make_blacklist_map(vec![("ch1", 0, 400)]);
+        let cs = make_chrom_sizes(vec![("ch1", 400)]);
+        let ai = precompute_allowed_intervals(&bl, &cs);
+        let record = make_record("ch1", 100, 200);
+        assert!(!record_passes_blacklist(&record, &bl, &ai, &cs));
+    }
+
+    #[test]
+    fn passes_blacklist_start_just_before_blacklist() {
+        let bl = make_blacklist_map(vec![("ch1", 110, 130)]);
+        let cs = make_chrom_sizes(vec![("ch1", 400)]);
+        let ai = precompute_allowed_intervals(&bl, &cs);
+        let record = make_record("ch1", 109, 150);
+        assert!(record_passes_blacklist(&record, &bl, &ai, &cs));
     }
 }
