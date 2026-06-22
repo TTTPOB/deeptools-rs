@@ -3,6 +3,12 @@
 - 数值目标：输出矩阵和 deepTools 3.5.6 在支持用例内保持 ≤5e-6 绝对误差。
 - 当前状态：主流程可用，metagene、GTF/BED12、blacklist、skipZeros、threshold、auxiliary outputs 都有回归覆盖。
 
+## 当前分支状态
+- 当前 harness 已统一到 `scripts/harness.py`，旧 `custom_compare.py`、`full_python_compatibility.py`、`perf_smoke.sh`、`profile_bench.sh` 和旧 regression 包已删除。
+- 配置已拆成 `scripts/configs/` 下的小 JSON；不要恢复 `scripts/config/compute_matrix_cases.json`。
+- CI 在 release build 后运行 `cargo test --test python_compatibility -- --test-threads=1`。
+- 最近确认过的全量兼容性入口：`pixi run compat --quiet`，结果为 26/26 passed。
+
 ## 工具链
 - Python/deepTools 环境走 pixi。`pixi.toml` 使用 `conda-forge` 和 `bioconda`，锁定 `deeptools ==3.5.6`。
 - 不要直接调用 `python3 scripts/harness.py ...` 做常规验证；使用 pixi task。
@@ -22,7 +28,7 @@
 
 ## 配置文件
 - 共享路径和比较参数：`scripts/configs/common.json`
-- 兼容性用例：`scripts/configs/compat/*.json`
+- 兼容性用例：`scripts/configs/compat/core.json`、`blacklist.json`、`corner.json`、`metagene.json`
 - 参考产物用例：`scripts/configs/artifacts.json`
 - 性能和 ENCODE 用例：`scripts/configs/benchmarks.json`
 - 数据集下载描述：`scripts/configs/datasets.json`
@@ -52,6 +58,7 @@
 
 ## 编辑规则
 - 代码注释写英文。
+- 常规 harness 验证使用 pixi task。只有调试 `scripts/harness.py` 自身时才直接调用 Python。
 - 改动后按影响面跑验证。涉及 harness/config 时至少跑 `pixi run compat --case reference_point_basic` 和相关 task。
 - 提交要原子化，不要把配置迁移、逻辑变更、格式化、文档改动混成一个提交。
 - 若改动会影响用例清单，更新对应 `scripts/configs/*.json`，再跑 pixi task。
