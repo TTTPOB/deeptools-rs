@@ -1,0 +1,31 @@
+{
+  "datasets": {
+    "encode_k562_atac": {
+      "root": "{encode}",
+      "signals": [
+        {
+          "path": "{encode}/ENCFF093IIW.bigWig",
+          "url": "https://www.encodeproject.org/files/ENCFF093IIW/@@download/ENCFF093IIW.bigWig"
+        },
+        {
+          "path": "{encode}/ENCFF019IPA.bigWig",
+          "url": "https://www.encodeproject.org/files/ENCFF019IPA/@@download/ENCFF019IPA.bigWig"
+        },
+        {
+          "path": "{encode}/ENCFF656ZKM.bigWig",
+          "url": "https://www.encodeproject.org/files/ENCFF656ZKM/@@download/ENCFF656ZKM.bigWig"
+        }
+      ],
+      "bed": {
+        "path": "{encode}/ENCFF333TAT.bed",
+        "compressed_path": "{encode}/ENCFF333TAT.bed.gz",
+        "url": "https://www.encodeproject.org/files/ENCFF333TAT/@@download/ENCFF333TAT.bed.gz",
+        "split_dir": "{encode}/regions",
+        "split_outputs": [
+          "{encode}/regions/ENCFF333TAT_part1.bed",
+          "{encode}/regions/ENCFF333TAT_part2.bed"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "paths": {
+    "heatmapper": "deeptools/deeptools/test/test_heatmapper",
+    "test_data": "deeptools/deeptools/test/test_data",
+    "local_data": "tests/data",
+    "corner": "tests/data/corner_cases",
+    "encode": "target/compute-matrix-datasets/encode_k562_atac"
+  },
+  "comparison": {
+    "default_tolerance": 5e-06,
+    "ignore_header_keys": [
+      "proc number",
+      "scale"
+    ],
+    "max_diffs": 10
+  }
+}

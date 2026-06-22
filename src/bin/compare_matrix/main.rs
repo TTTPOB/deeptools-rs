@@ -1,17 +1,11 @@
-mod diff;
-mod header;
-mod parse;
-mod values;
-
 use std::path::PathBuf;
 use std::process;
 
 use clap::{Parser, Subcommand};
-
-use diff::{full_diff, print_full_diff, print_value_result};
-use header::compare_headers;
-use parse::load_matrix;
-use values::compare_values;
+use compute_matrix_rs::matrix_compare::diff::{full_diff, print_full_diff, print_value_result};
+use compute_matrix_rs::matrix_compare::header::compare_headers;
+use compute_matrix_rs::matrix_compare::parse::load_matrix;
+use compute_matrix_rs::matrix_compare::values::compare_values;
 
 /// Exit codes:
 ///   0 — match

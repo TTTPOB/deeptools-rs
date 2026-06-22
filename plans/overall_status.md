@@ -142,8 +142,10 @@ All 5 tasks from `docs/superpowers/plans/2026-04-29-next-stages.md` are done:
 - Honour `--quiet` by suppressing per-region messages while still emitting fatal errors.
 
 ## Validation Strategy
-- Use `pixi` to provision the DeepTools reference environment and fixtures (`deeptools/deeptools/test/test_data/`). Maintain the unified regression harness (`scripts/custom_compare.py`) to drive both modes while sharing datasets under `target/compute-matrix-datasets/`.
-- Generate regression artefacts via `pixi run computeMatrix ...` and compare against Rust output (gzip contents, JSON header equality, per-value diff within tolerance). Integrate into `cargo test` as ignored tests gated by an environment variable to avoid requiring Python on every CI run.
+- Use `scripts/configs/*.json` as task-scoped sources for compatibility, artifact, benchmark/profile, and ENCODE dataset cases.
+- Use `cargo test --test python_compatibility -- --test-threads=1` for committed fixture parity. The Rust test reads the manifest and calls the shared matrix comparison library directly.
+- Use `pixi run regen-artifacts` and `pixi run verify-artifacts` to regenerate DeepTools 3.5.6 reference outputs and compare Rust output.
+- Use `pixi run prepare-data encode_k562_atac` and `pixi run encode` for large ENCODE performance runs.
 - Add unit tests for zone splitting (`chop_regions`, `trim_zones`), coverage padding, threshold filtering, and matrix sorting to ensure deterministic behaviour.
 
 ## Performance Status & Future Enhancements
@@ -188,7 +190,7 @@ All 5 tasks from `docs/superpowers/plans/2026-04-29-next-stages.md` are done:
 - [ ] Performance profiling: Large-scale benchmarking and optimization tuning
 - [x] Metagene output format: Emit comma-separated exon coordinates in start/end columns (currently outputs gene-level coordinates instead of exon boundaries)
 
-## Python Compatibility Test Status: 10/10 PASSING ✅
+## Python Compatibility Test Status: MANIFEST PASSING ✅
 
 ### Test Results (as of 2025-12-01)
 | Test | Status |
@@ -205,14 +207,14 @@ All 5 tasks from `docs/superpowers/plans/2026-04-29-next-stages.md` are done:
 | metagene | ✅ PASS |
 
 ### Performance Timing (2025-12-01)
-- `pixi run python scripts/custom_compare.py --mode python-compatibility` (deepTools test_heatmapper corpus): 10/10 fresh runs, total Rust time **11.48s**; slowest case `reference_point_basic` at 9.09s.
+- Historical deepTools test_heatmapper corpus: 10/10 fresh runs, total Rust time **11.48s**; slowest case `reference_point_basic` at 9.09s.
 - ENCODE K562 ATAC cached benchmarks (4 cores, bin 10):
   - reference-point (center, ±100 bp): Python 171.35s vs Rust 17.90s → **9.57× faster**.
   - scale-regions (body 200, ±100 bp, unscaled 50/50): Python 346.56s vs Rust 18.64s → **18.59× faster**.
 
 ### Recent Changes (2026-04-29)
 - ✅ **2026-04-29**: Changed bigWig block caching to per-file caches with a strict total entry cap, preventing cross-sample block collisions while keeping multi-sample cache usage bounded.
-- ✅ **2026-04-29**: Added `scripts/perf_smoke.sh` for repeatable local performance smoke timing of reference-point and scale-regions cases.
+- ✅ **2026-04-29**: Added manifest-driven harness commands for compatibility, artifact verification, smoke benchmarks, profiling, and ENCODE data preparation.
 
 ### Recent Fixes (2025-12-21)
 - ✅ **2025-12-21**: Made BED parsing tolerant of non-standard score/strand strings by preserving raw values and defaulting invalid strands to unstranded (processed as plus strand) instead of erroring.
@@ -222,7 +224,7 @@ All 5 tasks from `docs/superpowers/plans/2026-04-29-next-stages.md` are done:
 - ✅ **Matrix loader comma handling**: Updated Python matrix loader to handle comma-separated exon coordinates in metagene format
 - ✅ **Metagene coordinate output format**: Added `exon_coords` field to `MatrixRow` and modified output writer to emit comma-separated exon coordinates (e.g., `0,399,979` for start, `50,510,1000` for end)
 - ✅ **Metagene intron masking**: Added explicit included-interval masking so metagene bins ignore intronic signal; metagene compatibility test now passes (max delta ≈ 1e-6)
-- ✅ **Test harness split/rename**: Regression entry points now `scripts/custom_compare.py` (self-provided/ENCODE + compatibility modes) and `scripts/full_python_compatibility.py` (deepTools mirror); legacy `compute_matrix_regression*.py` removed.
+- ✅ **Unified test harness**: Regression entry point is now `scripts/harness.py` with scenarios split under `scripts/configs/`; legacy Python regression package and duplicate YAML manifests removed.
 - ✅ **Numeric regression tolerance**: Hardened tolerance parsing (string/float) with clamp to ≤5e-6 and shifted reporting to “within tolerance” instead of byte-for-byte; compatibility suite re-run and passing at the new threshold.
 - ✅ **CLI guard for `-bs`/`-bl`**: Added early exit with guidance when multi-letter short flags are used, pointing users to `--bs/--binSize` and `--bl/--blackListFileName`.
 - ✅ **Documentation update**: `readme.md` refreshed with current status, quickstart commands, and latest compatibility/performance results.
@@ -250,8 +252,8 @@ All 5 tasks from `docs/superpowers/plans/2026-04-29-next-stages.md` are done:
 - [x] `pipeline::scale_regions`: Complete implementation with five-zone support (upstream, unscaled5, body, unscaled3, downstream), proper strand handling for negative coordinates, and full integration with shared core.
 
 ### Testing & Validation: PRODUCTION-READY
-- [x] Regression harness (`scripts/custom_compare.py`): comprehensive 30KB Python testing framework with ENCODE K562 ATAC-seq data downloads, dual execution (Python + Rust), numerical matrix comparison capped at 5e-6 absolute tolerance, performance benchmarking, and detailed reporting. Pixi environment ready with deeptools 3.5.6.
-- [x] Python Compatibility Verification System (`scripts/full_python_compatibility.py` → `custom_compare.py --mode python-compatibility`): Modular testing framework with 10 scenarios mirroring `test_heatmapper.py`, YAML-based configuration (`scripts/config/python_compatibility.yaml`), and shared utilities under `scripts/regression/` for comparison, scenario generation, dataset management, and reporting.
+- [x] Regression harness (`scripts/harness.py`): single Python entry point for compat checks, reference regeneration, artifact verification, smoke benchmarks, profiling, ENCODE data preparation, and ENCODE performance runs.
+- [x] Python Compatibility Verification System: Rust integration tests read `scripts/configs/common.json` plus `scripts/configs/compat/*.json`, then use the shared `matrix_compare` library to compare headers, BED rows, and values within 5e-6.
 
 ### CLI Compatibility: FIXED
 - [x] Short flag parsing: Fixed `-bs` conflict with `-b` by changing to `--bs` long alias (clap does not support multi-character short flags like Python argparse)
