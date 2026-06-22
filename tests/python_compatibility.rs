@@ -46,11 +46,46 @@ struct ReferenceConfig {
 }
 
 fn load_manifest() -> CaseManifest {
-    let manifest_path = project_root().join("scripts/config/compute_matrix_cases.json");
-    let raw = std::fs::read_to_string(&manifest_path)
-        .unwrap_or_else(|err| panic!("failed to read {}: {err}", manifest_path.display()));
-    serde_json::from_str(&raw)
-        .unwrap_or_else(|err| panic!("failed to parse {}: {err}", manifest_path.display()))
+    let config_dir = project_root().join("scripts/configs");
+    let common_path = config_dir.join("common.json");
+    let compat_dir = config_dir.join("compat");
+
+    let common_raw = std::fs::read_to_string(&common_path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", common_path.display()));
+    #[derive(Debug, Deserialize)]
+    struct CommonConfig {
+        paths: HashMap<String, String>,
+        comparison: ComparisonConfig,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct CasesConfig {
+        cases: Vec<CaseConfig>,
+    }
+
+    let common: CommonConfig = serde_json::from_str(&common_raw)
+        .unwrap_or_else(|err| panic!("failed to parse {}: {err}", common_path.display()));
+    let mut compat_files: Vec<PathBuf> = std::fs::read_dir(&compat_dir)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", compat_dir.display()))
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .collect();
+    compat_files.sort();
+
+    let mut all_cases = Vec::new();
+    for path in compat_files {
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+        let cases: CasesConfig = serde_json::from_str(&raw)
+            .unwrap_or_else(|err| panic!("failed to parse {}: {err}", path.display()));
+        all_cases.extend(cases.cases);
+    }
+
+    CaseManifest {
+        paths: common.paths,
+        comparison: common.comparison,
+        cases: all_cases,
+    }
 }
 
 fn resolve_path(manifest: &CaseManifest, raw: &str) -> PathBuf {

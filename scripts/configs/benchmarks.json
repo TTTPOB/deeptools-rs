@@ -1,0 +1,124 @@
+{
+  "cases": [
+    {
+      "id": "reference_point_basic",
+      "tags": [
+        "compat",
+        "perf_smoke"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--binSize",
+        "1",
+        "-p",
+        "1"
+      ],
+      "reference": {
+        "matrix": "{heatmapper}/master.mat"
+      }
+    },
+    {
+      "id": "scale_regions_basic",
+      "tags": [
+        "compat",
+        "perf_smoke"
+      ],
+      "mode": "scale-regions",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "-m",
+        "100",
+        "--binSize",
+        "1",
+        "-p",
+        "1"
+      ],
+      "reference": {
+        "matrix": "{heatmapper}/master_scale_reg.mat"
+      }
+    },
+    {
+      "id": "encode_reference_point_center",
+      "tags": [
+        "encode",
+        "perf"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{encode}/regions/ENCFF333TAT_part1.bed",
+        "{encode}/regions/ENCFF333TAT_part2.bed"
+      ],
+      "score_files": [
+        "{encode}/ENCFF093IIW.bigWig",
+        "{encode}/ENCFF019IPA.bigWig",
+        "{encode}/ENCFF656ZKM.bigWig"
+      ],
+      "options": [
+        "--referencePoint",
+        "center",
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "4"
+      ],
+      "dataset": "encode_k562_atac"
+    },
+    {
+      "id": "encode_scale_regions",
+      "tags": [
+        "encode",
+        "perf"
+      ],
+      "mode": "scale-regions",
+      "region_files": [
+        "{encode}/regions/ENCFF333TAT_part1.bed",
+        "{encode}/regions/ENCFF333TAT_part2.bed"
+      ],
+      "score_files": [
+        "{encode}/ENCFF093IIW.bigWig",
+        "{encode}/ENCFF019IPA.bigWig",
+        "{encode}/ENCFF656ZKM.bigWig"
+      ],
+      "options": [
+        "-m",
+        "200",
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--unscaled5prime",
+        "50",
+        "--unscaled3prime",
+        "50",
+        "--binSize",
+        "10",
+        "-p",
+        "4"
+      ],
+      "dataset": "encode_k562_atac"
+    }
+  ]
+}

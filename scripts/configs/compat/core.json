@@ -1,0 +1,257 @@
+{
+  "cases": [
+    {
+      "id": "reference_point_basic",
+      "tags": [
+        "compat",
+        "perf_smoke"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--binSize",
+        "1",
+        "-p",
+        "1"
+      ],
+      "reference": {
+        "matrix": "{heatmapper}/master.mat"
+      }
+    },
+    {
+      "id": "reference_point_center",
+      "tags": [
+        "compat"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--referencePoint",
+        "center",
+        "--binSize",
+        "1",
+        "-p",
+        "1"
+      ],
+      "reference": {
+        "matrix": "{heatmapper}/master_center.mat"
+      }
+    },
+    {
+      "id": "reference_point_tes",
+      "tags": [
+        "compat"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--referencePoint",
+        "TES",
+        "--binSize",
+        "1",
+        "-p",
+        "1"
+      ],
+      "reference": {
+        "matrix": "{heatmapper}/master_TES.mat"
+      }
+    },
+    {
+      "id": "reference_point_missing_data_as_zero",
+      "tags": [
+        "compat"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--binSize",
+        "1",
+        "-p",
+        "1",
+        "--missingDataAsZero"
+      ],
+      "reference": {
+        "matrix": "{heatmapper}/master_nan_to_zero.mat"
+      }
+    },
+    {
+      "id": "scale_regions_basic",
+      "tags": [
+        "compat",
+        "perf_smoke"
+      ],
+      "mode": "scale-regions",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "-m",
+        "100",
+        "--binSize",
+        "1",
+        "-p",
+        "1"
+      ],
+      "reference": {
+        "matrix": "{heatmapper}/master_scale_reg.mat"
+      }
+    },
+    {
+      "id": "multiple_bed",
+      "tags": [
+        "compat"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{heatmapper}/group1.bed",
+        "{heatmapper}/group2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--binSize",
+        "1",
+        "-p",
+        "1"
+      ],
+      "reference": {
+        "matrix": "{heatmapper}/master_multibed.mat"
+      }
+    },
+    {
+      "id": "region_extend_beyond_chr",
+      "tags": [
+        "compat"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{heatmapper}/group1.bed",
+        "{heatmapper}/group2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "500",
+        "--binSize",
+        "1",
+        "-p",
+        "1"
+      ],
+      "reference": {
+        "matrix": "{heatmapper}/master_extend_beyond_chr_size.mat"
+      }
+    },
+    {
+      "id": "scale_regions_unscaled",
+      "tags": [
+        "compat"
+      ],
+      "mode": "scale-regions",
+      "region_files": [
+        "{heatmapper}/unscaled.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/unscaled.bigWig"
+      ],
+      "options": [
+        "-a",
+        "300",
+        "-b",
+        "500",
+        "--unscaled5prime",
+        "100",
+        "--unscaled3prime",
+        "50",
+        "--binSize",
+        "10",
+        "-p",
+        "1"
+      ],
+      "reference": {
+        "matrix": "{heatmapper}/master_unscaled.mat"
+      }
+    },
+    {
+      "id": "gtf_input",
+      "tags": [
+        "compat"
+      ],
+      "mode": "scale-regions",
+      "region_files": [
+        "{test_data}/test.gtf"
+      ],
+      "score_files": [
+        "{test_data}/test1.bw.bw"
+      ],
+      "options": [
+        "-a",
+        "300",
+        "-b",
+        "500",
+        "--unscaled5prime",
+        "20",
+        "--unscaled3prime",
+        "50",
+        "--binSize",
+        "10",
+        "-p",
+        "1"
+      ],
+      "reference": {
+        "matrix": "{heatmapper}/master_gtf.mat"
+      }
+    }
+  ]
+}

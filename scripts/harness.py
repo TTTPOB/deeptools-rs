@@ -16,7 +16,7 @@ from typing import Any
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-MANIFEST_PATH = REPO_ROOT / "scripts" / "config" / "compute_matrix_cases.json"
+CONFIG_DIR = REPO_ROOT / "scripts" / "configs"
 
 
 class HarnessError(RuntimeError):
@@ -81,9 +81,18 @@ class Manifest:
     repo_root: Path
 
     @classmethod
-    def load(cls, path: Path = MANIFEST_PATH) -> "Manifest":
-        with path.open("r", encoding="utf-8") as handle:
-            return cls(json.load(handle), REPO_ROOT)
+    def load(cls, *config_names: str) -> "Manifest":
+        with (CONFIG_DIR / "common.json").open("r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+        raw.setdefault("cases", [])
+        raw.setdefault("datasets", {})
+        for name in config_names:
+            for path in config_paths(name):
+                with path.open("r", encoding="utf-8") as handle:
+                    data = json.load(handle)
+                raw["cases"].extend(data.get("cases", []))
+                raw["datasets"].update(data.get("datasets", {}))
+        return cls(raw, REPO_ROOT)
 
     @property
     def cases(self) -> list[Case]:
@@ -155,6 +164,15 @@ def binary_path(name: str, *, release: bool = False) -> Path:
     return release_path
 
 
+def config_paths(name: str) -> list[Path]:
+    path = CONFIG_DIR / name
+    if path.is_dir():
+        return sorted(path.glob("*.json"))
+    if path.suffix != ".json":
+        path = path.with_suffix(".json")
+    return [path]
+
+
 def run(cmd: list[str], *, cwd: Path = REPO_ROOT, quiet: bool = False) -> float:
     if not quiet:
         print("+", " ".join(cmd))
@@ -190,7 +208,7 @@ def compare(
 
 
 def command_compat(args: argparse.Namespace) -> int:
-    manifest = Manifest.load()
+    manifest = Manifest.load("compat")
     ensure_binaries()
     cases = manifest.select_cases(tag="compat", case_id=args.case)
     if not cases:
@@ -216,8 +234,8 @@ def command_compat(args: argparse.Namespace) -> int:
 
 
 def command_regen_refs(args: argparse.Namespace) -> int:
-    manifest = Manifest.load()
-    cases = manifest.select_cases(tag=args.tag, case_id=args.case)
+    manifest = Manifest.load("artifacts.json")
+    cases = manifest.select_cases(case_id=args.case)
     cases = [case for case in cases if case.reference]
     if not cases:
         raise HarnessError("no reference-generating cases selected")
@@ -238,9 +256,9 @@ def command_regen_refs(args: argparse.Namespace) -> int:
 
 
 def command_verify_refs(args: argparse.Namespace) -> int:
-    manifest = Manifest.load()
+    manifest = Manifest.load("artifacts.json")
     ensure_binaries()
-    cases = manifest.select_cases(tag=args.tag, case_id=args.case)
+    cases = manifest.select_cases(case_id=args.case)
     cases = [case for case in cases if case.reference]
     if not cases:
         raise HarnessError("no reference cases selected")
@@ -265,7 +283,7 @@ def command_verify_refs(args: argparse.Namespace) -> int:
 
 
 def command_bench_smoke(args: argparse.Namespace) -> int:
-    manifest = Manifest.load()
+    manifest = Manifest.load("benchmarks.json")
     ensure_binaries(release=True)
     cases = manifest.select_cases(tag=args.tag, case_id=args.case)
     if not cases:
@@ -292,7 +310,7 @@ def command_bench_smoke(args: argparse.Namespace) -> int:
 
 
 def command_prepare_data(args: argparse.Namespace) -> int:
-    manifest = Manifest.load()
+    manifest = Manifest.load("datasets.json")
     if args.dataset == "all":
         names = sorted(manifest.raw.get("datasets", {}).keys())
     else:
@@ -303,7 +321,7 @@ def command_prepare_data(args: argparse.Namespace) -> int:
 
 
 def command_encode(args: argparse.Namespace) -> int:
-    manifest = Manifest.load()
+    manifest = Manifest.load("benchmarks.json", "datasets.json")
     prepare_dataset(manifest, "encode_k562_atac", verbose=not args.quiet)
     ensure_binaries(release=True)
     cases = manifest.select_cases(tag="encode", case_id=args.case)
@@ -325,7 +343,7 @@ def command_encode(args: argparse.Namespace) -> int:
 
 
 def command_profile(args: argparse.Namespace) -> int:
-    manifest = Manifest.load()
+    manifest = Manifest.load("benchmarks.json")
     ensure_binaries(release=True)
     case = manifest.case(args.case)
     output_dir = args.output_dir or REPO_ROOT / "bench_reports"
@@ -529,13 +547,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     regen = sub.add_parser("regen-refs", help="regenerate reference matrices with deeptools")
     regen.add_argument("--case")
-    regen.add_argument("--tag", default="artifact")
     regen.add_argument("--quiet", action="store_true")
     regen.set_defaults(func=command_regen_refs)
 
     verify = sub.add_parser("verify-refs", help="verify Rust output against reference matrices")
     verify.add_argument("--case")
-    verify.add_argument("--tag", default="artifact")
     verify.add_argument("--quiet", action="store_true")
     verify.set_defaults(func=command_verify_refs)
 

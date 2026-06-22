@@ -142,7 +142,7 @@ All 5 tasks from `docs/superpowers/plans/2026-04-29-next-stages.md` are done:
 - Honour `--quiet` by suppressing per-region messages while still emitting fatal errors.
 
 ## Validation Strategy
-- Use `scripts/config/compute_matrix_cases.json` as the single source for compatibility, artifact, smoke benchmark, profile, and ENCODE cases.
+- Use `scripts/configs/*.json` as task-scoped sources for compatibility, artifact, benchmark/profile, and ENCODE dataset cases.
 - Use `cargo test --test python_compatibility -- --test-threads=1` for committed fixture parity. The Rust test reads the manifest and calls the shared matrix comparison library directly.
 - Use `pixi run regen-artifacts` and `pixi run verify-artifacts` to regenerate DeepTools 3.5.6 reference outputs and compare Rust output.
 - Use `pixi run prepare-data encode_k562_atac` and `pixi run encode` for large ENCODE performance runs.
@@ -224,7 +224,7 @@ All 5 tasks from `docs/superpowers/plans/2026-04-29-next-stages.md` are done:
 - ✅ **Matrix loader comma handling**: Updated Python matrix loader to handle comma-separated exon coordinates in metagene format
 - ✅ **Metagene coordinate output format**: Added `exon_coords` field to `MatrixRow` and modified output writer to emit comma-separated exon coordinates (e.g., `0,399,979` for start, `50,510,1000` for end)
 - ✅ **Metagene intron masking**: Added explicit included-interval masking so metagene bins ignore intronic signal; metagene compatibility test now passes (max delta ≈ 1e-6)
-- ✅ **Unified test harness**: Regression entry point is now `scripts/harness.py` with scenarios in `scripts/config/compute_matrix_cases.json`; legacy Python regression package and duplicate YAML manifests removed.
+- ✅ **Unified test harness**: Regression entry point is now `scripts/harness.py` with scenarios split under `scripts/configs/`; legacy Python regression package and duplicate YAML manifests removed.
 - ✅ **Numeric regression tolerance**: Hardened tolerance parsing (string/float) with clamp to ≤5e-6 and shifted reporting to “within tolerance” instead of byte-for-byte; compatibility suite re-run and passing at the new threshold.
 - ✅ **CLI guard for `-bs`/`-bl`**: Added early exit with guidance when multi-letter short flags are used, pointing users to `--bs/--binSize` and `--bl/--blackListFileName`.
 - ✅ **Documentation update**: `readme.md` refreshed with current status, quickstart commands, and latest compatibility/performance results.
@@ -253,7 +253,7 @@ All 5 tasks from `docs/superpowers/plans/2026-04-29-next-stages.md` are done:
 
 ### Testing & Validation: PRODUCTION-READY
 - [x] Regression harness (`scripts/harness.py`): single Python entry point for compat checks, reference regeneration, artifact verification, smoke benchmarks, profiling, ENCODE data preparation, and ENCODE performance runs.
-- [x] Python Compatibility Verification System: Rust integration tests read `scripts/config/compute_matrix_cases.json` and use the shared `matrix_compare` library to compare headers, BED rows, and values within 5e-6.
+- [x] Python Compatibility Verification System: Rust integration tests read `scripts/configs/common.json` plus `scripts/configs/compat/*.json`, then use the shared `matrix_compare` library to compare headers, BED rows, and values within 5e-6.
 
 ### CLI Compatibility: FIXED
 - [x] Short flag parsing: Fixed `-bs` conflict with `-b` by changing to `--bs` long alias (clap does not support multi-character short flags like Python argparse)

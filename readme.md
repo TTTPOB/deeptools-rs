@@ -25,7 +25,7 @@ Quick Start
 Latest Compatibility & Performance
 - Command: `cargo test --test python_compatibility -- --test-threads=1`
 - Result: all manifest `compat` cases pass with tolerance ≤5e-6.
-- ENCODE benchmark cases live in `scripts/config/compute_matrix_cases.json` and run through `pixi run encode`.
+- ENCODE benchmark cases live in `scripts/configs/benchmarks.json` and run through `pixi run encode`.
 
 Known Behavior Differences from Python deepTools
 - **Header `scale` field type:** Python serializes the `scale` value as int when it is not explicitly passed (the default `1` is a Python int) and as float when explicitly passed (`1.0`, `2.0`, …). Rust always emits a JSON float. This is harmless — no downstream consumer (`plotHeatmap`, `plotProfile`, `computeMatrixOperations`) reads the `scale` header field back after matrix generation; it is only used during `computeMatrix` execution itself. Integration tests skip this field.

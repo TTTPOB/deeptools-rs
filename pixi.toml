@@ -11,8 +11,8 @@ deeptools = "==3.5.6"
 
 [tasks]
 compat = "python scripts/harness.py compat"
-verify-artifacts = "python scripts/harness.py verify-refs --tag artifact"
-regen-artifacts = "python scripts/harness.py regen-refs --tag artifact"
+verify-artifacts = "python scripts/harness.py verify-refs"
+regen-artifacts = "python scripts/harness.py regen-refs"
 bench-smoke = "python scripts/harness.py bench-smoke"
 prepare-data = "python scripts/harness.py prepare-data"
 encode = "python scripts/harness.py encode"
