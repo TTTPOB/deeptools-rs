@@ -1,4 +1,4 @@
-use crate::parse::MatrixFileRow;
+use crate::matrix_compare::parse::MatrixFileRow;
 
 /// Summary of a single value-level difference.
 #[derive(Debug, Clone)]

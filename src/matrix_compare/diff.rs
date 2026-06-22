@@ -1,8 +1,8 @@
 use serde_json::Value;
 
-use crate::header::{HeaderDiff, compare_headers};
-use crate::parse::MatrixFileRow;
-use crate::values::{ComparisonResult, compare_values};
+use crate::matrix_compare::header::{HeaderDiff, compare_headers};
+use crate::matrix_compare::parse::MatrixFileRow;
+use crate::matrix_compare::values::{ComparisonResult, compare_values};
 
 /// Describes whether rows appear to be reordered between left and right.
 #[derive(Debug)]
