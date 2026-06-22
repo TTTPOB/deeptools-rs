@@ -4,8 +4,8 @@
 - 当前状态：主流程可用，metagene、GTF/BED12、blacklist、skipZeros、threshold、auxiliary outputs 都有回归覆盖。
 
 ## 当前分支状态
-- 当前 harness 已统一到 `scripts/harness.py`，旧 `custom_compare.py`、`full_python_compatibility.py`、`perf_smoke.sh`、`profile_bench.sh` 和旧 regression 包已删除。
-- 配置已拆成 `scripts/configs/` 下的小 JSON；不要恢复 `scripts/config/compute_matrix_cases.json`。
+- 当前 harness 入口是 `scripts/harness.py`。
+- 配置位于 `scripts/configs/`，按任务拆成多个小 JSON。
 - CI 在 release build 后运行 `cargo test --test python_compatibility -- --test-threads=1`。
 - 最近确认过的全量兼容性入口：`pixi run compat --quiet`，结果为 26/26 passed。
 
@@ -42,7 +42,6 @@
 - 大矩阵排序使用文件 spilling：`HybridBucketCollector` 按 group 收集行，超过阈值写临时文件，finalize 时 mmap 读回。
 - `matrix_compare` 是共享库模块，负责解析 plain/gzip/multi-member matrix，比较 header、BED 字段和数值。
 - `compare_matrix` binary 只作为开发 CLI。测试代码直接调用 `matrix_compare`。
-- 已删除旧内存路径：`InMemoryCollector`、`GroupBucketCollector`、`MatrixData`、`write_outputs()`、`RunOutcome::Matrix`、`spawn_writer_thread`。
 
 ## 兼容性事实
 - Rust 集成测试从 `scripts/configs/common.json` 和 `scripts/configs/compat/*.json` 读取用例。
