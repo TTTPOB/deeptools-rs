@@ -324,6 +324,128 @@ def command_encode(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_profile(args: argparse.Namespace) -> int:
+    manifest = Manifest.load()
+    ensure_binaries(release=True)
+    case = manifest.case(args.case)
+    output_dir = args.output_dir or REPO_ROOT / "bench_reports"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = time.strftime("%Y-%m-%d-%H%M%S")
+    report = output_dir / f"{timestamp}-{args.name or case.id}.md"
+    matrix_output = REPO_ROOT / "target" / "harness" / "profile" / f"{case.id}.mat.gz"
+    matrix_output.parent.mkdir(parents=True, exist_ok=True)
+    cmd = case.command("rust", matrix_output, release=True)
+
+    if args.warmup:
+        warmup = matrix_output.with_suffix(".warmup.mat.gz")
+        run(case.command("rust", warmup, release=True), quiet=True)
+
+    lines = [
+        f"# Profile: {args.name or case.id}",
+        f"Time: {time.strftime('%Y-%m-%dT%H:%M:%S%z')}",
+        f"Case: {case.id}",
+        f"Command: {' '.join(cmd)}",
+        "",
+    ]
+
+    lines.extend(run_capture_section("time -v", ["/usr/bin/time", "-v", *cmd]))
+
+    if shutil.which("perf"):
+        lines.extend(run_capture_section("perf stat", ["perf", "stat", "-d", *cmd]))
+        perf_data = Path(tempfile.mktemp(suffix=".perf.data"))
+        try:
+            subprocess.run(
+                [
+                    "perf",
+                    "record",
+                    "-e",
+                    "cpu-clock",
+                    "-g",
+                    "--call-graph",
+                    "dwarf",
+                    "-o",
+                    str(perf_data),
+                    *cmd,
+                ],
+                cwd=REPO_ROOT,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            if perf_data.exists():
+                lines.extend(
+                    run_capture_section(
+                        "CPU Hotspots",
+                        [
+                            "perf",
+                            "report",
+                            "-i",
+                            str(perf_data),
+                            "--stdio",
+                            "--no-children",
+                            "--percent-limit",
+                            "0.5",
+                        ],
+                        limit_lines=80,
+                    )
+                )
+        finally:
+            perf_data.unlink(missing_ok=True)
+    else:
+        lines.extend(["## perf", "", "`perf` not found.", ""])
+
+    if shutil.which("heaptrack"):
+        heap_dir = Path(tempfile.mkdtemp(prefix="compute-matrix-heaptrack-"))
+        heap_prefix = heap_dir / "heaptrack"
+        try:
+            subprocess.run(
+                ["heaptrack", "-o", str(heap_prefix), *cmd],
+                cwd=REPO_ROOT,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            heap_file = next(heap_dir.glob("heaptrack*.zst"), None) or next(
+                heap_dir.glob("heaptrack*.gz"), None
+            )
+            if heap_file and shutil.which("heaptrack_print"):
+                lines.extend(
+                    run_capture_section(
+                        "heaptrack summary",
+                        ["heaptrack_print", "-f", str(heap_file)],
+                        limit_lines=80,
+                    )
+                )
+        finally:
+            shutil.rmtree(heap_dir, ignore_errors=True)
+    else:
+        lines.extend(["## heaptrack", "", "`heaptrack` not found.", ""])
+
+    report.write_text("\n".join(lines), encoding="utf-8")
+    print(f"[profile] wrote {report}")
+    return 0
+
+
+def run_capture_section(
+    title: str,
+    cmd: list[str],
+    *,
+    limit_lines: int | None = None,
+) -> list[str]:
+    completed = subprocess.run(
+        cmd,
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    output = completed.stdout.splitlines()
+    if limit_lines is not None:
+        output = output[:limit_lines]
+    return [f"## {title}", "```", *output, "```", ""]
+
+
 def compare_text(left: Path, right: Path) -> None:
     if left.read_bytes() != right.read_bytes():
         raise HarnessError(f"text output differs: {left} vs {right}")
@@ -436,6 +558,13 @@ def build_parser() -> argparse.ArgumentParser:
     encode.add_argument("--cross-validate", action="store_true")
     encode.add_argument("--quiet", action="store_true")
     encode.set_defaults(func=command_encode)
+
+    profile = sub.add_parser("profile", help="profile one manifest case with time/perf/heaptrack")
+    profile.add_argument("case")
+    profile.add_argument("--name")
+    profile.add_argument("--output-dir", type=Path)
+    profile.add_argument("--warmup", action=argparse.BooleanOptionalAction, default=True)
+    profile.set_defaults(func=command_profile)
 
     return parser
 
