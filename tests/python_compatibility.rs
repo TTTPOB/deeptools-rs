@@ -399,6 +399,81 @@ fn outfilename_sorted_regions_normalizes_bed_metadata_fields() {
 }
 
 #[test]
+fn duplicate_region_names_are_deduplicated_like_deeptools() {
+    use std::io::Write;
+
+    let manifest = load_manifest();
+    let signal = resolve_path(&manifest, "{test_data}/testA.bw");
+    let cases = [
+        (
+            "bed6",
+            "3R\t20\t80\tdup\t0\t+\n3R\t20\t80\tdup\t0\t+\n3R\t20\t80\tdup_r1\t0\t+\n3R\t20\t80\tdup\t0\t+\n",
+            vec!["dup", "dup_r1", "dup_r1_r1", "dup_r2"],
+        ),
+        (
+            "bed3",
+            "3R\t20\t80\n3R\t20\t80\n3R\t20\t80\n",
+            vec!["3R:20-80", "3R:20-80_r1", "3R:20-80_r2"],
+        ),
+    ];
+
+    for (label, bed_content, expected_names) in cases {
+        let mut regions = tempfile::NamedTempFile::new().unwrap();
+        write!(regions, "{bed_content}").unwrap();
+
+        let mat_tmp = tempfile::NamedTempFile::new().unwrap();
+        let bed_tmp = tempfile::NamedTempFile::new().unwrap();
+
+        let status = Command::new(compute_matrix_bin())
+            .args([
+                "reference-point",
+                "-R",
+                regions.path().to_str().unwrap(),
+                "-S",
+                signal.to_str().unwrap(),
+                "-b",
+                "20",
+                "-a",
+                "20",
+                "--binSize",
+                "10",
+                "-p",
+                "1",
+                "--sortRegions",
+                "keep",
+                "-o",
+                mat_tmp.path().to_str().unwrap(),
+                "--outFileSortedRegions",
+                bed_tmp.path().to_str().unwrap(),
+            ])
+            .status()
+            .unwrap_or_else(|err| panic!("failed to run duplicate-name case {label}: {err}"));
+        assert!(
+            status.success(),
+            "duplicate-name case {label} failed with {status}"
+        );
+
+        let matrix = load_matrix(mat_tmp.path()).unwrap();
+        let matrix_names: Vec<&str> = matrix.rows.iter().map(|row| row.name.as_str()).collect();
+        assert_eq!(
+            matrix_names, expected_names,
+            "matrix names mismatch for {label}"
+        );
+
+        let sorted_regions = std::fs::read_to_string(bed_tmp.path()).unwrap();
+        let sorted_names: Vec<&str> = sorted_regions
+            .lines()
+            .skip(1)
+            .map(|line| line.split('\t').nth(3).unwrap())
+            .collect();
+        assert_eq!(
+            sorted_names, expected_names,
+            "sorted-region names mismatch for {label}:\n{sorted_regions}"
+        );
+    }
+}
+
+#[test]
 fn runtime_empty_group_preserved_with_zero_count() {
     use std::io::Write;
 
