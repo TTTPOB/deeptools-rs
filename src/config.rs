@@ -125,10 +125,10 @@ pub enum AverageTypeBins {
 ///
 /// Two phases can produce empty groups:
 ///
-/// **Pre-execution** (blacklist filtering): Occurs before output writers are
-/// created.  The policy is determined by `SortRegions` — `Keep` uses `Error`,
-/// all other modes use `Drop` (removing the empty group from `group_labels` and
-/// `group_boundaries`, remapping subsequent indices).
+/// **Pre-execution** (common chromosome and blacklist filtering): Occurs before
+/// output writers are created.  The policy is determined by `SortRegions`:
+/// `Keep` uses `Error`, all other modes use `Drop` (removing the empty group
+/// from `group_labels` and `group_boundaries`, remapping subsequent indices).
 ///
 /// **Runtime** (`--skipZeros`, `--minThreshold`, `--maxThreshold`): Occurs
 /// while rows are being written.  Group structure is already fixed at output
@@ -147,7 +147,7 @@ pub enum EmptyGroupPolicy {
 }
 
 impl EmptyGroupPolicy {
-    /// Policy for blacklist (pre-execution) filtering.
+    /// Policy for pre-execution filtering.
     pub fn for_sort_regions(sort: SortRegions) -> Self {
         match sort {
             SortRegions::Keep => EmptyGroupPolicy::Error,

@@ -1581,6 +1581,40 @@
       "reference": {
         "matrix": "{corner}/master_sweep_reference_point_grouped_bed_duplicate_labels.mat"
       }
+    },
+    {
+      "id": "sweep_reference_point_multi_sample_missing_chrom",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{corner}/mixed_chrom_regions.bed"
+      ],
+      "score_files": [
+        "{test_data}/testA.bw",
+        "{test_data}/testA_offset1.bw"
+      ],
+      "options": [
+        "-b",
+        "20",
+        "-a",
+        "20",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--averageTypeBins",
+        "median",
+        "--samplesLabel",
+        "base",
+        "extra"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_reference_point_multi_sample_missing_chrom.mat"
+      }
     }
   ]
 }

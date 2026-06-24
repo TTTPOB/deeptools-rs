@@ -74,6 +74,28 @@ pub(crate) fn load_score_chrom_aliases(scores: &[PathBuf]) -> Result<HashMap<Str
     Ok(aliases)
 }
 
+pub(crate) fn load_common_score_chroms(scores: &[PathBuf]) -> Result<HashSet<String>> {
+    let mut common: Option<HashSet<String>> = None;
+    for path in scores {
+        let bw = BigWigFile::open_with_block_cache_capacity(path, 0).map_err(|e| {
+            anyhow::anyhow!("Failed to open bigWig file '{}': {}", path.display(), e)
+        })?;
+        let chroms = bw
+            .chroms()
+            .iter()
+            .map(|info| normalize_chrom(&info.name))
+            .collect::<HashSet<_>>();
+        match &mut common {
+            Some(existing) => {
+                existing.retain(|chrom| chroms.contains(chrom));
+            }
+            None => common = Some(chroms),
+        }
+    }
+
+    Ok(common.unwrap_or_default())
+}
+
 pub(crate) fn remap_group_chroms_to_scores(
     groups: &mut [Group],
     score_chrom_aliases: &HashMap<String, Arc<str>>,
@@ -86,6 +108,13 @@ pub(crate) fn remap_group_chroms_to_scores(
             }
         }
     }
+}
+
+pub(crate) fn record_chrom_in_common_scores(
+    record: &BedRecord,
+    common_score_chroms: &HashSet<String>,
+) -> bool {
+    common_score_chroms.contains(&normalize_chrom(&record.chrom))
 }
 
 pub fn derive_sample_labels(paths: &[PathBuf], general: &GeneralOptions) -> Result<Vec<String>> {
@@ -564,6 +593,23 @@ mod tests {
     #[test]
     fn normalize_chrom_empty_string() {
         assert_eq!(normalize_chrom(""), "");
+    }
+
+    #[test]
+    fn common_score_chrom_filter_uses_normalized_names() {
+        let common = HashSet::from(["3R".to_string(), "MT".to_string()]);
+        assert!(record_chrom_in_common_scores(
+            &make_record("chr3R", 0, 10),
+            &common
+        ));
+        assert!(record_chrom_in_common_scores(
+            &make_record("chrM", 0, 10),
+            &common
+        ));
+        assert!(!record_chrom_in_common_scores(
+            &make_record("chr_cigar", 0, 10),
+            &common
+        ));
     }
 
     // ── subtract_blacklist ─────────────────────────────────────────────────

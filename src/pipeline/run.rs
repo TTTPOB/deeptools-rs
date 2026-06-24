@@ -7,6 +7,69 @@ use crate::io::writers;
 use crate::pipeline::core::{self, FileCollector, PipelineMode, RegionTask};
 use crate::pipeline::matrix::MatrixHeader;
 
+fn apply_pre_execution_empty_group_policy(
+    tasks: &mut [RegionTask],
+    group_labels: &mut Vec<String>,
+    group_capacity: &mut Vec<usize>,
+    sort_regions: crate::config::SortRegions,
+    reason: &str,
+) -> Result<()> {
+    if tasks.is_empty() {
+        anyhow::bail!("No regions remain after {reason} filtering.");
+    }
+
+    let mut post_filter_counts = vec![0usize; group_labels.len()];
+    for task in tasks.iter() {
+        post_filter_counts[task.group_index] += 1;
+    }
+
+    if !post_filter_counts.iter().any(|&count| count == 0) {
+        *group_capacity = post_filter_counts;
+        return Ok(());
+    }
+
+    match EmptyGroupPolicy::for_sort_regions(sort_regions) {
+        EmptyGroupPolicy::Error => {
+            let empty = post_filter_counts
+                .iter()
+                .enumerate()
+                .find(|(_, count)| **count == 0)
+                .unwrap()
+                .0;
+            anyhow::bail!(
+                "No regions remain in group '{}' after {reason} filtering.",
+                group_labels[empty]
+            );
+        }
+        EmptyGroupPolicy::Drop => {
+            let mut old_to_new = vec![0usize; group_labels.len()];
+            let mut new_labels = Vec::new();
+            let mut new_capacity = Vec::new();
+            let mut new_idx = 0usize;
+            for (old_idx, &count) in post_filter_counts.iter().enumerate() {
+                if count > 0 {
+                    old_to_new[old_idx] = new_idx;
+                    new_labels.push(group_labels[old_idx].clone());
+                    new_capacity.push(count);
+                    new_idx += 1;
+                }
+            }
+            for task in tasks.iter_mut() {
+                task.group_index = old_to_new[task.group_index];
+            }
+            *group_labels = new_labels;
+            *group_capacity = new_capacity;
+        }
+        EmptyGroupPolicy::PreserveWithZeroCount => {
+            unreachable!(
+                "pre-execution filtering cannot use PreserveWithZeroCount because groups are not yet fixed"
+            );
+        }
+    }
+
+    Ok(())
+}
+
 pub fn run_pipeline<M>(
     mode: M,
     general: &GeneralOptions,
@@ -24,6 +87,7 @@ where
 
     let mut groups = core::load_groups(&io.regions, gtf)?;
     let score_chrom_aliases = core::regions::load_score_chrom_aliases(&io.scores)?;
+    let common_score_chroms = core::regions::load_common_score_chroms(&io.scores)?;
     core::regions::remap_group_chroms_to_scores(&mut groups, &score_chrom_aliases);
     let mut group_labels: Vec<String> = groups.iter().map(|g| g.label.clone()).collect();
     let mut group_capacity: Vec<usize> = groups.iter().map(|g| g.records.len()).collect();
@@ -54,10 +118,13 @@ where
             None
         };
 
-    // ── Generate tasks (with blacklist filtering) ───────────────────────
+    // ── Generate tasks (with pre-dispatch filters) ──────────────────────
     let mut tasks = Vec::new();
     for (group_index, group) in groups.into_iter().enumerate() {
         for record in group.records {
+            if !core::regions::record_chrom_in_common_scores(&record, &common_score_chroms) {
+                continue;
+            }
             if let Some(ref bl) = blacklist {
                 if !core::regions::record_passes_blacklist(
                     &record,
@@ -77,72 +144,13 @@ where
         }
     }
 
-    // ── Validate and remap groups after blacklist filtering ────────────
-    if blacklist.is_some() {
-        if tasks.is_empty() {
-            anyhow::bail!(
-                "No regions remain after blacklist filtering. \
-                 All {} regions were removed by the blacklist.",
-                group_capacity.iter().sum::<usize>()
-            );
-        }
-
-        let mut post_filter_counts = vec![0usize; group_labels.len()];
-        for task in &tasks {
-            post_filter_counts[task.group_index] += 1;
-        }
-
-        let has_empty_group = post_filter_counts.iter().any(|&c| c == 0);
-
-        if has_empty_group {
-            let policy = EmptyGroupPolicy::for_sort_regions(general.sort_regions);
-            match policy {
-                EmptyGroupPolicy::Error => {
-                    // Python errors on empty groups only under --sortRegions keep
-                    // (computeMatrixOperations.py:729, via sortMatrix).
-                    let empty = post_filter_counts
-                        .iter()
-                        .enumerate()
-                        .find(|(_, c)| **c == 0)
-                        .unwrap()
-                        .0;
-                    anyhow::bail!(
-                        "No regions remain in group '{}' after blacklist filtering.",
-                        group_labels[empty]
-                    );
-                }
-                EmptyGroupPolicy::Drop => {
-                    // For no/ascend/descend, Python drops empty groups from the
-                    // header entirely (they don't appear in group_labels or
-                    // group_boundaries). Remap task group_index values and
-                    // rebuild group_labels/group_capacity to match.
-                    let mut old_to_new = vec![0usize; group_labels.len()];
-                    let mut new_labels = Vec::new();
-                    let mut new_capacity = Vec::new();
-                    let mut new_idx = 0usize;
-                    for (old_idx, &count) in post_filter_counts.iter().enumerate() {
-                        if count > 0 {
-                            old_to_new[old_idx] = new_idx;
-                            new_labels.push(group_labels[old_idx].clone());
-                            new_capacity.push(count);
-                            new_idx += 1;
-                        }
-                    }
-                    for task in &mut tasks {
-                        task.group_index = old_to_new[task.group_index];
-                    }
-                    group_labels = new_labels;
-                    group_capacity = new_capacity;
-                }
-                EmptyGroupPolicy::PreserveWithZeroCount => {
-                    unreachable!(
-                        "blacklist filtering (pre-execution) cannot use \
-                         PreserveWithZeroCount — groups are not yet fixed"
-                    );
-                }
-            }
-        }
-    }
+    apply_pre_execution_empty_group_policy(
+        &mut tasks,
+        &mut group_labels,
+        &mut group_capacity,
+        general.sort_regions,
+        "pre-dispatch",
+    )?;
 
     let thread_count = std::cmp::max(1, general.number_of_processors.resolve() as usize);
     let task_count = tasks.len();
