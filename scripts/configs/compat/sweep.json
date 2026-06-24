@@ -1615,6 +1615,36 @@
       "reference": {
         "matrix": "{corner}/master_sweep_reference_point_multi_sample_missing_chrom.mat"
       }
+    },
+    {
+      "id": "sweep_reference_point_sort_no_unsorted_groups",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{corner}/sort_no_unsorted_groups.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--sortRegions",
+        "no"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_reference_point_sort_no_unsorted_groups.mat"
+      }
     }
   ]
 }
