@@ -234,7 +234,7 @@ def command_compat(args: argparse.Namespace) -> int:
 
 
 def command_regen_refs(args: argparse.Namespace) -> int:
-    manifest = Manifest.load("artifacts.json")
+    manifest = Manifest.load("artifacts.json", "compat/sweep.json")
     cases = manifest.select_cases(case_id=args.case)
     cases = [case for case in cases if case.reference]
     if not cases:
@@ -256,7 +256,7 @@ def command_regen_refs(args: argparse.Namespace) -> int:
 
 
 def command_verify_refs(args: argparse.Namespace) -> int:
-    manifest = Manifest.load("artifacts.json")
+    manifest = Manifest.load("artifacts.json", "compat/sweep.json")
     ensure_binaries()
     cases = manifest.select_cases(case_id=args.case)
     cases = [case for case in cases if case.reference]

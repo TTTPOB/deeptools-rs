@@ -1,0 +1,474 @@
+{
+  "cases": [
+    {
+      "id": "sweep_reference_point_average_median",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--averageTypeBins",
+        "median"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_reference_point_average_median.mat"
+      }
+    },
+    {
+      "id": "sweep_reference_point_average_min",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--averageTypeBins",
+        "min"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_reference_point_average_min.mat"
+      }
+    },
+    {
+      "id": "sweep_reference_point_average_max",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--averageTypeBins",
+        "max"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_reference_point_average_max.mat"
+      }
+    },
+    {
+      "id": "sweep_reference_point_average_sum",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--averageTypeBins",
+        "sum"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_reference_point_average_sum.mat"
+      }
+    },
+    {
+      "id": "sweep_reference_point_average_std",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--averageTypeBins",
+        "std"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_reference_point_average_std.mat"
+      }
+    },
+    {
+      "id": "sweep_scale_regions_average_median",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "scale-regions",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "-m",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--averageTypeBins",
+        "median"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_scale_regions_average_median.mat"
+      }
+    },
+    {
+      "id": "sweep_scale_regions_average_min",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "scale-regions",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "-m",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--averageTypeBins",
+        "min"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_scale_regions_average_min.mat"
+      }
+    },
+    {
+      "id": "sweep_scale_regions_average_max",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "scale-regions",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "-m",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--averageTypeBins",
+        "max"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_scale_regions_average_max.mat"
+      }
+    },
+    {
+      "id": "sweep_scale_regions_average_sum",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "scale-regions",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "-m",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--averageTypeBins",
+        "sum"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_scale_regions_average_sum.mat"
+      }
+    },
+    {
+      "id": "sweep_scale_regions_average_std",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "scale-regions",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "-m",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--averageTypeBins",
+        "std"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_scale_regions_average_std.mat"
+      }
+    },
+    {
+      "id": "sweep_reference_point_sort_asc_mean",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--sortRegions",
+        "ascend",
+        "--sortUsing",
+        "mean"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_reference_point_sort_asc_mean.mat"
+      }
+    },
+    {
+      "id": "sweep_reference_point_sort_desc_max",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--sortRegions",
+        "descend",
+        "--sortUsing",
+        "max"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_reference_point_sort_desc_max.mat"
+      }
+    },
+    {
+      "id": "sweep_reference_point_sort_asc_region_length",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--sortRegions",
+        "ascend",
+        "--sortUsing",
+        "region_length"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_reference_point_sort_asc_region_length.mat"
+      }
+    },
+    {
+      "id": "sweep_scale_regions_sort_desc_sum",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "scale-regions",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "-m",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--sortRegions",
+        "descend",
+        "--sortUsing",
+        "sum"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_scale_regions_sort_desc_sum.mat"
+      }
+    },
+    {
+      "id": "sweep_reference_point_samples_label",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--samplesLabel",
+        "sample one"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_reference_point_samples_label.mat"
+      }
+    }
+  ]
+}
