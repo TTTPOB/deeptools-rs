@@ -529,6 +529,668 @@
       "reference": {
         "matrix": "{corner}/master_sweep_reference_point_samples_label.mat"
       }
+    },
+    {
+      "id": "sweep_reference_point_multi_sample_labels",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw",
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--samplesLabel",
+        "sample one",
+        "sample two"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_reference_point_multi_sample_labels.mat"
+      }
+    },
+    {
+      "id": "sweep_reference_point_sort_using_sample_2",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw",
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--sortRegions",
+        "ascend",
+        "--sortUsing",
+        "mean",
+        "--sortUsingSamples",
+        "2"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_reference_point_sort_using_sample_2.mat"
+      }
+    },
+    {
+      "id": "sweep_reference_point_sort_no",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--sortRegions",
+        "no"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_reference_point_sort_no.mat"
+      }
+    },
+    {
+      "id": "sweep_reference_point_missing_zero_median",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--missingDataAsZero",
+        "--averageTypeBins",
+        "median"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_reference_point_missing_zero_median.mat"
+      }
+    },
+    {
+      "id": "sweep_scale_regions_missing_zero_max",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "scale-regions",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "-m",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--missingDataAsZero",
+        "--averageTypeBins",
+        "max"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_scale_regions_missing_zero_max.mat"
+      }
+    },
+    {
+      "id": "sweep_scale_regions_sort_asc_region_length",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "scale-regions",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "-m",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--sortRegions",
+        "ascend",
+        "--sortUsing",
+        "region_length"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_scale_regions_sort_asc_region_length.mat"
+      }
+    },
+    {
+      "id": "sweep_scale_regions_max_threshold",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "scale-regions",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "-m",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--missingDataAsZero",
+        "--maxThreshold",
+        "4"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_scale_regions_max_threshold.mat"
+      }
+    },
+    {
+      "id": "sweep_metagene_reference_point_tes",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{test_data}/test.gtf"
+      ],
+      "score_files": [
+        "{test_data}/test1.bw.bw"
+      ],
+      "options": [
+        "--referencePoint",
+        "TES",
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--metagene"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_metagene_reference_point_tes.mat"
+      }
+    },
+    {
+      "id": "sweep_metagene_reference_point_tss_nan_after_end",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{test_data}/test.gtf"
+      ],
+      "score_files": [
+        "{test_data}/test1.bw.bw"
+      ],
+      "options": [
+        "--referencePoint",
+        "TSS",
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--metagene",
+        "--nanAfterEnd"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_metagene_reference_point_tss_nan_after_end.mat"
+      }
+    },
+    {
+      "id": "sweep_metagene_scale_median_sort_desc",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "scale-regions",
+      "region_files": [
+        "{test_data}/test.gtf"
+      ],
+      "score_files": [
+        "{test_data}/test1.bw.bw"
+      ],
+      "options": [
+        "-a",
+        "300",
+        "-b",
+        "500",
+        "-m",
+        "1000",
+        "--unscaled5prime",
+        "20",
+        "--unscaled3prime",
+        "50",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--metagene",
+        "--averageTypeBins",
+        "median",
+        "--sortRegions",
+        "descend",
+        "--sortUsing",
+        "median"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_metagene_scale_median_sort_desc.mat"
+      }
+    },
+    {
+      "id": "sweep_bed12_metagene_scale",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "scale-regions",
+      "region_files": [
+        "{corner}/bed12_metagene.bed"
+      ],
+      "score_files": [
+        "{test_data}/test1.bw.bw"
+      ],
+      "options": [
+        "-a",
+        "300",
+        "-b",
+        "500",
+        "-m",
+        "1000",
+        "--unscaled5prime",
+        "20",
+        "--unscaled3prime",
+        "50",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--metagene"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_bed12_metagene_scale.mat"
+      }
+    },
+    {
+      "id": "sweep_bed12_metagene_reference_point_center",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{corner}/bed12_metagene.bed"
+      ],
+      "score_files": [
+        "{test_data}/test1.bw.bw"
+      ],
+      "options": [
+        "--referencePoint",
+        "center",
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--metagene"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_bed12_metagene_reference_point_center.mat"
+      }
+    },
+    {
+      "id": "sweep_reference_point_smart_labels_multi_sample",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw",
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--smartLabels"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_reference_point_smart_labels_multi_sample.mat"
+      }
+    },
+    {
+      "id": "sweep_scale_regions_unscaled_median",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "scale-regions",
+      "region_files": [
+        "{heatmapper}/unscaled.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/unscaled.bigWig"
+      ],
+      "options": [
+        "-a",
+        "300",
+        "-b",
+        "500",
+        "--unscaled5prime",
+        "100",
+        "--unscaled3prime",
+        "50",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--averageTypeBins",
+        "median"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_scale_regions_unscaled_median.mat"
+      }
+    },
+    {
+      "id": "sweep_scale_regions_unscaled_sort_asc_max",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "scale-regions",
+      "region_files": [
+        "{heatmapper}/unscaled.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/unscaled.bigWig"
+      ],
+      "options": [
+        "-a",
+        "300",
+        "-b",
+        "500",
+        "--unscaled5prime",
+        "100",
+        "--unscaled3prime",
+        "50",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--sortRegions",
+        "ascend",
+        "--sortUsing",
+        "max"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_scale_regions_unscaled_sort_asc_max.mat"
+      }
+    },
+    {
+      "id": "sweep_reference_point_fractional_scale",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--scale",
+        "0.5"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_reference_point_fractional_scale.mat"
+      }
+    },
+    {
+      "id": "sweep_reference_point_negative_scale_sort_min",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--scale",
+        "-1",
+        "--sortRegions",
+        "ascend",
+        "--sortUsing",
+        "min"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_reference_point_negative_scale_sort_min.mat"
+      }
+    },
+    {
+      "id": "sweep_reference_point_center_nan_after_end",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--referencePoint",
+        "center",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--nanAfterEnd"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_reference_point_center_nan_after_end.mat"
+      }
+    },
+    {
+      "id": "sweep_metagene_reference_point_tes_nan_after_end",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{test_data}/test.gtf"
+      ],
+      "score_files": [
+        "{test_data}/test1.bw.bw"
+      ],
+      "options": [
+        "--referencePoint",
+        "TES",
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--metagene",
+        "--nanAfterEnd"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_metagene_reference_point_tes_nan_after_end.mat"
+      }
+    },
+    {
+      "id": "sweep_metagene_missing_zero_skipzeros",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "scale-regions",
+      "region_files": [
+        "{test_data}/test.gtf"
+      ],
+      "score_files": [
+        "{test_data}/test1.bw.bw"
+      ],
+      "options": [
+        "-a",
+        "300",
+        "-b",
+        "500",
+        "-m",
+        "1000",
+        "--unscaled5prime",
+        "20",
+        "--unscaled3prime",
+        "50",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--metagene",
+        "--missingDataAsZero",
+        "--skipZeros"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_metagene_missing_zero_skipzeros.mat"
+      }
     }
   ]
 }
