@@ -662,6 +662,35 @@ mod tests {
         assert_eq!(included[1], (250, 300));
     }
 
+    #[test]
+    fn metagene_center_pads_empty_left_from_right_anchor() {
+        let record = bed12_record(Strand::Positive, &[(100, 101)]);
+        let plan = ReferencePointPlan::reference_point(
+            &record,
+            ReferencePoint::Center,
+            10,
+            10,
+            10,
+            true,
+            false,
+        );
+
+        assert_eq!(plan.bins.len(), 20);
+        assert_eq!(plan.bins[0].start, 0);
+        assert_eq!(plan.bins[0].end, 10);
+        assert_eq!(plan.bins[9].start, 90);
+        assert_eq!(plan.bins[9].end, 100);
+        assert_eq!(plan.bins[10].start, 100);
+        assert_eq!(plan.bins[10].end, 110);
+        assert_eq!(plan.bins[19].start, 190);
+        assert_eq!(plan.bins[19].end, 200);
+
+        let included = plan.included_intervals().unwrap();
+        assert_eq!(included[0], (0, 100));
+        assert_eq!(included[1], (100, 101));
+        assert_eq!(included[2], (101, 200));
+    }
+
     // ── Issue 2a: body_too_short flag ────────────────────────────────────
 
     #[test]

@@ -61,6 +61,37 @@
       }
     },
     {
+      "id": "corner_case_metagene_center_padding",
+      "tags": [
+        "compat",
+        "corner",
+        "artifact"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{corner}/metagene_center_padding.bed"
+      ],
+      "score_files": [
+        "{test_data}/test1.bw.bw"
+      ],
+      "options": [
+        "--referencePoint",
+        "center",
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--metagene"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_metagene_center_padding.mat"
+      }
+    },
+    {
       "id": "corner_case_short_body_scale_regions",
       "tags": [
         "compat",

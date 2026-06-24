@@ -371,19 +371,23 @@ fn build_center(
         (upstream_bins, downstream_bins)
     };
 
-    if pad_left > 0 && !left.is_empty() && !nan_after_end {
+    if pad_left > 0 && !nan_after_end {
         let start = left
             .first()
-            .map(|(start, _)| *start)
-            .unwrap_or(right.first().map(|(start, _)| *start).unwrap_or(0));
-        left.insert(0, (start - pad_left as i64, start));
+            .or_else(|| right.first())
+            .map(|(start, _)| *start);
+        if let Some(start) = start {
+            left.insert(0, (start - pad_left as i64, start));
+        }
     }
-    if pad_right > 0 && !right.is_empty() && !nan_after_end {
+    if pad_right > 0 && !nan_after_end {
         let end = right
             .last()
-            .map(|(_, end)| *end)
-            .unwrap_or(left.last().map(|(_, end)| *end).unwrap_or(0));
-        right.push((end, end + pad_right as i64));
+            .or_else(|| left.last())
+            .map(|(_, end)| *end);
+        if let Some(end) = end {
+            right.push((end, end + pad_right as i64));
+        }
     }
 
     included.extend_from_slice(&left);
