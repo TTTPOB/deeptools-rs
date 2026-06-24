@@ -45,8 +45,8 @@ pub fn write_matrix_row<W: Write>(writer: &mut W, row: &MatrixRow) -> Result<()>
         buffer.extend_from_slice(name.as_bytes());
         buffer.push(b'\t');
 
-        if let Some(raw) = row.record.score_raw.as_deref() {
-            buffer.extend_from_slice(raw.as_bytes());
+        if row.record.score_raw.is_some() {
+            write_score_value(&mut *buffer, 0.0)?;
         } else if let Some(score) = row.record.score {
             write_score_value(&mut *buffer, f64::from(score))?;
         } else {
@@ -54,8 +54,8 @@ pub fn write_matrix_row<W: Write>(writer: &mut W, row: &MatrixRow) -> Result<()>
         }
         buffer.push(b'\t');
 
-        if let Some(raw) = row.record.strand_raw.as_deref() {
-            buffer.extend_from_slice(raw.as_bytes());
+        if row.record.strand_raw.is_some() {
+            buffer.push(b'.');
         } else {
             buffer.push(row.record.strand.as_char() as u8);
         }
@@ -300,7 +300,38 @@ fn normalize_scientific_notation(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use crate::io::{BedRecord, Strand};
+    use crate::pipeline::matrix::MatrixRow;
+
     use super::*;
+
+    fn fmt_row(row: &MatrixRow) -> String {
+        let mut buf = Vec::new();
+        write_matrix_row(&mut buf, row).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    fn matrix_row_with_raw_bed_fields() -> MatrixRow {
+        MatrixRow {
+            record: BedRecord {
+                chrom: Arc::from("chr1"),
+                start: 10,
+                end: 20,
+                name: Some("raw".to_string()),
+                score: None,
+                score_raw: Some("abc".to_string()),
+                strand: Strand::Unstranded,
+                strand_raw: Some("strandx".to_string()),
+                extra_fields: Vec::new(),
+            },
+            sample_count: 1,
+            bin_count: 1,
+            values: vec![1.0],
+            exon_coords: None,
+        }
+    }
 
     fn fmt_score(value: f64) -> String {
         let mut buf = Vec::new();
@@ -336,6 +367,16 @@ mod tests {
         assert_eq!(fmt_score(f64::NAN), "NaN.0");
         assert_eq!(fmt_score(f64::INFINITY), "inf.0");
         assert_eq!(fmt_score(f64::NEG_INFINITY), "-inf.0");
+    }
+
+    #[test]
+    fn matrix_row_normalizes_invalid_bed_score_and_strand() {
+        let line = fmt_row(&matrix_row_with_raw_bed_fields());
+        let cols: Vec<&str> = line.trim_end().split('\t').collect();
+
+        assert_eq!(cols[4], "0.0");
+        assert_eq!(cols[5], ".");
+        assert_eq!(cols[6], "1.000000");
     }
 
     #[test]
