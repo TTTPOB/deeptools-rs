@@ -1768,6 +1768,34 @@
       "reference": {
         "matrix": "{corner}/master_sweep_reference_point_minimal_bed_fields.mat"
       }
+    },
+    {
+      "id": "sweep_reference_point_bed5_fields",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{corner}/bed5_fields.bed"
+      ],
+      "score_files": [
+        "{test_data}/testA.bw"
+      ],
+      "options": [
+        "-b",
+        "20",
+        "-a",
+        "20",
+        "--binSize",
+        "10",
+        "-p",
+        "1"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_reference_point_bed5_fields.mat"
+      }
     }
   ]
 }
