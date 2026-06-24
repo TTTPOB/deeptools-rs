@@ -1,0 +1,8 @@
+3R	deepTools	gene	1	180	.	+	0	gene_id "geneA"; transcript_id "alpha";
+3R	deepTools	mrna	1	180	.	+	0	gene_id "geneA"; transcript_id "alpha";
+3R	deepTools	cds	1	40	.	+	0	gene_id "geneA"; transcript_id "alpha";
+3R	deepTools	cds	120	180	.	+	0	gene_id "geneA"; transcript_id "alpha";
+3R	deepTools	gene	50	200	.	-	0	gene_id "geneB"; transcript_id "beta";
+3R	deepTools	mrna	50	200	.	-	0	gene_id "geneB"; transcript_id "beta";
+3R	deepTools	cds	50	90	.	-	0	gene_id "geneB"; transcript_id "beta";
+3R	deepTools	cds	150	200	.	-	0	gene_id "geneB"; transcript_id "beta";
