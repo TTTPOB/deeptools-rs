@@ -8,7 +8,6 @@ use serde_json::Value;
 
 /// A single row parsed from the matrix file (BED fields + numeric values).
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // score/strand are part of the format; kept for completeness
 pub struct MatrixFileRow {
     pub chrom: String,
     pub start: String,
@@ -20,9 +19,12 @@ pub struct MatrixFileRow {
 }
 
 impl MatrixFileRow {
-    /// Returns a tuple key suitable for row identity checks (chrom:start:end:name).
+    /// Returns a tuple key suitable for row identity checks.
     pub fn key(&self) -> String {
-        format!("{}:{}:{}:{}", self.chrom, self.start, self.end, self.name)
+        format!(
+            "{}:{}:{}:{}:{}:{}",
+            self.chrom, self.start, self.end, self.name, self.score, self.strand
+        )
     }
 }
 

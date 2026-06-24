@@ -54,7 +54,7 @@ pub fn full_diff(
     }
 }
 
-/// Compare BED fields (chrom:start:end:name tuples) to detect row reordering or
+/// Compare BED fields to detect row reordering or
 /// missing rows between the two files.
 fn compare_bed_fields(left: &[MatrixFileRow], right: &[MatrixFileRow]) -> BedFieldDiff {
     use std::collections::HashMap;
@@ -111,6 +111,57 @@ fn compare_bed_fields(left: &[MatrixFileRow], right: &[MatrixFileRow]) -> BedFie
         right_only,
         row_count_left: left.len(),
         row_count_right: right.len(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn row(name: &str, score: &str, strand: &str, values: Vec<f64>) -> MatrixFileRow {
+        MatrixFileRow {
+            chrom: "chr1".to_string(),
+            start: "10".to_string(),
+            end: "20".to_string(),
+            name: name.to_string(),
+            score: score.to_string(),
+            strand: strand.to_string(),
+            values,
+        }
+    }
+
+    #[test]
+    fn full_diff_flags_score_and_strand_mismatches() {
+        let left = vec![row("same", "abc", "strandx", vec![1.0])];
+        let right = vec![row("same", "0.0", ".", vec![1.0])];
+
+        let diff = full_diff(&json!({}), &json!({}), &left, &right, 1e-6, &[], 10);
+
+        assert!(!diff.matches);
+        assert_eq!(diff.bed_diff.left_only, vec!["chr1:10:20:same:abc:strandx"]);
+        assert_eq!(diff.bed_diff.right_only, vec!["chr1:10:20:same:0.0:."]);
+        assert!(diff.value_result.matches);
+    }
+
+    #[test]
+    fn full_diff_flags_reordered_rows_with_same_bed_fields() {
+        let left = vec![
+            row("first", "0.0", "+", vec![1.0]),
+            row("second", "0.0", "-", vec![2.0]),
+        ];
+        let right = vec![
+            row("second", "0.0", "-", vec![2.0]),
+            row("first", "0.0", "+", vec![1.0]),
+        ];
+
+        let diff = full_diff(&json!({}), &json!({}), &left, &right, 1e-6, &[], 10);
+
+        assert!(!diff.matches);
+        assert!(diff.bed_diff.reordered);
+        assert!(diff.bed_diff.left_only.is_empty());
+        assert!(diff.bed_diff.right_only.is_empty());
     }
 }
 
