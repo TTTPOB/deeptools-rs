@@ -41,7 +41,7 @@ pub fn write_matrix_row<W: Write>(writer: &mut W, row: &MatrixRow) -> Result<()>
         }
         buffer.push(b'\t');
 
-        if matches!(row.record.bed_field_count, Some(3 | 4)) {
+        if matches!(row.record.bed_field_count, Some(3..=5)) {
             write_bed_coordinate_name(
                 &mut *buffer,
                 row.record.chrom.as_ref(),
@@ -54,7 +54,9 @@ pub fn write_matrix_row<W: Write>(writer: &mut W, row: &MatrixRow) -> Result<()>
         }
         buffer.push(b'\t');
 
-        if row.record.score_raw.is_some() {
+        if matches!(row.record.bed_field_count, Some(5)) {
+            buffer.push(b'.');
+        } else if row.record.score_raw.is_some() {
             write_score_value(&mut *buffer, 0.0)?;
         } else if let Some(score) = row.record.score {
             write_score_value(&mut *buffer, f64::from(score))?;
@@ -357,15 +359,15 @@ mod tests {
         }
     }
 
-    fn minimal_matrix_row(name: Option<&str>) -> MatrixRow {
+    fn minimal_matrix_row(field_count: usize) -> MatrixRow {
         MatrixRow {
             record: BedRecord {
                 chrom: Arc::from("chr1"),
                 start: 10,
                 end: 20,
-                name: name.map(str::to_string),
-                bed_field_count: Some(name.map_or(3, |_| 4)),
-                score: None,
+                name: (field_count >= 4).then(|| "named_only".to_string()),
+                bed_field_count: Some(field_count),
+                score: (field_count >= 5).then_some(5.0),
                 score_raw: None,
                 strand: Strand::Unstranded,
                 strand_raw: None,
@@ -447,12 +449,14 @@ mod tests {
 
     #[test]
     fn matrix_row_uses_coordinate_name_for_minimal_bed_fields() {
-        let line = fmt_row(&minimal_matrix_row(Some("named_only")));
-        let cols: Vec<&str> = line.trim_end().split('\t').collect();
+        for field_count in 3..=5 {
+            let line = fmt_row(&minimal_matrix_row(field_count));
+            let cols: Vec<&str> = line.trim_end().split('\t').collect();
 
-        assert_eq!(cols[3], "chr1:10-20");
-        assert_eq!(cols[4], ".");
-        assert_eq!(cols[5], ".");
+            assert_eq!(cols[3], "chr1:10-20");
+            assert_eq!(cols[4], ".");
+            assert_eq!(cols[5], ".");
+        }
     }
 
     #[test]
