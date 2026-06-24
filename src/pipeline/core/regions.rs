@@ -335,7 +335,7 @@ fn next_unique_label(
 
     let mut suffix = 1;
     loop {
-        let proposal = format!("{}_{}", candidate, suffix);
+        let proposal = format!("{}_r{}", candidate, suffix);
         if seen_labels.insert(proposal.clone()) {
             return proposal;
         }
@@ -530,8 +530,8 @@ mod tests {
         let second = next_unique_label("genes", "default", &mut seen);
         let third = next_unique_label("genes", "default", &mut seen);
         assert_eq!(first, "genes");
-        assert_eq!(second, "genes_1");
-        assert_eq!(third, "genes_2");
+        assert_eq!(second, "genes_r1");
+        assert_eq!(third, "genes_r2");
     }
 
     #[test]
@@ -843,8 +843,8 @@ mod tests {
             "first group should keep original label"
         );
         assert_eq!(
-            groups[1].label, "promoters_1",
-            "second group should get _1 suffix"
+            groups[1].label, "promoters_r1",
+            "second group should get _r1 suffix"
         );
         assert_eq!(
             groups[0].records.len(),

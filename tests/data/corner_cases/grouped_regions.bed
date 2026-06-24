@@ -1,0 +1,7 @@
+3R	20	80	first_a	0	+
+3R	90	140	first_b	0	+
+#dup
+3R	100	160	second_a	0	-
+3R	140	190	second_b	0	+
+#dup
+3R	40	100	tail_a	0	+

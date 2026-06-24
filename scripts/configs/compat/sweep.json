@@ -1553,6 +1553,34 @@
       "reference": {
         "matrix": "{corner}/master_sweep_reference_point_chr_alias.mat"
       }
+    },
+    {
+      "id": "sweep_reference_point_grouped_bed_duplicate_labels",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{corner}/grouped_regions.bed"
+      ],
+      "score_files": [
+        "{test_data}/testA.bw"
+      ],
+      "options": [
+        "-b",
+        "20",
+        "-a",
+        "20",
+        "--binSize",
+        "10",
+        "-p",
+        "1"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_reference_point_grouped_bed_duplicate_labels.mat"
+      }
     }
   ]
 }
