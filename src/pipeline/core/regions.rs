@@ -59,6 +59,35 @@ pub fn load_groups(paths: &[PathBuf], gtf: &GtfOptions) -> Result<Vec<Group>> {
     Ok(groups)
 }
 
+pub(crate) fn load_score_chrom_aliases(scores: &[PathBuf]) -> Result<HashMap<String, Arc<str>>> {
+    let mut aliases = HashMap::new();
+    for path in scores {
+        let bw = BigWigFile::open_with_block_cache_capacity(path, 0).map_err(|e| {
+            anyhow::anyhow!("Failed to open bigWig file '{}': {}", path.display(), e)
+        })?;
+        for info in bw.chroms() {
+            aliases
+                .entry(normalize_chrom(&info.name))
+                .or_insert_with(|| Arc::<str>::from(info.name.as_str()));
+        }
+    }
+    Ok(aliases)
+}
+
+pub(crate) fn remap_group_chroms_to_scores(
+    groups: &mut [Group],
+    score_chrom_aliases: &HashMap<String, Arc<str>>,
+) {
+    for group in groups {
+        for record in &mut group.records {
+            let key = normalize_chrom(&record.chrom);
+            if let Some(chrom) = score_chrom_aliases.get(&key) {
+                record.chrom = Arc::clone(chrom);
+            }
+        }
+    }
+}
+
 pub fn derive_sample_labels(paths: &[PathBuf], general: &GeneralOptions) -> Result<Vec<String>> {
     if let Some(labels) = &general.samples_label {
         if labels.len() != paths.len() {

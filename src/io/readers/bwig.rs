@@ -108,11 +108,46 @@ fn pread_exact(file: &File, offset: u64, buf: &mut [u8]) -> io::Result<()> {
 
 /// Binary-search the sorted chroms slice for the given chromosome name and
 /// return its length, or None if not present.
-fn binary_search_chrom_length(chroms: &[ChromInfo], name: &str) -> Option<u32> {
+fn binary_search_chrom<'a>(chroms: &'a [ChromInfo], name: &str) -> Option<&'a ChromInfo> {
     chroms
         .binary_search_by(|c| c.name.as_str().cmp(name))
         .ok()
-        .map(|idx| chroms[idx].length)
+        .map(|idx| &chroms[idx])
+}
+
+fn binary_search_chrom_length(chroms: &[ChromInfo], name: &str) -> Option<u32> {
+    binary_search_chrom(chroms, name).map(|info| info.length)
+}
+
+fn binary_search_chrom_id(chrom_id_by_name: &[(String, u32)], name: &str) -> Option<u32> {
+    chrom_id_by_name
+        .binary_search_by(|(n, _)| n.as_str().cmp(name))
+        .ok()
+        .map(|idx| chrom_id_by_name[idx].1)
+}
+
+fn find_with_chrom_alias<T>(
+    name: &str,
+    mut find_exact: impl FnMut(&str) -> Option<T>,
+) -> Option<T> {
+    if let Some(value) = find_exact(name) {
+        return Some(value);
+    }
+    if name == "MT" {
+        if let Some(value) = find_exact("chrM") {
+            return Some(value);
+        }
+    } else if name == "chrM" {
+        if let Some(value) = find_exact("MT") {
+            return Some(value);
+        }
+    }
+    if let Some(stripped) = name.strip_prefix("chr") {
+        find_exact(stripped)
+    } else {
+        let prefixed = format!("chr{name}");
+        find_exact(&prefixed)
+    }
 }
 
 pub struct BigWigFile {
@@ -185,14 +220,21 @@ impl BigWigFile {
     }
 
     pub fn find_chrom_id(&self, name: &str) -> Option<u32> {
-        self.chrom_id_by_name
-            .binary_search_by(|(n, _)| n.as_str().cmp(name))
-            .ok()
-            .map(|idx| self.chrom_id_by_name[idx].1)
+        find_with_chrom_alias(name, |candidate| {
+            binary_search_chrom_id(&self.chrom_id_by_name, candidate)
+        })
     }
 
     pub fn find_chrom_length(&self, name: &str) -> Option<u32> {
-        binary_search_chrom_length(&self.chroms, name)
+        find_with_chrom_alias(name, |candidate| {
+            binary_search_chrom_length(&self.chroms, candidate)
+        })
+    }
+
+    pub fn resolve_chrom_name(&self, name: &str) -> Option<&str> {
+        find_with_chrom_alias(name, |candidate| {
+            binary_search_chrom(&self.chroms, candidate).map(|info| info.name.as_str())
+        })
     }
 
     pub fn uncompress_buf_size(&self) -> usize {
@@ -689,6 +731,45 @@ mod tests {
     fn binary_search_chrom_length_empty_vec() {
         let chroms: Vec<ChromInfo> = vec![];
         assert_eq!(binary_search_chrom_length(&chroms, "chr1"), None);
+    }
+
+    #[test]
+    fn find_with_chrom_alias_strips_chr_prefix() {
+        let mut names = vec!["3R".to_string()];
+        names.sort();
+        let found = find_with_chrom_alias("chr3R", |candidate| {
+            names
+                .binary_search_by(|name| name.as_str().cmp(candidate))
+                .ok()
+                .map(|idx| names[idx].clone())
+        });
+        assert_eq!(found.as_deref(), Some("3R"));
+    }
+
+    #[test]
+    fn find_with_chrom_alias_adds_chr_prefix() {
+        let mut names = vec!["chr2L".to_string()];
+        names.sort();
+        let found = find_with_chrom_alias("2L", |candidate| {
+            names
+                .binary_search_by(|name| name.as_str().cmp(candidate))
+                .ok()
+                .map(|idx| names[idx].clone())
+        });
+        assert_eq!(found.as_deref(), Some("chr2L"));
+    }
+
+    #[test]
+    fn find_with_chrom_alias_maps_mt_and_chrm() {
+        let mut names = vec!["chrM".to_string()];
+        names.sort();
+        let found = find_with_chrom_alias("MT", |candidate| {
+            names
+                .binary_search_by(|name| name.as_str().cmp(candidate))
+                .ok()
+                .map(|idx| names[idx].clone())
+        });
+        assert_eq!(found.as_deref(), Some("chrM"));
     }
 
     // Build a 24-byte block header with the given parameters.

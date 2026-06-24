@@ -22,7 +22,9 @@ where
     let sample_labels = core::derive_sample_labels(&io.scores, general)?;
     let sample_count = sample_labels.len();
 
-    let groups = core::load_groups(&io.regions, gtf)?;
+    let mut groups = core::load_groups(&io.regions, gtf)?;
+    let score_chrom_aliases = core::regions::load_score_chrom_aliases(&io.scores)?;
+    core::regions::remap_group_chroms_to_scores(&mut groups, &score_chrom_aliases);
     let mut group_labels: Vec<String> = groups.iter().map(|g| g.label.clone()).collect();
     let mut group_capacity: Vec<usize> = groups.iter().map(|g| g.records.len()).collect();
 
