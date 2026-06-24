@@ -59,22 +59,7 @@ fn apply_scaling(values: &mut [f64], scale_factor: f64) {
     }
 }
 
-fn should_skip_row_flat(values: &[f64], general: &GeneralOptions) -> bool {
-    if general.skip_zeros {
-        // Python uses np.mean() which propagates NaN — if any value
-        // is NaN, the mean is NaN (masked) and the row is removed.
-        let has_nan = values.iter().any(|v| v.is_nan());
-        if has_nan {
-            return true;
-        }
-        // For all-finite rows: skip if mean equals zero
-        let sum: f64 = values.iter().sum();
-        let count = values.len();
-        if count == 0 || sum / (count as f64) == 0.0 {
-            return true;
-        }
-    }
-
+fn should_filter_by_threshold_raw(values: &[f64], general: &GeneralOptions) -> bool {
     // Python uses coverage.min()/max() which propagate NaN: if ANY
     // value is NaN the comparison returns False and the threshold check
     // passes (row is kept).  Match that by skipping thresholds entirely
@@ -98,6 +83,38 @@ fn should_skip_row_flat(values: &[f64], general: &GeneralOptions) -> bool {
     }
 
     false
+}
+
+fn should_skip_zeros_scaled(values: &[f64], general: &GeneralOptions) -> bool {
+    if !general.skip_zeros {
+        return false;
+    }
+
+    // Python masks invalid values before removeempty(), then computes the
+    // row mean on the masked matrix. NaN/Inf values are ignored; a row with
+    // no valid values or a valid mean of exactly zero is removed.
+    let mut sum = 0.0;
+    let mut count = 0usize;
+    for value in values.iter().copied().filter(|value| value.is_finite()) {
+        sum += value;
+        count += 1;
+    }
+
+    count == 0 || sum / count as f64 == 0.0
+}
+
+fn finalize_row_values(mut values: Vec<f64>, general: &GeneralOptions) -> Option<Vec<f64>> {
+    if should_filter_by_threshold_raw(&values, general) {
+        return None;
+    }
+
+    apply_scaling(&mut values, general.scale_factor);
+
+    if should_skip_zeros_scaled(&values, general) {
+        return None;
+    }
+
+    Some(values)
 }
 
 fn compute_sample_bins<P: RegionPlan>(
@@ -261,7 +278,7 @@ fn compute_sample_bins<P: RegionPlan>(
                 value = f64::NAN;
             }
 
-            // Scaling is deferred to compute_row, after threshold checks.
+            // Scaling and row filtering are finalized after all samples are read.
             bins.push(value);
         }
 
@@ -286,15 +303,7 @@ pub fn compute_row<P: RegionPlan>(
         all_values.extend(values);
     }
 
-    if should_skip_row_flat(&all_values, general) {
-        return Ok(None);
-    }
-
-    // Apply scaling after threshold check (Python checks thresholds on
-    // raw values, then scales).
-    apply_scaling(&mut all_values, general.scale_factor);
-
-    Ok(Some((all_values, sample_count, bin_count)))
+    Ok(finalize_row_values(all_values, general).map(|values| (values, sample_count, bin_count)))
 }
 
 /// Process a single coalesced batch.
@@ -450,20 +459,16 @@ pub(super) fn process_batch<M: PipelineMode>(
                 f64::NAN
             };
             let bin_count = plan.bins().len();
-            let mut all_values = vec![fill; sample_count * bin_count];
-            let row = if should_skip_row_flat(&all_values, general) {
-                None
-            } else {
-                // Apply scaling after threshold check.
-                apply_scaling(&mut all_values, general.scale_factor);
-                Some(mode.postprocess_row(
+            let all_values = vec![fill; sample_count * bin_count];
+            let row = finalize_row_values(all_values, general).map(|values| {
+                mode.postprocess_row(
                     Arc::unwrap_or_clone(record),
-                    all_values,
+                    values,
                     sample_count,
                     bin_count,
                     metadata,
-                ))
-            };
+                )
+            });
             results.push((orig_idx, group_index, row));
             continue;
         }
@@ -501,7 +506,7 @@ pub(super) fn process_batch<M: PipelineMode>(
                         value = f64::NAN;
                     }
 
-                    // Scaling is deferred until after threshold checks.
+                    // Scaling and row filtering are finalized after all samples are read.
                     all_values.push(value);
                 }
             }
@@ -529,26 +534,21 @@ pub(super) fn process_batch<M: PipelineMode>(
                         value = f64::NAN;
                     }
 
-                    // Scaling is deferred until after threshold checks.
+                    // Scaling and row filtering are finalized after all samples are read.
                     all_values.push(value);
                 }
             }
         }
 
-        let row = if should_skip_row_flat(&all_values, general) {
-            None
-        } else {
-            // Apply scaling after threshold check (Python checks
-            // thresholds on raw values, then scales).
-            apply_scaling(&mut all_values, general.scale_factor);
-            Some(mode.postprocess_row(
+        let row = finalize_row_values(all_values, general).map(|values| {
+            mode.postprocess_row(
                 Arc::unwrap_or_clone(record),
-                all_values,
+                values,
                 sample_count,
                 bin_count,
                 metadata,
-            ))
-        };
+            )
+        });
         results.push((orig_idx, group_index, row));
     }
 
@@ -611,35 +611,7 @@ mod tests {
         assert_eq!(clamp_coordinate(1000, 1000), 1000);
     }
 
-    // ── should_skip_row_flat ──────────────────────────────────────────────
-
-    #[test]
-    fn skip_zeros_all_zeros_returns_true() {
-        let general = GeneralOptions {
-            skip_zeros: true,
-            ..default_general()
-        };
-        assert!(should_skip_row_flat(&[0.0, 0.0, 0.0], &general));
-    }
-
-    #[test]
-    fn skip_zeros_has_nonzero_returns_false() {
-        let general = GeneralOptions {
-            skip_zeros: true,
-            ..default_general()
-        };
-        assert!(!should_skip_row_flat(&[0.0, 1.0, 0.0], &general));
-    }
-
-    #[test]
-    fn skip_zeros_all_nan_returns_true() {
-        // NaN values are skipped; no non-zero found, so all_zero stays true
-        let general = GeneralOptions {
-            skip_zeros: true,
-            ..default_general()
-        };
-        assert!(should_skip_row_flat(&[f64::NAN, f64::NAN], &general));
-    }
+    // Threshold filtering runs on raw values.
 
     #[test]
     fn min_threshold_below_threshold_returns_true() {
@@ -647,7 +619,7 @@ mod tests {
             min_threshold: Some(5.0),
             ..default_general()
         };
-        assert!(should_skip_row_flat(&[3.0, 7.0], &general));
+        assert!(should_filter_by_threshold_raw(&[3.0, 7.0], &general));
     }
 
     #[test]
@@ -656,7 +628,7 @@ mod tests {
             min_threshold: Some(5.0),
             ..default_general()
         };
-        assert!(should_skip_row_flat(&[5.0, 7.0], &general));
+        assert!(should_filter_by_threshold_raw(&[5.0, 7.0], &general));
     }
 
     #[test]
@@ -665,7 +637,7 @@ mod tests {
             max_threshold: Some(10.0),
             ..default_general()
         };
-        assert!(should_skip_row_flat(&[8.0, 12.0], &general));
+        assert!(should_filter_by_threshold_raw(&[8.0, 12.0], &general));
     }
 
     #[test]
@@ -674,7 +646,7 @@ mod tests {
             max_threshold: Some(10.0),
             ..default_general()
         };
-        assert!(should_skip_row_flat(&[8.0, 10.0], &general));
+        assert!(should_filter_by_threshold_raw(&[8.0, 10.0], &general));
     }
 
     #[test]
@@ -684,212 +656,243 @@ mod tests {
             max_threshold: Some(100.0),
             ..default_general()
         };
-        assert!(should_skip_row_flat(&[3.0, 50.0], &general));
+        assert!(should_filter_by_threshold_raw(&[3.0, 50.0], &general));
     }
 
     #[test]
     fn no_thresholds_returns_false() {
         let general = default_general();
-        assert!(!should_skip_row_flat(&[1.0, 2.0, 3.0], &general));
+        assert!(!should_filter_by_threshold_raw(&[1.0, 2.0, 3.0], &general));
     }
 
-    // ── Issue 1a: skipZeros uses mean semantics ──────────────────────────
-
-    #[test]
-    fn skip_zeros_mean_zero_positive_negative_cancel() {
-        // Python: mean([1.0, -1.0]) == 0.0 → skip
-        let general = GeneralOptions {
-            skip_zeros: true,
-            ..default_general()
-        };
-        assert!(should_skip_row_flat(&[1.0, -1.0], &general));
-    }
-
-    #[test]
-    fn skip_zeros_mean_nonzero_not_skipped() {
-        // mean([2.0, -1.0]) == 0.5 → don't skip
-        let general = GeneralOptions {
-            skip_zeros: true,
-            ..default_general()
-        };
-        assert!(!should_skip_row_flat(&[2.0, -1.0], &general));
-    }
-
-    #[test]
-    fn skip_zeros_nan_and_zeros_skipped() {
-        // Python np.mean([NaN, 0.0, 0.0]) = NaN → masked → skip
-        let general = GeneralOptions {
-            skip_zeros: true,
-            ..default_general()
-        };
-        assert!(should_skip_row_flat(&[f64::NAN, 0.0, 0.0], &general));
-    }
-
-    #[test]
-    fn skip_zeros_nan_with_nonzero_skipped() {
-        // Python np.mean([NaN, 5.0, NaN]) = NaN → masked → skip
-        // Rust previously used nanmean: mean of [5.0] = 5.0 → kept
-        let general = GeneralOptions {
-            skip_zeros: true,
-            ..default_general()
-        };
-        assert!(should_skip_row_flat(&[f64::NAN, 5.0, f64::NAN], &general));
-    }
-
-    // ── Issue 1c: threshold NaN propagation ──────────────────────────────
+    // Threshold NaN propagation.
 
     #[test]
     fn min_threshold_nan_present_keeps_row() {
-        // Python: min([NaN, 3.0]) = NaN, NaN <= 5 is False → keep row
-        // Rust previously filtered NaN, found 3.0 <= 5 → skipped
         let general = GeneralOptions {
             min_threshold: Some(5.0),
             ..default_general()
         };
-        assert!(!should_skip_row_flat(&[f64::NAN, 3.0], &general));
+        assert!(!should_filter_by_threshold_raw(&[f64::NAN, 3.0], &general));
     }
 
     #[test]
     fn max_threshold_nan_present_keeps_row() {
-        // Python: max([NaN, 12.0]) = NaN, NaN >= 10 is False → keep row
         let general = GeneralOptions {
             max_threshold: Some(10.0),
             ..default_general()
         };
-        assert!(!should_skip_row_flat(&[f64::NAN, 12.0], &general));
+        assert!(!should_filter_by_threshold_raw(&[f64::NAN, 12.0], &general));
     }
 
     #[test]
     fn min_threshold_no_nan_still_skips() {
-        // Without NaN, threshold still works: 3.0 <= 5 → skip
         let general = GeneralOptions {
             min_threshold: Some(5.0),
             ..default_general()
         };
-        assert!(should_skip_row_flat(&[3.0, 7.0], &general));
+        assert!(should_filter_by_threshold_raw(&[3.0, 7.0], &general));
     }
 
-    // ── Issue 1b: threshold vs scale ordering ────────────────────────────
+    // Threshold vs scale ordering.
 
     #[test]
     fn min_threshold_with_scale_factor_compares_prescale() {
-        // should_skip_row_flat now receives raw (pre-scale) values.
-        // Raw values: [3.0, 7.0], scale = 2.0
-        // Python checks threshold on raw value: 3.0 <= 5 → skip
         let general = GeneralOptions {
             min_threshold: Some(5.0),
             scale_factor: 2.0,
             ..default_general()
         };
-        // Raw values: 3.0 <= 5.0 → skip
-        assert!(should_skip_row_flat(&[3.0, 7.0], &general));
+        assert!(should_filter_by_threshold_raw(&[3.0, 7.0], &general));
     }
 
     #[test]
     fn min_threshold_with_scale_factor_no_skip() {
-        // Raw values = [6.0, 7.0], scale = 2.0
-        // Python: 6.0 <= 5.0? No, 7.0 <= 5.0? No → keep
         let general = GeneralOptions {
             min_threshold: Some(5.0),
             scale_factor: 2.0,
             ..default_general()
         };
-        assert!(!should_skip_row_flat(&[6.0, 7.0], &general));
+        assert!(!should_filter_by_threshold_raw(&[6.0, 7.0], &general));
     }
 
     #[test]
     fn max_threshold_with_negative_scale() {
-        // Raw value = 12.0, scale = -1.0
-        // Python: max([12.0]) = 12.0 >= 10 → skip
         let general = GeneralOptions {
             max_threshold: Some(10.0),
             scale_factor: -1.0,
             ..default_general()
         };
-        // Raw value 12.0 >= 10.0 → skip
-        assert!(should_skip_row_flat(&[12.0], &general));
+        assert!(should_filter_by_threshold_raw(&[12.0], &general));
     }
 
     #[test]
     fn threshold_scale_factor_one_unchanged() {
-        // With scale_factor=1.0 behavior should be unchanged
         let general = GeneralOptions {
             min_threshold: Some(5.0),
             scale_factor: 1.0,
             ..default_general()
         };
-        assert!(should_skip_row_flat(&[3.0, 7.0], &general));
+        assert!(should_filter_by_threshold_raw(&[3.0, 7.0], &general));
     }
 
-    // ── Issue 2: --scale 0 with threshold check ─────────────────────────
+    // --scale 0 with threshold checks.
 
     #[test]
     fn scale_zero_max_threshold_skips_when_raw_exceeds() {
-        // --scale 0 --maxThreshold 5 with raw values [3.0, 6.0]
-        // Python: 6.0 >= 5 → skip row
         let general = GeneralOptions {
             max_threshold: Some(5.0),
             scale_factor: 0.0,
             ..default_general()
         };
-        assert!(should_skip_row_flat(&[3.0, 6.0], &general));
+        assert!(should_filter_by_threshold_raw(&[3.0, 6.0], &general));
     }
 
     #[test]
     fn scale_zero_max_threshold_keeps_when_raw_below() {
-        // --scale 0 --maxThreshold 5 with raw values [3.0, 4.0]
-        // Python: neither >= 5 → keep row
         let general = GeneralOptions {
             max_threshold: Some(5.0),
             scale_factor: 0.0,
             ..default_general()
         };
-        assert!(!should_skip_row_flat(&[3.0, 4.0], &general));
+        assert!(!should_filter_by_threshold_raw(&[3.0, 4.0], &general));
     }
 
     #[test]
     fn scale_zero_min_threshold_skips_when_raw_below() {
-        // --scale 0 --minThreshold 2 with raw values [1.0, 3.0]
-        // Python: 1.0 <= 2 → skip row
         let general = GeneralOptions {
             min_threshold: Some(2.0),
             scale_factor: 0.0,
             ..default_general()
         };
-        assert!(should_skip_row_flat(&[1.0, 3.0], &general));
+        assert!(should_filter_by_threshold_raw(&[1.0, 3.0], &general));
     }
 
     #[test]
     fn scale_zero_min_threshold_keeps_when_raw_above() {
-        // --scale 0 --minThreshold 2 with raw values [3.0, 4.0]
-        // Python: neither <= 2 → keep row
         let general = GeneralOptions {
             min_threshold: Some(2.0),
             scale_factor: 0.0,
             ..default_general()
         };
-        assert!(!should_skip_row_flat(&[3.0, 4.0], &general));
+        assert!(!should_filter_by_threshold_raw(&[3.0, 4.0], &general));
     }
 
-    // ── Issue 1d: chrom missing + missingDataAsZero ──────────────────────
-    // compute_sample_bins returns 0-filled vec when missingDataAsZero=true
-    // and chrom is missing from the bigWig.  This requires a real BigWig
-    // handle so it is covered by integration tests (python_compatibility.rs)
-    // rather than unit tests.  The production code branch is at the top of
-    // compute_sample_bins (the chrom_length None arm).
-
-    // ── skip_zeros + scale_factor interaction ───────────────────────────
+    // skipZeros runs on scaled values with masked-invalid mean semantics.
 
     #[test]
-    fn skip_zeros_with_scale_zero_keeps_nonzero_raw() {
-        // Raw values [3.0, 4.0] are non-zero → skip_zeros does not trigger.
-        // After scaling by 0, output would be [0.0, 0.0], but skip_zeros
-        // is evaluated on raw values, matching Python.
+    fn skip_zeros_disabled_returns_false() {
+        let general = default_general();
+        assert!(!should_skip_zeros_scaled(&[0.0, 0.0], &general));
+    }
+
+    #[test]
+    fn skip_zeros_all_zeros_returns_true() {
+        let general = GeneralOptions {
+            skip_zeros: true,
+            ..default_general()
+        };
+        assert!(should_skip_zeros_scaled(&[0.0, 0.0, 0.0], &general));
+    }
+
+    #[test]
+    fn skip_zeros_has_nonzero_returns_false() {
+        let general = GeneralOptions {
+            skip_zeros: true,
+            ..default_general()
+        };
+        assert!(!should_skip_zeros_scaled(&[0.0, 1.0, 0.0], &general));
+    }
+
+    #[test]
+    fn skip_zeros_all_nan_returns_true() {
+        let general = GeneralOptions {
+            skip_zeros: true,
+            ..default_general()
+        };
+        assert!(should_skip_zeros_scaled(&[f64::NAN, f64::NAN], &general));
+    }
+
+    #[test]
+    fn skip_zeros_mean_zero_positive_negative_cancel() {
+        let general = GeneralOptions {
+            skip_zeros: true,
+            ..default_general()
+        };
+        assert!(should_skip_zeros_scaled(&[1.0, -1.0], &general));
+    }
+
+    #[test]
+    fn skip_zeros_mean_nonzero_not_skipped() {
+        let general = GeneralOptions {
+            skip_zeros: true,
+            ..default_general()
+        };
+        assert!(!should_skip_zeros_scaled(&[2.0, -1.0], &general));
+    }
+
+    #[test]
+    fn skip_zeros_nan_and_zeros_skipped() {
+        let general = GeneralOptions {
+            skip_zeros: true,
+            ..default_general()
+        };
+        assert!(should_skip_zeros_scaled(&[f64::NAN, 0.0, 0.0], &general));
+    }
+
+    #[test]
+    fn skip_zeros_nan_with_nonzero_keeps_row() {
+        let general = GeneralOptions {
+            skip_zeros: true,
+            ..default_general()
+        };
+        assert!(!should_skip_zeros_scaled(&[f64::NAN, 5.0, f64::NAN], &general));
+    }
+
+    #[test]
+    fn skip_zeros_infinite_values_are_masked() {
+        let general = GeneralOptions {
+            skip_zeros: true,
+            ..default_general()
+        };
+        assert!(should_skip_zeros_scaled(&[f64::INFINITY, f64::NEG_INFINITY], &general));
+    }
+
+    // finalize_row_values applies threshold, scale, then skipZeros.
+
+    #[test]
+    fn finalize_row_values_scales_kept_row() {
+        let general = GeneralOptions {
+            scale_factor: 2.0,
+            ..default_general()
+        };
+        assert_eq!(
+            finalize_row_values(vec![3.0, 4.0], &general),
+            Some(vec![6.0, 8.0])
+        );
+    }
+
+    #[test]
+    fn finalize_row_values_filters_threshold_before_scale() {
+        let general = GeneralOptions {
+            min_threshold: Some(5.0),
+            scale_factor: 2.0,
+            ..default_general()
+        };
+        assert_eq!(finalize_row_values(vec![3.0, 7.0], &general), None);
+    }
+
+    #[test]
+    fn finalize_row_values_scale_zero_skipzeros_removes_nonzero_raw() {
         let general = GeneralOptions {
             skip_zeros: true,
             scale_factor: 0.0,
             ..default_general()
         };
-        assert!(!should_skip_row_flat(&[3.0, 4.0], &general));
+        assert_eq!(finalize_row_values(vec![3.0, 4.0], &general), None);
     }
+
+    // compute_sample_bins returns 0-filled vec when missingDataAsZero=true
+    // and chrom is missing from the bigWig. This requires a real BigWig
+    // handle, so integration tests cover it instead of unit tests.
 }
