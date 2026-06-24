@@ -71,12 +71,13 @@ Status: **done**
 - Address any remaining failures
 - Final doc update
 
-## Known Architectural Differences (not fixed)
+## Intended Output Differences
 
 | Area | Description |
 |------|-------------|
-| Missing-chrom region dispatch | Python's mapReduce dispatches regions by bigWig chromosomes — if a chromosome doesn't exist in any bigWig, the BED region is never processed (row omitted). Rust processes all BED regions and fills with NaN/0. Fixing this would require changes to the region dispatch architecture. |
-| outFileSortedRegions blockStarts | Python's deeptoolsintervals outputs absolute genomic coordinates in the blockStarts column. Rust follows the BED12 specification using offsets relative to chromStart. This is a deeptoolsintervals implementation detail, not a deepTools design choice. |
+| Header `scale` serialization | Python may serialize the default as an integer while Rust always writes a float. The comparison harness ignores this key because downstream tools do not read it back. |
+| outFileNameMatrix first-line padding | Rust reserves space for group counts before row filtering completes, then rewrites line 1 at finalize time and pads the remaining bytes with spaces. Text parsers accept the trailing spaces. |
+| outFileSortedRegions blockStarts | Rust follows BED12 and writes offsets relative to `chromStart`. Python's deeptoolsintervals writes its own output convention for this column. |
 
 ## Results
 
@@ -84,13 +85,7 @@ Status: **done**
 - 15 behavioral fixes implemented
 - 6 corner case integration tests added with Python reference data (short_body, short_body_nan_to_zero, scale_threshold, skipzeros, metagene_refpoint, metagene_center)
 - 288 unit tests + 25 integration tests passing
-- 2 known architectural differences documented (missing-chrom dispatch, blockStarts convention)
-
-### Metagene intron-straddling bin tolerance
-
-2 metagene reference-point tests use elevated tolerance (0.17 and 20.5) due to
-bins straddling exon-intron boundaries where Python computes weighted exon-only
-means while Rust queries full genomic spans.
+- 3 intended output differences documented (scale header, outFileNameMatrix padding, blockStarts convention)
 
 ## Audit Sources
 

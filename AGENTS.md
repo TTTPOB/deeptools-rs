@@ -48,6 +48,8 @@
 - 当前兼容性任务包含 26 个 manifest case。
 - 默认比较忽略 header 里的 `proc number` 和 `scale`。
 - `scale` header：Python 默认值可能写 int，Rust 总是写 float。下游工具不读回这个字段。
+- `outFileNameMatrix` 第一行在 finalize 时原地重写 group counts；Rust 可能用 trailing spaces 填满预留宽度，解析兼容。
+- `outFileSortedRegions` 的 BED12 `blockStart` 使用相对 `chromStart` 的标准 offset；Python/deeptoolsintervals 写自身输出格式里的坐标值。该差异按 intended 记录。
 - deepTools 的多字符短 flag `-bs` 和 `-bl` 不受 clap 支持；Rust CLI 使用 `--bs/--binSize` 和 `--bl/--blackListFileName`。
 
 ## 性能基线
