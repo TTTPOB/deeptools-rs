@@ -1613,7 +1613,8 @@
         "extra"
       ],
       "reference": {
-        "matrix": "{corner}/master_sweep_reference_point_multi_sample_missing_chrom.mat"
+        "matrix": "{corner}/master_sweep_reference_point_multi_sample_missing_chrom.mat",
+        "matrix_values": "{corner}/master_sweep_reference_point_multi_sample_missing_chrom.tab"
       }
     },
     {
