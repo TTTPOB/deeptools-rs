@@ -112,6 +112,7 @@ mod tests {
                 start,
                 end,
                 name: Some("gene1".to_string()),
+                bed_field_count: None,
                 score,
                 score_raw: None,
                 strand: Strand::Positive,

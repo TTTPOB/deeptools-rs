@@ -363,6 +363,7 @@ mod tests {
                 start: query_start.max(0) as u32,
                 end: query_end.max(0) as u32,
                 name: None,
+                bed_field_count: None,
                 score: None,
                 score_raw: None,
                 strand: Strand::Unstranded,

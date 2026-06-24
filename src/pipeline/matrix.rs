@@ -351,6 +351,7 @@ mod tests {
                 start,
                 end,
                 name: None,
+                bed_field_count: None,
                 score: None,
                 score_raw: None,
                 strand: Strand::Unstranded,

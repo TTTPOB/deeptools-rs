@@ -41,8 +41,17 @@ pub fn write_matrix_row<W: Write>(writer: &mut W, row: &MatrixRow) -> Result<()>
         }
         buffer.push(b'\t');
 
-        let name = row.record.name.as_deref().unwrap_or(".");
-        buffer.extend_from_slice(name.as_bytes());
+        if matches!(row.record.bed_field_count, Some(3 | 4)) {
+            write_bed_coordinate_name(
+                &mut *buffer,
+                row.record.chrom.as_ref(),
+                row.record.start,
+                row.record.end,
+            )?;
+        } else {
+            let name = row.record.name.as_deref().unwrap_or(".");
+            buffer.extend_from_slice(name.as_bytes());
+        }
         buffer.push(b'\t');
 
         if row.record.score_raw.is_some() {
@@ -86,6 +95,20 @@ pub fn write_plain_row<W: Write>(writer: &mut W, row: &MatrixRow) -> Result<()> 
     }
     writer.write_all(b"\n")?;
     Ok(())
+}
+
+fn write_bed_coordinate_name<W: Write>(
+    writer: &mut W,
+    chrom: &str,
+    start: u32,
+    end: u32,
+) -> io::Result<()> {
+    let mut int_buffer = Buffer::new();
+    writer.write_all(chrom.as_bytes())?;
+    writer.write_all(b":")?;
+    writer.write_all(int_buffer.format(start).as_bytes())?;
+    writer.write_all(b"-")?;
+    writer.write_all(int_buffer.format(end).as_bytes())
 }
 
 /// Format an f64 to match Python's `str(float(x))` output.
@@ -320,10 +343,53 @@ mod tests {
                 start: 10,
                 end: 20,
                 name: Some("raw".to_string()),
+                bed_field_count: Some(6),
                 score: None,
                 score_raw: Some("abc".to_string()),
                 strand: Strand::Unstranded,
                 strand_raw: Some("strandx".to_string()),
+                extra_fields: Vec::new(),
+            },
+            sample_count: 1,
+            bin_count: 1,
+            values: vec![1.0],
+            exon_coords: None,
+        }
+    }
+
+    fn minimal_matrix_row(name: Option<&str>) -> MatrixRow {
+        MatrixRow {
+            record: BedRecord {
+                chrom: Arc::from("chr1"),
+                start: 10,
+                end: 20,
+                name: name.map(str::to_string),
+                bed_field_count: Some(name.map_or(3, |_| 4)),
+                score: None,
+                score_raw: None,
+                strand: Strand::Unstranded,
+                strand_raw: None,
+                extra_fields: Vec::new(),
+            },
+            sample_count: 1,
+            bin_count: 1,
+            values: vec![1.0],
+            exon_coords: None,
+        }
+    }
+
+    fn bed6_matrix_row_with_empty_score_and_strand() -> MatrixRow {
+        MatrixRow {
+            record: BedRecord {
+                chrom: Arc::from("chr1"),
+                start: 10,
+                end: 20,
+                name: Some("foo".to_string()),
+                bed_field_count: Some(6),
+                score: None,
+                score_raw: None,
+                strand: Strand::Unstranded,
+                strand_raw: None,
                 extra_fields: Vec::new(),
             },
             sample_count: 1,
@@ -377,6 +443,26 @@ mod tests {
         assert_eq!(cols[4], "0.0");
         assert_eq!(cols[5], ".");
         assert_eq!(cols[6], "1.000000");
+    }
+
+    #[test]
+    fn matrix_row_uses_coordinate_name_for_minimal_bed_fields() {
+        let line = fmt_row(&minimal_matrix_row(Some("named_only")));
+        let cols: Vec<&str> = line.trim_end().split('\t').collect();
+
+        assert_eq!(cols[3], "chr1:10-20");
+        assert_eq!(cols[4], ".");
+        assert_eq!(cols[5], ".");
+    }
+
+    #[test]
+    fn matrix_row_preserves_bed6_name_with_empty_score_and_strand() {
+        let line = fmt_row(&bed6_matrix_row_with_empty_score_and_strand());
+        let cols: Vec<&str> = line.trim_end().split('\t').collect();
+
+        assert_eq!(cols[3], "foo");
+        assert_eq!(cols[4], ".");
+        assert_eq!(cols[5], ".");
     }
 
     #[test]

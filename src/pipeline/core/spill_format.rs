@@ -68,6 +68,7 @@ const FLAG_HAS_NAME: u8 = 0b0000_0001;
 const FLAG_HAS_SCORE_RAW: u8 = 0b0000_0010;
 const FLAG_HAS_STRAND_RAW: u8 = 0b0000_0100;
 const FLAG_HAS_EXON_COORDS: u8 = 0b0000_1000;
+const FLAG_HAS_BED_FIELD_COUNT: u8 = 0b0001_0000;
 
 // ---------------------------------------------------------------------------
 // Serialization helpers
@@ -180,6 +181,13 @@ pub(crate) fn serialize_row(
         write_len_prefixed_str(buf, name)?;
     }
 
+    if let Some(field_count) = rec.bed_field_count {
+        flags |= FLAG_HAS_BED_FIELD_COUNT;
+        let field_count =
+            u16::try_from(field_count).context("too many BED fields for spill format")?;
+        buf.extend_from_slice(&field_count.to_le_bytes());
+    }
+
     // score — three cases:
     //   1) score_raw is Some => flag bit 1 set, write len-prefixed raw string
     //   2) score_raw is None, score is Some => write f32 LE
@@ -276,6 +284,12 @@ pub(crate) fn deserialize_row(data: &[u8], chrom_table: &ChromTable) -> Result<M
         None
     };
 
+    let bed_field_count = if flags & FLAG_HAS_BED_FIELD_COUNT != 0 {
+        Some(read_u16(data, &mut pos)? as usize)
+    } else {
+        None
+    };
+
     // score
     let (score, score_raw) = if flags & FLAG_HAS_SCORE_RAW != 0 {
         let raw = read_len_prefixed_str(data, &mut pos)?;
@@ -333,6 +347,7 @@ pub(crate) fn deserialize_row(data: &[u8], chrom_table: &ChromTable) -> Result<M
         start,
         end,
         name,
+        bed_field_count,
         score,
         score_raw,
         strand,
@@ -366,6 +381,7 @@ mod tests {
             start: 1000,
             end: 2000,
             name: Some("gene_A".to_string()),
+            bed_field_count: Some(12),
             score: Some(42.5),
             score_raw: None,
             strand: Strand::Negative,
@@ -388,6 +404,7 @@ mod tests {
             start: 0,
             end: 100,
             name: None,
+            bed_field_count: None,
             score: None,
             score_raw: None,
             strand: Strand::Unstranded,
@@ -418,6 +435,7 @@ mod tests {
         assert_eq!(restored.record.start, 1000);
         assert_eq!(restored.record.end, 2000);
         assert_eq!(restored.record.name.as_deref(), Some("gene_A"));
+        assert_eq!(restored.record.bed_field_count, Some(12));
         assert_eq!(restored.record.score, Some(42.5));
         assert!(restored.record.score_raw.is_none());
         assert_eq!(restored.record.strand, Strand::Negative);
@@ -454,6 +472,7 @@ mod tests {
         assert_eq!(restored.record.start, 0);
         assert_eq!(restored.record.end, 100);
         assert!(restored.record.name.is_none());
+        assert!(restored.record.bed_field_count.is_none());
         assert!(restored.record.score.is_none());
         assert!(restored.record.score_raw.is_none());
         assert_eq!(restored.record.strand, Strand::Unstranded);
@@ -493,6 +512,7 @@ mod tests {
             start: 500,
             end: 600,
             name: Some("item".to_string()),
+            bed_field_count: Some(6),
             score: None,
             score_raw: Some("abc".to_string()),
             strand: Strand::Unstranded,
@@ -514,6 +534,7 @@ mod tests {
         let restored = deserialize_row(&buf, &ct).unwrap();
 
         assert!(restored.record.score.is_none());
+        assert_eq!(restored.record.bed_field_count, Some(6));
         assert_eq!(restored.record.score_raw.as_deref(), Some("abc"));
         assert_eq!(restored.record.strand_raw.as_deref(), Some("strandx"));
         assert_eq!(restored.values, vec![9.9]);

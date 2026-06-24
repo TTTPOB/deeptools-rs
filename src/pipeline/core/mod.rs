@@ -38,6 +38,7 @@ mod tests {
                 start: start as u32,
                 end: end as u32,
                 name: None,
+                bed_field_count: None,
                 score: None,
                 score_raw: None,
                 strand: Strand::Unstranded,
