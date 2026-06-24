@@ -2,7 +2,7 @@ use std::io::Write;
 
 use anyhow::Result;
 
-use super::formatting::{write_plain_row, write_score_value};
+use super::formatting::{write_bed_name, write_bed_score, write_bed_strand, write_plain_row};
 use crate::pipeline::matrix::MatrixRow;
 
 /// Header for the 13-column sorted-regions BED12+group output.
@@ -20,32 +20,15 @@ pub fn write_sorted_region_row<W: Write>(
     row: &MatrixRow,
     group_label: &str,
 ) -> Result<()> {
-    let name = row.record.name.as_deref().unwrap_or(".");
-    let strand = row
-        .record
-        .strand_raw
-        .as_deref()
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| row.record.strand.as_char().to_string());
-
     let start = row.record.start;
     let end = row.record.end;
 
     // BED6 columns: chrom, start, end, name
-    write!(
-        writer,
-        "{}\t{}\t{}\t{}\t",
-        row.record.chrom, start, end, name
-    )?;
+    write!(writer, "{}\t{}\t{}\t", row.record.chrom, start, end)?;
+    write_bed_name(writer, &row.record)?;
+    writer.write_all(b"\t")?;
 
-    // Score: use write_score_value for Python-matching float formatting
-    if let Some(raw) = row.record.score_raw.as_deref() {
-        writer.write_all(raw.as_bytes())?;
-    } else if let Some(score) = row.record.score {
-        write_score_value(writer, f64::from(score))?;
-    } else {
-        writer.write_all(b".")?;
-    }
+    write_bed_score(writer, &row.record)?;
 
     // strand + BED12 synthetic fields + deepTools_group
     if let Some(ref exon_coords) = row.exon_coords {
@@ -64,10 +47,11 @@ pub fn write_sorted_region_row<W: Write>(
             .iter()
             .map(|(s, _)| (s - start).to_string())
             .collect();
+        writer.write_all(b"\t")?;
+        write_bed_strand(writer, &row.record)?;
         writeln!(
             writer,
-            "\t{}\t{}\t{}\t0\t{}\t{}\t{}\t{}",
-            strand,
+            "\t{}\t{}\t0\t{}\t{}\t{}\t{}",
             start,
             end,
             block_count,
@@ -78,10 +62,12 @@ pub fn write_sorted_region_row<W: Write>(
     } else {
         // Non-metagene (BED6) input: single synthetic block
         let block_size = end - start;
+        writer.write_all(b"\t")?;
+        write_bed_strand(writer, &row.record)?;
         writeln!(
             writer,
-            "\t{}\t{}\t{}\t0\t1\t{}\t0\t{}",
-            strand, start, end, block_size, group_label
+            "\t{}\t{}\t0\t1\t{}\t0\t{}",
+            start, end, block_size, group_label
         )?;
     }
 
@@ -154,9 +140,9 @@ mod tests {
         assert_eq!(cols[8], "0"); // itemRGB
         assert_eq!(cols[9], "1"); // blockCount
         assert_eq!(cols[10], "50"); // blockSizes = end - start
-        // blockStarts follows BED12 spec (relative to chromStart), not the
-        // absolute-coordinate convention used by Python's deeptoolsintervals.
-        assert_eq!(cols[11], "0"); // blockStarts
+                                    // blockStarts follows BED12 spec (relative to chromStart), not the
+                                    // absolute-coordinate convention used by Python's deeptoolsintervals.
+        assert_eq!(cols[11], "0");
         assert_eq!(cols[12], "Group 1");
     }
 
@@ -172,21 +158,56 @@ mod tests {
         assert_eq!(cols[4], "5.0");
         assert_eq!(cols[9], "2"); // blockCount = 2 exons
         assert_eq!(cols[10], "20,10"); // blockSizes: 120-100, 150-140
-        // blockStarts follows BED12 spec (relative to chromStart), not the
-        // absolute-coordinate convention used by Python's deeptoolsintervals.
-        assert_eq!(cols[11], "0,40"); // blockStarts: 100-100, 140-100
+                                       // blockStarts follows BED12 spec (relative to chromStart), not the
+                                       // absolute-coordinate convention used by Python's deeptoolsintervals.
+        assert_eq!(cols[11], "0,40");
         assert_eq!(cols[12], "Group 2");
     }
 
     #[test]
-    fn sorted_region_score_raw_passthrough() {
+    fn sorted_region_normalizes_raw_score() {
         let mut row = make_row(0, 100, None, None);
         row.record.score_raw = Some("3.14".to_string());
         let mut buf = Vec::new();
         write_sorted_region_row(&mut buf, &row, "G").unwrap();
         let line = String::from_utf8(buf).unwrap();
         let cols: Vec<&str> = line.trim().split('\t').collect();
-        assert_eq!(cols[4], "3.14");
+        assert_eq!(cols[4], "0.0");
+    }
+
+    #[test]
+    fn sorted_region_uses_coordinate_name_for_bed3_to_bed5() {
+        for field_count in 3..=5 {
+            let mut row = make_row(20, 80, None, None);
+            row.record.bed_field_count = Some(field_count);
+            let mut buf = Vec::new();
+            write_sorted_region_row(&mut buf, &row, "G").unwrap();
+            let line = String::from_utf8(buf).unwrap();
+            let cols: Vec<&str> = line.trim().split('\t').collect();
+            assert_eq!(cols[3], "ch1:20-80");
+        }
+    }
+
+    #[test]
+    fn sorted_region_bed5_score_outputs_dot() {
+        let mut row = make_row(0, 100, Some(5.0), None);
+        row.record.bed_field_count = Some(5);
+        let mut buf = Vec::new();
+        write_sorted_region_row(&mut buf, &row, "G").unwrap();
+        let line = String::from_utf8(buf).unwrap();
+        let cols: Vec<&str> = line.trim().split('\t').collect();
+        assert_eq!(cols[4], ".");
+    }
+
+    #[test]
+    fn sorted_region_normalizes_raw_strand() {
+        let mut row = make_row(0, 100, None, None);
+        row.record.strand_raw = Some("strandx".to_string());
+        let mut buf = Vec::new();
+        write_sorted_region_row(&mut buf, &row, "G").unwrap();
+        let line = String::from_utf8(buf).unwrap();
+        let cols: Vec<&str> = line.trim().split('\t').collect();
+        assert_eq!(cols[5], ".");
     }
 
     #[test]

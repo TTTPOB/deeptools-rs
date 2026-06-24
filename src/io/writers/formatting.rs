@@ -4,6 +4,7 @@ use std::io::{self, Write};
 use anyhow::{Context, Result};
 use itoa::Buffer;
 
+use crate::io::readers::bed::BedRecord;
 use crate::pipeline::matrix::MatrixRow;
 
 thread_local! {
@@ -41,35 +42,13 @@ pub fn write_matrix_row<W: Write>(writer: &mut W, row: &MatrixRow) -> Result<()>
         }
         buffer.push(b'\t');
 
-        if matches!(row.record.bed_field_count, Some(3..=5)) {
-            write_bed_coordinate_name(
-                &mut *buffer,
-                row.record.chrom.as_ref(),
-                row.record.start,
-                row.record.end,
-            )?;
-        } else {
-            let name = row.record.name.as_deref().unwrap_or(".");
-            buffer.extend_from_slice(name.as_bytes());
-        }
+        write_bed_name(&mut *buffer, &row.record)?;
         buffer.push(b'\t');
 
-        if matches!(row.record.bed_field_count, Some(5)) {
-            buffer.push(b'.');
-        } else if row.record.score_raw.is_some() {
-            write_score_value(&mut *buffer, 0.0)?;
-        } else if let Some(score) = row.record.score {
-            write_score_value(&mut *buffer, f64::from(score))?;
-        } else {
-            buffer.push(b'.');
-        }
+        write_bed_score(&mut *buffer, &row.record)?;
         buffer.push(b'\t');
 
-        if row.record.strand_raw.is_some() {
-            buffer.push(b'.');
-        } else {
-            buffer.push(row.record.strand.as_char() as u8);
-        }
+        write_bed_strand(&mut *buffer, &row.record)?;
 
         for value in &row.values {
             buffer.push(b'\t');
@@ -97,6 +76,34 @@ pub fn write_plain_row<W: Write>(writer: &mut W, row: &MatrixRow) -> Result<()> 
     }
     writer.write_all(b"\n")?;
     Ok(())
+}
+
+pub(crate) fn write_bed_name<W: Write>(writer: &mut W, record: &BedRecord) -> io::Result<()> {
+    if matches!(record.bed_field_count, Some(3..=5)) {
+        write_bed_coordinate_name(writer, record.chrom.as_ref(), record.start, record.end)
+    } else {
+        writer.write_all(record.name.as_deref().unwrap_or(".").as_bytes())
+    }
+}
+
+pub(crate) fn write_bed_score<W: Write>(writer: &mut W, record: &BedRecord) -> io::Result<()> {
+    if matches!(record.bed_field_count, Some(5)) {
+        writer.write_all(b".")
+    } else if record.score_raw.is_some() {
+        write_score_value(writer, 0.0)
+    } else if let Some(score) = record.score {
+        write_score_value(writer, f64::from(score))
+    } else {
+        writer.write_all(b".")
+    }
+}
+
+pub(crate) fn write_bed_strand<W: Write>(writer: &mut W, record: &BedRecord) -> io::Result<()> {
+    if record.strand_raw.is_some() {
+        writer.write_all(b".")
+    } else {
+        writer.write_all(&[record.strand.as_char() as u8])
+    }
 }
 
 fn write_bed_coordinate_name<W: Write>(
