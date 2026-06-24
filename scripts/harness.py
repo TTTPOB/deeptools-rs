@@ -57,6 +57,7 @@ class Case:
         output: Path,
         *,
         matrix_values: Path | None = None,
+        sorted_regions: Path | None = None,
         release: bool = False,
     ) -> list[str]:
         cmd = self.manifest.runner_prefix(runner, self.mode, release=release)
@@ -66,6 +67,8 @@ class Case:
         cmd.extend(["--outFileName", str(output)])
         if matrix_values is not None:
             cmd.extend(["--outFileNameMatrix", str(matrix_values)])
+        if sorted_regions is not None:
+            cmd.extend(["--outFileSortedRegions", str(sorted_regions)])
         return cmd
 
     def resolved_paths(self, key: str) -> list[str]:
@@ -220,14 +223,20 @@ def command_compat(args: argparse.Namespace) -> int:
 
     for case in cases:
         output = output_dir / f"{case.id}.mat.gz"
+        tab = output_dir / f"{case.id}.tab" if "matrix_values" in case.reference else None
+        bed = output_dir / f"{case.id}.bed" if "sorted_regions" in case.reference else None
         print(f"[compat] {case.id}")
-        run(case.command("rust", output), quiet=args.quiet)
+        run(case.command("rust", output, matrix_values=tab, sorted_regions=bed), quiet=args.quiet)
         compare(
             manifest,
             output,
             manifest.resolve_path(case.reference["matrix"]),
             quiet=args.quiet,
         )
+        if tab is not None:
+            compare_text(tab, manifest.resolve_path(case.reference["matrix_values"]))
+        if bed is not None:
+            compare_text(bed, manifest.resolve_path(case.reference["sorted_regions"]))
 
     print(f"[compat] {len(cases) - failures}/{len(cases)} passed")
     return 0
@@ -248,10 +257,17 @@ def command_regen_refs(args: argparse.Namespace) -> int:
             if "matrix_values" in case.reference
             else None
         )
+        bed = (
+            manifest.resolve_path(case.reference["sorted_regions"])
+            if "sorted_regions" in case.reference
+            else None
+        )
         if tab is not None:
             tab.parent.mkdir(parents=True, exist_ok=True)
+        if bed is not None:
+            bed.parent.mkdir(parents=True, exist_ok=True)
         print(f"[regen-ref] {case.id}")
-        run(case.command("python", matrix, matrix_values=tab), quiet=args.quiet)
+        run(case.command("python", matrix, matrix_values=tab, sorted_regions=bed), quiet=args.quiet)
     return 0
 
 
@@ -279,6 +295,10 @@ def command_verify_refs(args: argparse.Namespace) -> int:
                 tab = tmpdir / f"{case.id}.tab"
                 run(case.command("rust", output, matrix_values=tab), quiet=True)
                 compare_text(tab, manifest.resolve_path(case.reference["matrix_values"]))
+            if "sorted_regions" in case.reference:
+                bed = tmpdir / f"{case.id}.bed"
+                run(case.command("rust", output, sorted_regions=bed), quiet=True)
+                compare_text(bed, manifest.resolve_path(case.reference["sorted_regions"]))
     return 0
 
 
