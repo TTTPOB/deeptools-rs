@@ -1,0 +1,8 @@
+track name="header test" description="skip UCSC track line"
+browser position 3R:1-200
+3R	20	80	header_a	0	+
+#header_group
+browser hide all
+3R	90	140	header_b	0	-
+track visibility=2
+3R	140	190	header_c	0	+

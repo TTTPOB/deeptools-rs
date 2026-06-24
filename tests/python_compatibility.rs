@@ -293,6 +293,46 @@ fn scale_zero_skipzeros_fails_when_all_rows_filter_out() {
 }
 
 #[test]
+fn bed_track_browser_headers_fail_like_deeptools() {
+    let manifest = load_manifest();
+    let output = NamedTempFile::new().unwrap();
+    let signal = resolve_path(&manifest, "{test_data}/testA.bw");
+    let regions = resolve_path(&manifest, "{corner}/bed_headers.bed");
+
+    let result = Command::new(compute_matrix_bin())
+        .args([
+            "reference-point",
+            "-R",
+            regions.to_str().unwrap(),
+            "-S",
+            signal.to_str().unwrap(),
+            "-b",
+            "20",
+            "-a",
+            "20",
+            "--binSize",
+            "10",
+            "-p",
+            "1",
+            "-o",
+            output.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        !result.status.success(),
+        "BED track/browser header lines should fail instead of entering parity"
+    );
+
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("BED start column must be an integer"),
+        "unexpected stderr:\n{stderr}"
+    );
+}
+
+#[test]
 fn runtime_empty_group_preserved_with_zero_count() {
     use std::io::Write;
 
