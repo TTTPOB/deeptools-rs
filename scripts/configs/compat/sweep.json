@@ -1191,6 +1191,177 @@
       "reference": {
         "matrix": "{corner}/master_sweep_metagene_missing_zero_skipzeros.mat"
       }
+    },
+    {
+      "id": "sweep_scale_regions_multi_sample_sort_using_sample_2",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "scale-regions",
+      "region_files": [
+        "{corner}/test_ab_regions.bed"
+      ],
+      "score_files": [
+        "{test_data}/testA.bw",
+        "{test_data}/testB.bw"
+      ],
+      "options": [
+        "-b",
+        "20",
+        "-a",
+        "20",
+        "-m",
+        "80",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--sortRegions",
+        "descend",
+        "--sortUsing",
+        "mean",
+        "--sortUsingSamples",
+        "2"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_scale_regions_multi_sample_sort_using_sample_2.mat"
+      }
+    },
+    {
+      "id": "sweep_scale_regions_multi_bed_groups",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "scale-regions",
+      "region_files": [
+        "{heatmapper}/group1.bed",
+        "{heatmapper}/group2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "-m",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "1"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_scale_regions_multi_bed_groups.mat"
+      }
+    },
+    {
+      "id": "sweep_reference_point_min_threshold",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{corner}/test_ab_regions.bed"
+      ],
+      "score_files": [
+        "{test_data}/testA.bw"
+      ],
+      "options": [
+        "-b",
+        "20",
+        "-a",
+        "20",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--minThreshold",
+        "1"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_reference_point_min_threshold.mat"
+      }
+    },
+    {
+      "id": "sweep_scale_regions_custom_start_end_labels",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "scale-regions",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "-m",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--startLabel",
+        "peak start",
+        "--endLabel",
+        "peak end"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_scale_regions_custom_start_end_labels.mat"
+      }
+    },
+    {
+      "id": "sweep_bed12_metagene_sort_asc_region_length",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "scale-regions",
+      "region_files": [
+        "{corner}/bed12_metagene.bed"
+      ],
+      "score_files": [
+        "{test_data}/test1.bw.bw"
+      ],
+      "options": [
+        "-a",
+        "300",
+        "-b",
+        "500",
+        "-m",
+        "1000",
+        "--unscaled5prime",
+        "20",
+        "--unscaled3prime",
+        "50",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--metagene",
+        "--sortRegions",
+        "ascend",
+        "--sortUsing",
+        "region_length"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_bed12_metagene_sort_asc_region_length.mat"
+      }
     }
   ]
 }
