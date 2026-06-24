@@ -1712,6 +1712,34 @@
       "reference": {
         "matrix": "{corner}/master_sweep_gtf_gene_id_designator_reference_point.mat"
       }
+    },
+    {
+      "id": "sweep_reference_point_raw_bed_fields",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{corner}/raw_bed_fields.bed"
+      ],
+      "score_files": [
+        "{test_data}/testA.bw"
+      ],
+      "options": [
+        "-b",
+        "20",
+        "-a",
+        "20",
+        "--binSize",
+        "10",
+        "-p",
+        "1"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_reference_point_raw_bed_fields.mat"
+      }
     }
   ]
 }
