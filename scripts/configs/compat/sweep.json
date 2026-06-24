@@ -1645,6 +1645,40 @@
       "reference": {
         "matrix": "{corner}/master_sweep_reference_point_sort_no_unsorted_groups.mat"
       }
+    },
+    {
+      "id": "sweep_scale_regions_unscaled_short_body",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "scale-regions",
+      "region_files": [
+        "{corner}/unscaled_short_body.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-m",
+        "100",
+        "-b",
+        "20",
+        "-a",
+        "20",
+        "--unscaled5prime",
+        "20",
+        "--unscaled3prime",
+        "20",
+        "--binSize",
+        "10",
+        "-p",
+        "1"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_scale_regions_unscaled_short_body.mat"
+      }
     }
   ]
 }
