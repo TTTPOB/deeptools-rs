@@ -1496,6 +1496,35 @@
       "reference": {
         "matrix": "{corner}/master_sweep_reference_point_skipnas_missing_zero_sort.mat"
       }
+    },
+    {
+      "id": "sweep_reference_point_negative_bed_start",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{corner}/negative_start.bed"
+      ],
+      "score_files": [
+        "{test_data}/testA.bw"
+      ],
+      "options": [
+        "-b",
+        "20",
+        "-a",
+        "20",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--missingDataAsZero"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_reference_point_negative_bed_start.mat"
+      }
     }
   ]
 }

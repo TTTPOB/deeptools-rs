@@ -98,9 +98,14 @@ impl BedRecord {
         }
 
         let chrom = intern_chrom(fields[0].to_string());
-        let start = fields[1]
-            .parse::<u32>()
-            .map_err(|_| "BED start column must be an unsigned integer".to_string())?;
+        let start_raw = fields[1]
+            .parse::<i64>()
+            .map_err(|_| "BED start column must be an integer".to_string())?;
+        let start = if start_raw < 0 {
+            0
+        } else {
+            u32::try_from(start_raw).map_err(|_| "BED start column overflowed u32".to_string())?
+        };
         let end = fields[2]
             .parse::<u32>()
             .map_err(|_| "BED end column must be an unsigned integer".to_string())?;
@@ -347,6 +352,13 @@ mod tests {
         assert_eq!(record.strand, Strand::Positive);
         assert!(record.strand_raw.is_none());
         assert!(record.extra_fields.is_empty());
+    }
+
+    #[test]
+    fn clamps_negative_bed_start_to_zero() {
+        let record = BedRecord::parse("chr1\t-5\t20\tname\t5.0\t+").expect("should parse");
+        assert_eq!(record.start, 0);
+        assert_eq!(record.end, 20);
     }
 
     // --- GroupedBedReader tests ---
