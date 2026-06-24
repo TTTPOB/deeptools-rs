@@ -333,6 +333,72 @@ fn bed_track_browser_headers_fail_like_deeptools() {
 }
 
 #[test]
+fn outfilename_sorted_regions_normalizes_bed_metadata_fields() {
+    let manifest = load_manifest();
+    let expectations = [
+        (
+            "sweep_reference_point_raw_bed_fields",
+            vec![
+                ("raw_score", "0.0", "+"),
+                ("raw_strand", "0.0", "."),
+                ("raw_both", "0.0", "."),
+            ],
+        ),
+        (
+            "sweep_reference_point_minimal_bed_fields",
+            vec![("3R:20-80", ".", "."), ("3R:90-140", ".", ".")],
+        ),
+        (
+            "sweep_reference_point_bed5_fields",
+            vec![("3R:20-80", ".", "."), ("3R:90-140", ".", ".")],
+        ),
+    ];
+
+    for (case_id, expected_rows) in expectations {
+        let case = manifest
+            .cases
+            .iter()
+            .find(|case| case.id == case_id)
+            .unwrap_or_else(|| panic!("missing {case_id} case"));
+
+        let mat_tmp = tempfile::NamedTempFile::new().unwrap();
+        let bed_tmp = tempfile::NamedTempFile::new().unwrap();
+
+        let mut args = build_compute_args(&manifest, case, mat_tmp.path());
+        args.push("--outFileSortedRegions".to_owned());
+        args.push(bed_tmp.path().display().to_string());
+
+        let status = Command::new(compute_matrix_bin())
+            .args(&args)
+            .status()
+            .unwrap_or_else(|err| panic!("failed to run compute_matrix_rs for {case_id}: {err}"));
+        assert!(status.success(), "case {case_id} failed with {status}");
+
+        let bed = std::fs::read_to_string(bed_tmp.path()).unwrap();
+        let rows: Vec<Vec<&str>> = bed
+            .lines()
+            .skip(1)
+            .map(|line| line.split('\t').collect())
+            .collect();
+
+        assert_eq!(
+            rows.len(),
+            expected_rows.len(),
+            "unexpected sorted-region row count for {case_id}:\n{bed}"
+        );
+
+        for (row, (expected_name, expected_score, expected_strand)) in
+            rows.iter().zip(expected_rows)
+        {
+            assert_eq!(row.len(), 13, "expected 13 columns for {case_id}: {row:?}");
+            assert_eq!(row[3], expected_name, "name mismatch for {case_id}");
+            assert_eq!(row[4], expected_score, "score mismatch for {case_id}");
+            assert_eq!(row[5], expected_strand, "strand mismatch for {case_id}");
+        }
+    }
+}
+
+#[test]
 fn runtime_empty_group_preserved_with_zero_count() {
     use std::io::Write;
 
