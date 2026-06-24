@@ -79,11 +79,7 @@ pub fn write_plain_row<W: Write>(writer: &mut W, row: &MatrixRow) -> Result<()> 
 }
 
 pub(crate) fn write_bed_name<W: Write>(writer: &mut W, record: &BedRecord) -> io::Result<()> {
-    if matches!(record.bed_field_count, Some(3..=5)) {
-        write_bed_coordinate_name(writer, record.chrom.as_ref(), record.start, record.end)
-    } else {
-        writer.write_all(record.name.as_deref().unwrap_or(".").as_bytes())
-    }
+    writer.write_all(record.name.as_deref().unwrap_or(".").as_bytes())
 }
 
 pub(crate) fn write_bed_score<W: Write>(writer: &mut W, record: &BedRecord) -> io::Result<()> {
@@ -104,20 +100,6 @@ pub(crate) fn write_bed_strand<W: Write>(writer: &mut W, record: &BedRecord) -> 
     } else {
         writer.write_all(&[record.strand.as_char() as u8])
     }
-}
-
-fn write_bed_coordinate_name<W: Write>(
-    writer: &mut W,
-    chrom: &str,
-    start: u32,
-    end: u32,
-) -> io::Result<()> {
-    let mut int_buffer = Buffer::new();
-    writer.write_all(chrom.as_bytes())?;
-    writer.write_all(b":")?;
-    writer.write_all(int_buffer.format(start).as_bytes())?;
-    writer.write_all(b"-")?;
-    writer.write_all(int_buffer.format(end).as_bytes())
 }
 
 /// Format an f64 to match Python's `str(float(x))` output.
@@ -372,7 +354,7 @@ mod tests {
                 chrom: Arc::from("chr1"),
                 start: 10,
                 end: 20,
-                name: (field_count >= 4).then(|| "named_only".to_string()),
+                name: Some("chr1:10-20".to_string()),
                 bed_field_count: Some(field_count),
                 score: (field_count >= 5).then_some(5.0),
                 score_raw: None,

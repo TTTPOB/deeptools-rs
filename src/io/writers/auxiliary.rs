@@ -180,6 +180,7 @@ mod tests {
         for field_count in 3..=5 {
             let mut row = make_row(20, 80, None, None);
             row.record.bed_field_count = Some(field_count);
+            row.record.name = Some("ch1:20-80".to_string());
             let mut buf = Vec::new();
             write_sorted_region_row(&mut buf, &row, "G").unwrap();
             let line = String::from_utf8(buf).unwrap();

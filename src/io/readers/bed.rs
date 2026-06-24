@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::path::Path;
@@ -37,6 +37,25 @@ fn parse_comma_separated_u32(value: &str, expected: usize) -> Option<Vec<u32>> {
         return None;
     }
     Some(numbers)
+}
+
+fn coordinate_name(chrom: &str, start: u32, end: u32) -> String {
+    format!("{chrom}:{start}-{end}")
+}
+
+fn unique_name(seen: &mut HashSet<String>, name: String) -> String {
+    if seen.insert(name.clone()) {
+        return name;
+    }
+
+    let mut suffix = 1;
+    loop {
+        let proposal = format!("{name}_r{suffix}");
+        if seen.insert(proposal.clone()) {
+            return proposal;
+        }
+        suffix += 1;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,10 +134,15 @@ impl BedRecord {
             return Err("BED end column must be greater than or equal to start".to_string());
         }
 
-        let name = fields
-            .get(3)
-            .map(|value| value.to_string())
-            .filter(|v| !v.is_empty());
+        let bed_field_count = fields.len();
+        let name = if matches!(bed_field_count, 3..=5) {
+            Some(coordinate_name(chrom.as_ref(), start, end))
+        } else {
+            fields
+                .get(3)
+                .map(|value| value.to_string())
+                .filter(|v| !v.is_empty())
+        };
         let (score, score_raw) = if let Some(raw) = fields.get(4) {
             if raw.is_empty() || *raw == "." {
                 (None, None)
@@ -152,7 +176,7 @@ impl BedRecord {
             start,
             end,
             name,
-            bed_field_count: Some(fields.len()),
+            bed_field_count: Some(bed_field_count),
             score,
             score_raw,
             strand,
@@ -227,6 +251,8 @@ pub struct GroupedBedReader<R: BufRead> {
     default_label: String,
     /// Records accumulated since the last group boundary.
     current_records: Vec<BedRecord>,
+    /// Names already used in the currently accumulated group.
+    current_names: HashSet<String>,
     /// Whether at least one group has been yielded (for `EmptyFile` detection).
     yielded_any: bool,
     /// Whether the underlying line iterator has been exhausted.
@@ -250,6 +276,7 @@ impl<R: BufRead> GroupedBedReader<R> {
             lines: reader.lines().enumerate(),
             default_label,
             current_records: Vec::new(),
+            current_names: HashSet::new(),
             yielded_any: false,
             done: false,
         }
@@ -276,6 +303,7 @@ impl<R: BufRead> Iterator for GroupedBedReader<R> {
                         let raw_label = trimmed.strip_prefix('#').unwrap_or("").trim();
                         if !self.current_records.is_empty() {
                             let records = std::mem::take(&mut self.current_records);
+                            self.current_names.clear();
                             let label = if raw_label.is_empty() {
                                 self.default_label.clone()
                             } else {
@@ -290,7 +318,12 @@ impl<R: BufRead> Iterator for GroupedBedReader<R> {
                     }
                     // Parse as a BED data line.
                     match BedRecord::parse(trimmed) {
-                        Ok(record) => self.current_records.push(record),
+                        Ok(mut record) => {
+                            if let Some(name) = record.name.take() {
+                                record.name = Some(unique_name(&mut self.current_names, name));
+                            }
+                            self.current_records.push(record);
+                        }
                         Err(message) => {
                             self.done = true;
                             return Some(Err(BedReadError::Parse {
@@ -310,6 +343,7 @@ impl<R: BufRead> Iterator for GroupedBedReader<R> {
                     // Emit the final group if records remain.
                     if !self.current_records.is_empty() {
                         let records = std::mem::take(&mut self.current_records);
+                        self.current_names.clear();
                         self.yielded_any = true;
                         return Some(Ok(Group {
                             label: self.default_label.clone(),
@@ -354,6 +388,20 @@ mod tests {
         assert_eq!(record.strand, Strand::Positive);
         assert!(record.strand_raw.is_none());
         assert!(record.extra_fields.is_empty());
+    }
+
+    #[test]
+    fn parses_bed3_to_bed5_with_coordinate_name() {
+        let cases = [
+            ("chr1\t10\t20", "chr1:10-20"),
+            ("chr1\t10\t20\tignored", "chr1:10-20"),
+            ("chr1\t10\t20\tignored\t5", "chr1:10-20"),
+        ];
+
+        for (line, expected) in cases {
+            let record = BedRecord::parse(line).expect("should parse");
+            assert_eq!(record.name.as_deref(), Some(expected));
+        }
     }
 
     #[test]
@@ -510,6 +558,37 @@ ch3\t75\t100\tca8\t0\t+\n\
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].label, "dup");
         assert_eq!(groups[1].label, "dup");
+    }
+
+    #[test]
+    fn duplicate_region_names_are_deduplicated_within_group() {
+        let data = b"chr1\t100\t200\tdup\t0\t+\nchr1\t300\t400\tdup\t0\t+\nchr1\t500\t600\tdup_r1\t0\t+\nchr1\t700\t800\tdup\t0\t+\n";
+        let groups: Vec<_> = make_reader(data)
+            .collect::<Result<_, _>>()
+            .expect("valid groups");
+        let names: Vec<_> = groups[0]
+            .records
+            .iter()
+            .map(|record| record.name.as_deref().unwrap())
+            .collect();
+        assert_eq!(names, vec!["dup", "dup_r1", "dup_r1_r1", "dup_r2"]);
+    }
+
+    #[test]
+    fn duplicate_coordinate_names_are_deduplicated_within_group() {
+        let data = b"chr1\t100\t200\nchr1\t100\t200\tignored\nchr1\t100\t200\tignored\t5\n";
+        let groups: Vec<_> = make_reader(data)
+            .collect::<Result<_, _>>()
+            .expect("valid groups");
+        let names: Vec<_> = groups[0]
+            .records
+            .iter()
+            .map(|record| record.name.as_deref().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["chr1:100-200", "chr1:100-200_r1", "chr1:100-200_r2"]
+        );
     }
 
     #[test]
