@@ -177,6 +177,10 @@ where
         let metadata = Arc::clone(&metadata);
         let mode = mode.clone();
         move |group_counts: Vec<usize>| -> Result<MatrixHeader> {
+            if group_counts.iter().all(|count| *count == 0) {
+                anyhow::bail!("No regions remain after runtime row filtering.");
+            }
+
             // Explicitly validate against the runtime policy — zero-count
             // groups are expected and allowed when filtering is active.
             runtime_empty_group_policy
