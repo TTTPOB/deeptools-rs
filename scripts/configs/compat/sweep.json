@@ -1680,6 +1680,38 @@
       "reference": {
         "matrix": "{corner}/master_sweep_scale_regions_unscaled_short_body.mat"
       }
+    },
+    {
+      "id": "sweep_gtf_gene_id_designator_reference_point",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{corner}/gene_id_designator.gtf"
+      ],
+      "score_files": [
+        "{test_data}/testA.bw"
+      ],
+      "options": [
+        "--referencePoint",
+        "TSS",
+        "-b",
+        "20",
+        "-a",
+        "20",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--transcript_id_designator",
+        "gene_id"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_gtf_gene_id_designator_reference_point.mat"
+      }
     }
   ]
 }

@@ -1,0 +1,6 @@
+3R	deepTools	transcript	1	80	.	+	0	gene_id "geneA"; transcript_id "tx1";
+3R	deepTools	exon	1	30	.	+	0	gene_id "geneA"; transcript_id "tx1";
+3R	deepTools	exon	50	80	.	+	0	gene_id "geneA"; transcript_id "tx1";
+3R	deepTools	transcript	100	180	.	-	0	gene_id "geneB"; transcript_id "tx2";
+3R	deepTools	exon	100	130	.	-	0	gene_id "geneB"; transcript_id "tx2";
+3R	deepTools	exon	150	180	.	-	0	gene_id "geneB"; transcript_id "tx2";
