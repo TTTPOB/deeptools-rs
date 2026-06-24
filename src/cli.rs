@@ -219,6 +219,7 @@ struct GeneralArgs {
     #[arg(
         long = "scale",
         value_name = "FLOAT",
+        allow_hyphen_values = true,
         default_value_t = 1.0,
         help = "If set, all values are multiplied by this number. (Default: 1)"
     )]
