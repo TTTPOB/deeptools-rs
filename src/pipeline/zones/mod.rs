@@ -80,13 +80,27 @@ impl ReferencePointPlan {
             .map(|(b, intervals)| (b, Some(intervals)))
             .unwrap_or_else(|| {
                 (
-                    build_bins(record, reference, bin_size, upstream_bins, downstream_bins),
+                    build_bins(
+                        record,
+                        reference_point,
+                        reference,
+                        bin_size,
+                        upstream_bins,
+                        downstream_bins,
+                    ),
                     None,
                 )
             })
         } else {
             (
-                build_bins(record, reference, bin_size, upstream_bins, downstream_bins),
+                build_bins(
+                    record,
+                    reference_point,
+                    reference,
+                    bin_size,
+                    upstream_bins,
+                    downstream_bins,
+                ),
                 None,
             )
         };
@@ -260,6 +274,7 @@ impl ScaleRegionsPlan {
 
 fn build_bins(
     record: &BedRecord,
+    reference_point: ReferencePoint,
     reference: i64,
     bin_size: u32,
     upstream_bins: usize,
@@ -270,7 +285,14 @@ fn build_bins(
     for bin_index in 0..total_bins {
         let (start, end) =
             bin_boundaries(bin_index, upstream_bins, bin_size, reference, record.strand);
-        let beyond_region = bin_beyond_region(record, start, end);
+        let beyond_region = bin_beyond_region(
+            record,
+            reference_point,
+            bin_index,
+            bin_size,
+            upstream_bins,
+            downstream_bins,
+        );
         bins.push(ReferenceBin {
             start,
             end,
@@ -329,13 +351,48 @@ fn bin_boundaries(
     }
 }
 
-fn bin_beyond_region(record: &BedRecord, bin_start: i64, bin_end: i64) -> bool {
-    let region_start = record.start as i64;
-    let region_end = record.end as i64;
+fn bin_beyond_region(
+    record: &BedRecord,
+    reference_point: ReferencePoint,
+    bin_index: usize,
+    bin_size: u32,
+    upstream_bins: usize,
+    downstream_bins: usize,
+) -> bool {
+    let region_len = i64::from(record.end).saturating_sub(i64::from(record.start));
+    let region_bins = available_bins(region_len, bin_size);
 
-    match record.strand {
-        Strand::Negative => bin_end <= region_start,
-        _ => bin_start >= region_end,
+    let (left_available, right_available) = match reference_point {
+        ReferencePoint::Tss => (upstream_bins, region_bins.min(downstream_bins)),
+        ReferencePoint::Tes => (region_bins.min(upstream_bins), downstream_bins),
+        ReferencePoint::Center => {
+            let left_len = region_len / 2;
+            let right_len = region_len - left_len;
+            match record.strand {
+                Strand::Negative => (
+                    available_bins(right_len, bin_size).min(upstream_bins),
+                    available_bins(left_len, bin_size).min(downstream_bins),
+                ),
+                _ => (
+                    available_bins(left_len, bin_size).min(upstream_bins),
+                    available_bins(right_len, bin_size).min(downstream_bins),
+                ),
+            }
+        }
+    };
+
+    if bin_index < upstream_bins {
+        bin_index < upstream_bins - left_available
+    } else {
+        bin_index - upstream_bins >= right_available
+    }
+}
+
+fn available_bins(length: i64, bin_size: u32) -> usize {
+    if length <= 0 {
+        0
+    } else {
+        (length as usize) / (bin_size as usize)
     }
 }
 
@@ -500,6 +557,10 @@ mod tests {
         }
     }
 
+    fn beyond_flags(plan: &ReferencePointPlan) -> Vec<bool> {
+        plan.bins.iter().map(|bin| bin.beyond_region).collect()
+    }
+
     #[test]
     fn reference_plan_positive_strand() {
         let record = build_record(Strand::Positive, 100, 200);
@@ -538,6 +599,50 @@ mod tests {
         assert_eq!(plan.bins[0].end, 220);
         assert_eq!(plan.bins[2].start, 190);
         assert_eq!(plan.bins[2].end, 200);
+    }
+
+    #[test]
+    fn reference_point_tss_nan_after_end_uses_body_bins() {
+        let record = build_record(Strand::Positive, 100, 150);
+        let plan = ReferencePointPlan::reference_point(
+            &record,
+            ReferencePoint::Tss,
+            10,
+            10,
+            10,
+            false,
+            true,
+        );
+
+        assert_eq!(
+            beyond_flags(&plan),
+            vec![
+                false, false, false, false, false, false, false, false, false, false, false, false,
+                false, false, false, true, true, true, true, true,
+            ]
+        );
+    }
+
+    #[test]
+    fn reference_point_tes_nan_after_end_uses_body_bins() {
+        let record = build_record(Strand::Positive, 100, 150);
+        let plan = ReferencePointPlan::reference_point(
+            &record,
+            ReferencePoint::Tes,
+            10,
+            10,
+            10,
+            false,
+            true,
+        );
+
+        assert_eq!(
+            beyond_flags(&plan),
+            vec![
+                true, true, true, true, true, false, false, false, false, false, false, false,
+                false, false, false, false, false, false, false, false,
+            ]
+        );
     }
 
     #[test]

@@ -441,6 +441,66 @@
       }
     },
     {
+      "id": "sweep_reference_point_nan_after_end_tss",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--nanAfterEnd"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_reference_point_nan_after_end_tss.mat"
+      }
+    },
+    {
+      "id": "sweep_reference_point_nan_after_end_tes",
+      "tags": [
+        "compat",
+        "sweep",
+        "artifact"
+      ],
+      "mode": "reference-point",
+      "region_files": [
+        "{heatmapper}/test2.bed"
+      ],
+      "score_files": [
+        "{heatmapper}/test.bw"
+      ],
+      "options": [
+        "-b",
+        "100",
+        "-a",
+        "100",
+        "--referencePoint",
+        "TES",
+        "--binSize",
+        "10",
+        "-p",
+        "1",
+        "--nanAfterEnd"
+      ],
+      "reference": {
+        "matrix": "{corner}/master_sweep_reference_point_nan_after_end_tes.mat"
+      }
+    },
+    {
       "id": "sweep_reference_point_samples_label",
       "tags": [
         "compat",
