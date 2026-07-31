@@ -19,9 +19,9 @@ fn main() -> anyhow::Result<()> {
 
 fn guard_multi_letter_short_flags() {
     for arg in env::args_os().skip(1) {
-        if arg == "-bs" || arg == "-bl" {
+        if arg == "-bs" || arg == "-bl" || arg == "-out" {
             eprintln!(
-                "Error: multi-letter short flags '-bs'/'-bl' are not supported; use --bs/--binSize and --bl/--blackListFileName instead."
+                "Error: multi-letter short flags '-bs'/'-bl'/'-out' are not supported; use --bs/--binSize, --bl/--blackListFileName and -o/--outFileName instead."
             );
             process::exit(2);
         }
