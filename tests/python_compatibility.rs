@@ -563,3 +563,49 @@ fn runtime_empty_group_preserved_with_zero_count() {
     assert!(!labels[0].as_str().unwrap().is_empty());
     assert!(!labels[1].as_str().unwrap().is_empty());
 }
+
+#[test]
+fn multi_letter_short_flags_fail_with_guidance() {
+    let manifest = load_manifest();
+    let regions = resolve_path(&manifest, "{test_data}/testA.bw");
+    let signal = resolve_path(&manifest, "{test_data}/testA.bw");
+    let output = NamedTempFile::new().unwrap();
+
+    for flag in ["-bs", "-bl", "-out"] {
+        let result = Command::new(compute_matrix_bin())
+            .args([
+                "reference-point",
+                "-R",
+                regions.to_str().unwrap(),
+                "-S",
+                signal.to_str().unwrap(),
+                "-b",
+                "20",
+                "-a",
+                "20",
+                "-p",
+                "1",
+                flag,
+                output.path().to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+
+        assert_eq!(
+            result.status.code(),
+            Some(2),
+            "{flag} should exit with code 2"
+        );
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(
+            stderr.contains("multi-letter short flags"),
+            "unexpected stderr for {flag}:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("--binSize")
+                || stderr.contains("--blackListFileName")
+                || stderr.contains("--outFileName"),
+            "stderr for {flag} should suggest the long flag:\n{stderr}"
+        );
+    }
+}
